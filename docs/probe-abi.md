@@ -24,6 +24,8 @@ The initial Python API is:
 retrace.instruction_counters(thread_id=None)
 retrace.set_thread_switch_callback(callback_or_none)
 retrace.get_thread_switch_callback()
+retrace.set_replay_checkpoint(thread_id, counters, callback)
+retrace.set_replay_checkpoint(None)
 ```
 
 It returns `retrace.U64Buffer`, an immutable tuple-like sequence backed by a
@@ -45,6 +47,14 @@ delivered after the acquiring thread has restored its current thread state, so
 the hook avoids running Python code inside the low-level GIL mutex handoff. The
 destination thread is therefore the current thread and can be read with
 `threading.get_ident()` or `_thread.get_ident()`.
+
+`set_replay_checkpoint(thread_id, counters, callback)` arms one replay control
+checkpoint for the current interpreter. `thread_id` uses the same Python
+identifier as `threading.get_ident()`, `counters` is the full visible frame
+counter tuple returned by `instruction_counters()`, and `callback` is called
+with no arguments when that thread reaches the exact coordinate. The callback
+runs on the thread that reached the checkpoint; `set_replay_checkpoint(None)`
+clears the armed checkpoint.
 
 Native Retrace extensions should eventually discover a native API through a
 capsule, for example:
@@ -85,6 +95,7 @@ runtime discovery plus feature/ABI checks.
 ```text
 RETRACE_PROBE_THREAD_SWITCH
 RETRACE_PROBE_INSTRUCTION_COUNTER
+RETRACE_PROBE_REPLAY_CHECKPOINT
 ```
 
 Retrace should support three modes:
@@ -143,3 +154,26 @@ thread_start
 thread_exit
 blocking_wait
 ```
+
+## Replay Checkpoint
+
+Replay scheduling can arm a logical execution point:
+
+```python
+retrace.set_replay_checkpoint(thread_id, counters, callback)
+```
+
+Only one checkpoint is armed per interpreter. The eval loop first checks a
+cheap armed flag, then the current thread id, then the current top-frame
+counter. It only compares the full visible frame counter tuple after those
+checks match.
+
+When the checkpoint is reached, CPython clears it before invoking
+`callback()`. The callback runs on the current thread at the application frame
+that reached the checkpoint. While the callback is active,
+`instruction_counters()` reports that interrupted application frame rather than
+the callback's own frames, so replay code can inspect the coordinate that was
+actually reached.
+
+Callback exceptions propagate back through the eval loop. Replay should treat
+that as a scheduler/control-plane failure rather than application behavior.

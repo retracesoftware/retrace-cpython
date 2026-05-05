@@ -3,6 +3,32 @@ import sys
 import threading
 
 
+def check_replay_checkpoint(module) -> None:
+    hits = []
+
+    def attempt(delta: int) -> None:
+        base = tuple(module.instruction_counters())
+        target = (base[0] + delta, *base[1:])
+
+        def callback():
+            hits.append((tuple(module.instruction_counters()), target))
+
+        module.set_replay_checkpoint(threading.get_ident(), target, callback)
+        value = 0
+        for index in range(1000):
+            value += index
+            value ^= index
+            value += 1
+        module.set_replay_checkpoint(None)
+
+    for delta in range(1, 400):
+        attempt(delta)
+        if hits:
+            break
+    assert hits
+    assert hits[0][0] == hits[0][1]
+
+
 def main() -> int:
     print(f"python={sys.version.split()[0]}")
     print(f"executable={sys.executable}")
@@ -27,6 +53,7 @@ def main() -> int:
         assert module.get_thread_switch_callback() is callback
         module.set_thread_switch_callback(None)
         assert module.get_thread_switch_callback() is None
+        check_replay_checkpoint(module)
 
         print("retrace_module=available")
         print(f"instruction_counters_type={type(counters).__name__}")
@@ -34,6 +61,7 @@ def main() -> int:
         print(f"instruction_counters_format={view.format}")
         print(f"instruction_counters_readonly={view.readonly}")
         print("thread_switch_callback=available")
+        print("replay_checkpoint=available")
     else:
         print("retrace_module=unavailable")
 
