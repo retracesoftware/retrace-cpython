@@ -1,7 +1,7 @@
 From 3c280860019125a2c655584c13c98bb06800c6bf Mon Sep 17 00:00:00 2001
 From: nathan-retrace <nathan@retracesoftware.com>
 Date: Tue, 5 May 2026 17:47:39 +0100
-Subject: [PATCH] Add retrace instruction counter module
+Subject: [PATCH 2/5] Add retrace instruction counter module
 
 ---
  Modules/Setup.bootstrap.in |   1 +
@@ -13,14 +13,10 @@ diff --git a/Modules/Setup.bootstrap.in b/Modules/Setup.bootstrap.in
 index 8ef0f20..5224b0f 100644
 --- a/Modules/Setup.bootstrap.in
 +++ b/Modules/Setup.bootstrap.in
-@@ -31,6 +31,7 @@ _locale _localemodule.c
- _operator _operator.c
- _stat _stat.c
+@@ -33,2 +33,3 @@ _stat _stat.c
  _symtable symtablemodule.c
 +retrace retracemodule.c
  
- # for systems without $HOME env, used by site._getuserbase()
- @MODULE_PWD_TRUE@pwd pwdmodule.c
 diff --git a/Modules/retracemodule.c b/Modules/retracemodule.c
 new file mode 100644
 index 0000000..4c8a49c

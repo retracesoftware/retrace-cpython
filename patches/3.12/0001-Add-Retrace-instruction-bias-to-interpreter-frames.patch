@@ -1,7 +1,7 @@
 From 06659c8a09d7e251b75d979652bdfe022df52fa9 Mon Sep 17 00:00:00 2001
 From: nathan-retrace <nathan@retracesoftware.com>
 Date: Tue, 5 May 2026 17:24:44 +0100
-Subject: [PATCH] Add Retrace instruction bias to interpreter frames
+Subject: [PATCH 1/5] Add Retrace instruction bias to interpreter frames
 
 ---
  Include/internal/pycore_frame.h | 21 +++++++++++++++++++++
@@ -13,25 +13,15 @@ diff --git a/Include/internal/pycore_frame.h b/Include/internal/pycore_frame.h
 index 4d355b2..fc97925 100644
 --- a/Include/internal/pycore_frame.h
 +++ b/Include/internal/pycore_frame.h
-@@ -6,6 +6,7 @@ extern "C" {
- 
- #include <stdbool.h>
+@@ -8,2 +8,3 @@ extern "C" {
  #include <stddef.h>
 +#include <stdint.h>
  #include "pycore_code.h"         // STATS
- 
- /* See Objects/frame_layout.md for an explanation of the frame stack
-@@ -70,6 +71,7 @@ typedef struct _PyInterpreterFrame {
-      * If there is no callee, then it is meaningless. */
-     uint16_t return_offset;
+@@ -72,2 +73,3 @@ typedef struct _PyInterpreterFrame {
      char owner;
 +    int64_t retrace_instr_bias;
      /* Locals and stack */
-     PyObject *localsplus[1];
- } _PyInterpreterFrame;
-@@ -77,6 +79,24 @@ typedef struct _PyInterpreterFrame {
- #define _PyInterpreterFrame_LASTI(IF) \
-     ((int)((IF)->prev_instr - _PyCode_CODE((IF)->f_code)))
+@@ -79,2 +81,20 @@ typedef struct _PyInterpreterFrame {
  
 +static inline int64_t
 +_PyFrame_RetraceInstructionCoordinate(_PyInterpreterFrame *frame)
@@ -52,35 +42,23 @@ index 4d355b2..fc97925 100644
 +}
 +
  static inline PyObject **_PyFrame_Stackbase(_PyInterpreterFrame *f) {
-     return f->localsplus + f->f_code->co_nlocalsplus;
- }
-@@ -130,6 +150,7 @@ _PyFrame_Initialize(
-     frame->prev_instr = _PyCode_CODE(code) - 1;
-     frame->return_offset = 0;
+@@ -132,2 +152,3 @@ _PyFrame_Initialize(
      frame->owner = FRAME_OWNED_BY_THREAD;
 +    frame->retrace_instr_bias = 0;
  
-     for (int i = null_locals_from; i < code->co_nlocalsplus; i++) {
-         frame->localsplus[i] = NULL;
 diff --git a/Python/ceval.c b/Python/ceval.c
 index 6110883..9385ba2 100644
 --- a/Python/ceval.c
 +++ b/Python/ceval.c
-@@ -699,6 +699,7 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *frame, int
-     entry_frame.stacktop = 0;
-     entry_frame.owner = FRAME_OWNED_BY_CSTACK;
+@@ -701,2 +701,3 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *frame, int
      entry_frame.return_offset = 0;
 +    entry_frame.retrace_instr_bias = 0;
      /* Push frame */
-     entry_frame.previous = prev_cframe->current_frame;
-     frame->previous = &entry_frame;
 diff --git a/Python/ceval_macros.h b/Python/ceval_macros.h
 index fccf908..7b440d6 100644
 --- a/Python/ceval_macros.h
 +++ b/Python/ceval_macros.h
-@@ -144,8 +144,18 @@ GETITEM(PyObject *v, Py_ssize_t i) {
-         opcode = word.op.code; \
-         oparg = word.op.arg; \
+@@ -146,4 +146,14 @@ GETITEM(PyObject *v, Py_ssize_t i) {
      } while (0)
 -#define JUMPTO(x)       (next_instr = _PyCode_CODE(frame->f_code) + (x))
 -#define JUMPBY(x)       (next_instr += (x))
@@ -97,19 +75,11 @@ index fccf908..7b440d6 100644
 +        next_instr = target; \
 +    } while (0)
  
- /* OpCode prediction macros
-     Some opcodes tend to come in pairs thus making it possible to
-@@ -334,6 +344,7 @@ do { \
- // for an exception handler, displaying the traceback, and so on
- #define INSTRUMENTED_JUMP(src, dest, event) \
+@@ -336,2 +346,3 @@ do { \
  do { \
 +    _Py_CODEUNIT *retrace_jump_src = (src); \
      _PyFrame_SetStackPointer(frame, stack_pointer); \
-     next_instr = _Py_call_instrumentation_jump(tstate, event, frame, src, dest); \
-     stack_pointer = _PyFrame_GetStackPointer(frame); \
-@@ -341,4 +352,5 @@ do { \
-         next_instr = (dest)+1; \
-         goto error; \
+@@ -343,2 +354,3 @@ do { \
      } \
 +    _PyFrame_RetraceInstructionJump(frame, retrace_jump_src, next_instr); \
  } while (0);

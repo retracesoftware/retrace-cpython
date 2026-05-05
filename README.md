@@ -54,4 +54,5 @@ go under `build/install/`, and release archives go under `build/dist/`.
 Patch directories may be keyed by exact release (`patches/3.12.8/`) or by minor
 series (`patches/3.12/`). `scripts/apply-patches` prefers the exact release
 directory when present, then falls back to the minor-series directory.
-
+If the selected directory has a `series.toml`, the manifest declares the
+supported version range and patch order.

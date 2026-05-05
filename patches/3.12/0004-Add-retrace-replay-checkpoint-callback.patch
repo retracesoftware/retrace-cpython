@@ -1,7 +1,7 @@
 From 60dc7b065970a9d42d0d76450f009c6c004f2cf0 Mon Sep 17 00:00:00 2001
 From: nathan-retrace <nathan@retracesoftware.com>
 Date: Tue, 5 May 2026 18:21:38 +0100
-Subject: [PATCH] Add retrace replay checkpoint callback
+Subject: [PATCH 4/5] Add retrace replay checkpoint callback
 
 ---
  Include/internal/pycore_interp.h  |   9 ++
@@ -16,9 +16,7 @@ diff --git a/Include/internal/pycore_interp.h b/Include/internal/pycore_interp.h
 index 7dfd53e..0f4345f 100644
 --- a/Include/internal/pycore_interp.h
 +++ b/Include/internal/pycore_interp.h
-@@ -233,6 +233,15 @@ struct _is {
-     PyThreadState *retrace_thread_switch_callback_tstate;
-     struct _PyInterpreterFrame *retrace_thread_switch_callback_frame;
+@@ -235,2 +235,11 @@ struct _is {
  
 +    int retrace_replay_checkpoint_armed;
 +    unsigned long retrace_replay_checkpoint_thread_id;
@@ -30,15 +28,11 @@ index 7dfd53e..0f4345f 100644
 +    struct _PyInterpreterFrame *retrace_replay_checkpoint_callback_frame;
 +
     /* the initial PyInterpreterState.threads.head */
-     PyThreadState _initial_thread;
- };
 diff --git a/Include/internal/pycore_retrace.h b/Include/internal/pycore_retrace.h
 index 0dff810..7c5b1a8 100644
 --- a/Include/internal/pycore_retrace.h
 +++ b/Include/internal/pycore_retrace.h
-@@ -8,10 +8,32 @@ extern "C" {
- #  error "this header requires Py_BUILD_CORE define"
- #endif
+@@ -10,2 +10,21 @@ extern "C" {
  
 +#include "pycore_frame.h"         // _PyFrame_RetraceInstructionCoordinate()
 +
@@ -60,22 +54,17 @@ index 0dff810..7c5b1a8 100644
 +}
 +
  PyAPI_FUNC(void) _PyRetrace_NoteThreadSwitch(
-     PyThreadState *from_tstate,
-     PyThreadState *to_tstate);
+@@ -14,2 +33,5 @@ PyAPI_FUNC(void) _PyRetrace_NoteThreadSwitch(
  PyAPI_FUNC(void) _PyRetrace_DeliverThreadSwitchCallback(PyThreadState *tstate);
 +PyAPI_FUNC(int) _PyRetrace_CheckReplayCheckpoint(
 +    PyThreadState *tstate,
 +    _PyInterpreterFrame *frame);
  
- #ifdef __cplusplus
- }
 diff --git a/Modules/retracemodule.c b/Modules/retracemodule.c
 index aa212f2..12061dc 100644
 --- a/Modules/retracemodule.c
 +++ b/Modules/retracemodule.c
-@@ -54,6 +54,35 @@ retrace_u64buffer_value(PyObject *value, uint64_t *out)
-     return 1;
- }
+@@ -56,2 +56,31 @@ retrace_u64buffer_value(PyObject *value, uint64_t *out)
  
 +static RetraceU64BufferObject *
 +retrace_u64buffer_from_sequence(PyObject *sequence)
@@ -107,19 +96,13 @@ index aa212f2..12061dc 100644
 +}
 +
  static int
- retrace_u64buffer_contains(RetraceU64BufferObject *self, PyObject *value)
- {
-@@ -313,18 +342,13 @@ static PyTypeObject RetraceU64Buffer_Type = {
- static int
- retrace_frame_is_visible(_PyInterpreterFrame *frame)
+@@ -315,4 +344,3 @@ retrace_frame_is_visible(_PyInterpreterFrame *frame)
  {
 -    return frame != NULL && frame->owner != FRAME_OWNED_BY_CSTACK &&
 -           !_PyFrame_IsIncomplete(frame);
 +    return _PyRetrace_FrameIsVisible(frame);
  }
- 
- static uint64_t
- retrace_frame_instruction_counter(_PyInterpreterFrame *frame)
+@@ -322,7 +350,3 @@ retrace_frame_instruction_counter(_PyInterpreterFrame *frame)
  {
 -    int64_t coordinate = _PyFrame_RetraceInstructionCoordinate(frame);
 -    if (coordinate < 0) {
@@ -128,11 +111,7 @@ index aa212f2..12061dc 100644
 -    return (uint64_t)coordinate;
 +    return _PyRetrace_FrameInstructionCounter(frame);
  }
- 
- static _PyInterpreterFrame *
-@@ -338,6 +362,12 @@ retrace_thread_state_frame(PyThreadState *current_tstate,
-     {
-         return interp->retrace_thread_switch_callback_frame;
+@@ -340,2 +364,8 @@ retrace_thread_state_frame(PyThreadState *current_tstate,
      }
 +    if (interp->retrace_replay_checkpoint_callback_active &&
 +        target_tstate == interp->retrace_replay_checkpoint_callback_tstate &&
@@ -141,11 +120,7 @@ index aa212f2..12061dc 100644
 +        return interp->retrace_replay_checkpoint_callback_frame;
 +    }
      if (target_tstate->cframe == NULL) {
-         return NULL;
-     }
-@@ -379,6 +409,43 @@ retrace_fill_instruction_counters(RetraceU64BufferObject *buffer,
-     }
- }
+@@ -381,2 +411,39 @@ retrace_fill_instruction_counters(RetraceU64BufferObject *buffer,
  
 +static void
 +retrace_clear_replay_checkpoint(PyInterpreterState *interp)
@@ -185,11 +160,7 @@ index aa212f2..12061dc 100644
 +}
 +
  PyDoc_STRVAR(retrace_instruction_counters_doc,
- "instruction_counters($module, thread_id=None, /)\n"
- "--\n"
-@@ -482,6 +549,67 @@ retrace_get_thread_switch_callback(PyObject *module, PyObject *Py_UNUSED(ignored
-     return Py_NewRef(callback);
- }
+@@ -484,2 +551,63 @@ retrace_get_thread_switch_callback(PyObject *module, PyObject *Py_UNUSED(ignored
  
 +PyDoc_STRVAR(retrace_set_replay_checkpoint_doc,
 +"set_replay_checkpoint($module, thread_id, counters, callback, /)\n"
@@ -253,11 +224,7 @@ index aa212f2..12061dc 100644
 +}
 +
  void
- _PyRetrace_NoteThreadSwitch(PyThreadState *from_tstate,
-                             PyThreadState *to_tstate)
-@@ -551,6 +679,56 @@ _PyRetrace_DeliverThreadSwitchCallback(PyThreadState *tstate)
-     PyErr_SetRaisedException(saved_exc);
- }
+@@ -553,2 +681,52 @@ _PyRetrace_DeliverThreadSwitchCallback(PyThreadState *tstate)
  
 +int
 +_PyRetrace_CheckReplayCheckpoint(PyThreadState *tstate,
@@ -310,36 +277,24 @@ index aa212f2..12061dc 100644
 +}
 +
  
- static PyMethodDef retrace_methods[] = {
-     {"instruction_counters", retrace_instruction_counters, METH_VARARGS,
-@@ -559,6 +737,8 @@ static PyMethodDef retrace_methods[] = {
-      retrace_set_thread_switch_callback_doc},
-     {"get_thread_switch_callback", retrace_get_thread_switch_callback,
+@@ -561,2 +739,4 @@ static PyMethodDef retrace_methods[] = {
       METH_NOARGS, retrace_get_thread_switch_callback_doc},
 +    {"set_replay_checkpoint", retrace_set_replay_checkpoint, METH_VARARGS,
 +     retrace_set_replay_checkpoint_doc},
      {NULL, NULL, 0, NULL},
- };
- 
 diff --git a/Python/ceval.c b/Python/ceval.c
 index 9385ba2..e1c9a42 100644
 --- a/Python/ceval.c
 +++ b/Python/ceval.c
-@@ -18,6 +18,7 @@
- #include "pycore_pymem.h"         // _PyMem_IsPtrFreed()
- #include "pycore_pystate.h"       // _PyInterpreterState_GET()
+@@ -20,2 +20,3 @@
  #include "pycore_range.h"         // _PyRangeIterObject
 +#include "pycore_retrace.h"       // _PyRetrace_CheckReplayCheckpoint()
  #include "pycore_sliceobject.h"   // _PyBuildSlice_ConsumeRefs
- #include "pycore_sysmodule.h"     // _PySys_Audit()
- #include "pycore_tuple.h"         // _PyTuple_ITEMS()
 diff --git a/Python/ceval_macros.h b/Python/ceval_macros.h
 index 7b440d6..ffb7f95 100644
 --- a/Python/ceval_macros.h
 +++ b/Python/ceval_macros.h
-@@ -59,6 +59,24 @@
-     #define USE_COMPUTED_GOTOS 0
- #endif
+@@ -61,2 +61,20 @@
  
 +#define RETRACE_REPLAY_CHECKPOINT() \
 +    do { \
@@ -360,11 +315,7 @@ index 7b440d6..ffb7f95 100644
 +    } while (0)
 +
  #ifdef Py_STATS
- #define INSTRUCTION_START(op) \
-     do { \
-@@ -66,9 +84,14 @@
-         OPCODE_EXE_INC(op); \
-         if (_py_stats) _py_stats->opcode_stats[lastopcode].pair_count[op]++; \
+@@ -68,5 +86,10 @@
          lastopcode = op; \
 +        RETRACE_REPLAY_CHECKPOINT(); \
      } while (0)
@@ -376,15 +327,11 @@ index 7b440d6..ffb7f95 100644
 +        RETRACE_REPLAY_CHECKPOINT(); \
 +    } while (0)
  #endif
- 
- #if USE_COMPUTED_GOTOS
 diff --git a/Python/pystate.c b/Python/pystate.c
 index 2118eea..843fe60 100644
 --- a/Python/pystate.c
 +++ b/Python/pystate.c
-@@ -855,6 +855,12 @@ interpreter_clear(PyInterpreterState *interp, PyThreadState *tstate)
-     interp->retrace_thread_switch_callback_active = 0;
-     interp->retrace_thread_switch_callback_tstate = NULL;
+@@ -857,2 +857,8 @@ interpreter_clear(PyInterpreterState *interp, PyThreadState *tstate)
      interp->retrace_thread_switch_callback_frame = NULL;
 +    interp->retrace_replay_checkpoint_armed = 0;
 +    Py_CLEAR(interp->retrace_replay_checkpoint_counters);
@@ -393,8 +340,6 @@ index 2118eea..843fe60 100644
 +    interp->retrace_replay_checkpoint_callback_tstate = NULL;
 +    interp->retrace_replay_checkpoint_callback_frame = NULL;
  
-     for (int i = 0; i < _PY_MONITORING_UNGROUPED_EVENTS; i++) {
-         interp->monitors.tools[i] = 0;
 -- 
 2.50.1 (Apple Git-155)
 

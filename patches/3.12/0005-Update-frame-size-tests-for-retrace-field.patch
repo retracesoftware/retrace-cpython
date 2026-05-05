@@ -1,7 +1,7 @@
 From d8e774e083dc7f1b93bfb1c8d24d82e0ca011044 Mon Sep 17 00:00:00 2001
 From: nathan-retrace <nathan@retracesoftware.com>
 Date: Tue, 5 May 2026 20:49:25 +0100
-Subject: [PATCH] Update frame size tests for retrace field
+Subject: [PATCH 5/5] Update frame size tests for retrace field
 
 ---
  Lib/test/test_sys.py | 4 ++--
@@ -11,24 +11,16 @@ diff --git a/Lib/test/test_sys.py b/Lib/test/test_sys.py
 index 2f06299..5962572 100644
 --- a/Lib/test/test_sys.py
 +++ b/Lib/test/test_sys.py
-@@ -1522,7 +1522,7 @@ class C(object): pass
-         def func():
-             return sys._getframe()
+@@ -1524,3 +1524,3 @@ def func():
          x = func()
 -        check(x, size('3Pi3c7P2ic??2P'))
 +        check(x, size('3Pi3c7P2ic??q2P'))
          # function
-         def func(): pass
-         check(func, size('15Pi'))
-@@ -1539,7 +1539,7 @@ def bar(cls):
-             check(bar, size('PP'))
-         # generator
+@@ -1541,3 +1541,3 @@ def bar(cls):
          def get_gen(): yield 1
 -        check(get_gen(), size('PP4P4c7P2ic??2P'))
 +        check(get_gen(), size('PP4P4c7P2ic??q2P'))
          # iterator
-         check(iter('abc'), size('lP'))
-         # callable-iterator
 -- 
 2.50.1 (Apple Git-155)
 

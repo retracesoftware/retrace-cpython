@@ -10,6 +10,7 @@ stack. VERSION should normally be an exact CPython release such as 3.12.8.
 
 Environment:
   CPYTHON_REPO_URL  source remote, default https://github.com/python/cpython.git
+  PYTHON            Python used to read patch manifests, default python3
 EOF
 }
 
@@ -28,6 +29,7 @@ tag="v${version}"
 dest="${2:-build/src/cpython-${version}+retrace}"
 repo_url="${CPYTHON_REPO_URL:-https://github.com/python/cpython.git}"
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+python_bin="${PYTHON:-python3}"
 
 IFS=. read -r major minor _patch <<<"${version}"
 if [[ -z "${major:-}" || -z "${minor:-}" ]]; then
@@ -48,6 +50,88 @@ else
   exit 1
 fi
 
+manifest="${patch_dir}/series.toml"
+
+if [[ -f "${manifest}" ]]; then
+  patch_list="$("${python_bin}" - "${manifest}" "${version}" "${patch_dir}" <<'PY'
+import operator
+import pathlib
+import re
+import sys
+import tomllib
+
+manifest = pathlib.Path(sys.argv[1])
+version = sys.argv[2]
+patch_dir = pathlib.Path(sys.argv[3])
+
+data = tomllib.loads(manifest.read_text())
+
+def parse_version(value):
+    value = value.removeprefix("v")
+    parts = value.split(".")
+    if not parts or len(parts) > 3:
+        raise ValueError(f"unsupported version: {value!r}")
+    parsed = []
+    for part in parts:
+        if not part.isdigit():
+            raise ValueError(f"unsupported version: {value!r}")
+        parsed.append(int(part))
+    return tuple(parsed + [0] * (3 - len(parsed)))
+
+ops = {
+    "<": operator.lt,
+    "<=": operator.le,
+    "==": operator.eq,
+    ">=": operator.ge,
+    ">": operator.gt,
+}
+
+spec = data.get("python")
+if spec:
+    try:
+        requested = parse_version(version)
+    except ValueError as exc:
+        raise SystemExit(f"{manifest}: {exc}") from exc
+    for clause in (part.strip() for part in spec.split(",")):
+        if not clause:
+            continue
+        match = re.fullmatch(r"(<=|>=|==|<|>)([0-9]+(?:\.[0-9]+){0,2})", clause)
+        if match is None:
+            raise SystemExit(f"{manifest}: unsupported python range clause {clause!r}")
+        op, bound = match.groups()
+        try:
+            parsed_bound = parse_version(bound)
+        except ValueError as exc:
+            raise SystemExit(f"{manifest}: {exc}") from exc
+        if not ops[op](requested, parsed_bound):
+            raise SystemExit(
+                f"{manifest}: CPython {version} is outside supported range {spec!r}"
+            )
+
+patches = data.get("patches")
+if not isinstance(patches, list):
+    raise SystemExit(f"{manifest}: patches must be a list")
+
+for patch in patches:
+    if not isinstance(patch, str):
+        raise SystemExit(f"{manifest}: patch entries must be strings")
+    path = patch_dir / patch
+    if not path.is_file():
+        raise SystemExit(f"{manifest}: listed patch does not exist: {patch}")
+    print(path)
+PY
+  )"
+  patches=()
+  if [[ -n "${patch_list}" ]]; then
+    while IFS= read -r patch; do
+      patches+=("${patch}")
+    done <<<"${patch_list}"
+  fi
+else
+  shopt -s nullglob
+  patches=("${patch_dir}"/*.patch)
+fi
+
 mkdir -p "$(dirname "${dest}")"
 
 if [[ -d "${dest}/.git" ]]; then
@@ -64,9 +148,6 @@ else
   git -C "${dest}" checkout -B "retrace-${version}" "${tag}"
 fi
 
-shopt -s nullglob
-patches=("${patch_dir}"/*.patch)
-
 if (( ${#patches[@]} == 0 )); then
   echo "No patches found in ${patch_dir}; checkout remains vanilla ${tag}."
 else
@@ -76,4 +157,6 @@ fi
 echo "Prepared ${dest}"
 echo "CPython tag: ${tag}"
 echo "Patch dir: ${patch_dir}"
-
+if [[ -f "${manifest}" ]]; then
+  echo "Patch manifest: ${manifest}"
+fi

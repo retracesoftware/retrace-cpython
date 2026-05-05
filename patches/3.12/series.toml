@@ -1,0 +1,31 @@
+python = ">=3.12.0,<3.13.0"
+probe_abi = "retrace_probe_abi_1"
+
+verified_applies = [
+  "3.12.0",
+  "3.12.1",
+  "3.12.2",
+  "3.12.3",
+  "3.12.4",
+  "3.12.5",
+  "3.12.6",
+  "3.12.7",
+  "3.12.8",
+  "3.12.9",
+  "3.12.10",
+  "3.12.11",
+  "3.12.12",
+  "3.12.13",
+]
+
+verified_regression_tests = [
+  "3.12.8",
+]
+
+patches = [
+  "0001-Add-Retrace-instruction-bias-to-interpreter-frames.patch",
+  "0002-Add-retrace-instruction-counter-module.patch",
+  "0003-Add-retrace-thread-switch-callback.patch",
+  "0004-Add-retrace-replay-checkpoint-callback.patch",
+  "0005-Update-frame-size-tests-for-retrace-field.patch",
+]
