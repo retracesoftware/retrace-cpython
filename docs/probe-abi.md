@@ -21,13 +21,28 @@ probe for `retrace` with `importlib.util.find_spec()` and treat absence as
 The initial Python API is:
 
 ```python
-retrace.instruction_counters()
+retrace.instruction_counters(thread_id=None)
+retrace.set_thread_switch_callback(callback_or_none)
+retrace.get_thread_switch_callback()
 ```
 
 It returns `retrace.U64Buffer`, an immutable tuple-like sequence backed by a
 read-only `uint64_t` buffer (`memoryview(...).format == "Q"`). The values are
-the current thread's visible Python frame instruction counters, current frame
-first.
+the requested thread's visible Python frame instruction counters, current frame
+first. If `thread_id` is omitted, the current thread is used. When present,
+`thread_id` is the Python thread identifier exposed by `threading.get_ident()`;
+unknown thread ids raise `LookupError`.
+
+`set_thread_switch_callback()` installs a Python callback for telemetry. The
+callback signature is:
+
+```python
+callback(from_thread_id, to_thread_id)
+```
+
+The GIL handoff path only records the pending switch. The Python callback is
+delivered after the acquiring thread has restored its current thread state, so
+the hook avoids running Python code inside the low-level GIL mutex handoff.
 
 Native Retrace extensions should eventually discover a native API through a
 capsule, for example:
@@ -98,15 +113,22 @@ Avoid per-instruction Python callbacks, atomics, allocation, or lock traffic.
 
 ## Thread-Switch Callback
 
-The first record-side callback is telemetry:
+The first record-side callback is telemetry. The Python API reports:
+
+```text
+from thread, to thread
+```
+
+The callback is reentrancy-guarded and errors are reported through
+`PyErr_WriteUnraisable()`. It should remain small and must not route
+control-plane I/O through Retrace gates.
+
+A later native capsule API can add richer data:
 
 ```text
 from thread, to thread, from instruction coordinate, to instruction coordinate,
 reason
 ```
-
-The callback must be native-only and reentrancy-safe. It should not execute
-Python code, import modules, or route control-plane I/O through Retrace gates.
 
 Possible reasons can start coarse:
 

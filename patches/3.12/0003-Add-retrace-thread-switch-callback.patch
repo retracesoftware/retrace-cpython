@@ -1,0 +1,430 @@
+From 184a3864798cc368f7cac58ee2c2d1c70b2a82b3 Mon Sep 17 00:00:00 2001
+From: nathan-retrace <nathan@retracesoftware.com>
+Date: Tue, 5 May 2026 18:01:48 +0100
+Subject: [PATCH] Add retrace thread switch callback
+
+---
+ Include/cpython/pystate.h         |   4 +
+ Include/internal/pycore_interp.h  |   5 +
+ Include/internal/pycore_retrace.h |  19 +++
+ Modules/retracemodule.c           | 231 +++++++++++++++++++++++++++---
+ Python/ceval_gil.c                |  12 +-
+ Python/pystate.c                  |   4 +
+ 6 files changed, 257 insertions(+), 18 deletions(-)
+ create mode 100644 Include/internal/pycore_retrace.h
+
+diff --git a/Include/cpython/pystate.h b/Include/cpython/pystate.h
+index 95fad89..3553c88 100644
+--- a/Include/cpython/pystate.h
++++ b/Include/cpython/pystate.h
+@@ -246,6 +246,10 @@ struct _ts {
+ 
+     /* The bottom-most frame on the stack. */
+     _PyCFrame root_cframe;
++
++    int retrace_thread_switch_pending;
++    unsigned long retrace_thread_switch_from_id;
++    struct _PyInterpreterFrame *retrace_thread_switch_frame;
+ };
+ 
+ /* WASI has limited call stack. Python's recursion limit depends on code
+diff --git a/Include/internal/pycore_interp.h b/Include/internal/pycore_interp.h
+index 37cc88e..7dfd53e 100644
+--- a/Include/internal/pycore_interp.h
++++ b/Include/internal/pycore_interp.h
+@@ -228,6 +228,11 @@ struct _is {
+        We use _Py_atomic_address instead of adding a new _Py_atomic_ulong. */
+     _Py_atomic_address _finalizing_id;
+ 
++    PyObject *retrace_thread_switch_callback;
++    int retrace_thread_switch_callback_active;
++    PyThreadState *retrace_thread_switch_callback_tstate;
++    struct _PyInterpreterFrame *retrace_thread_switch_callback_frame;
++
+    /* the initial PyInterpreterState.threads.head */
+     PyThreadState _initial_thread;
+ };
+diff --git a/Include/internal/pycore_retrace.h b/Include/internal/pycore_retrace.h
+new file mode 100644
+index 0000000..0dff810
+--- /dev/null
++++ b/Include/internal/pycore_retrace.h
+@@ -0,0 +1,19 @@
++#ifndef Py_INTERNAL_RETRACE_H
++#define Py_INTERNAL_RETRACE_H
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#ifndef Py_BUILD_CORE
++#  error "this header requires Py_BUILD_CORE define"
++#endif
++
++PyAPI_FUNC(void) _PyRetrace_NoteThreadSwitch(
++    PyThreadState *from_tstate,
++    PyThreadState *to_tstate);
++PyAPI_FUNC(void) _PyRetrace_DeliverThreadSwitchCallback(PyThreadState *tstate);
++
++#ifdef __cplusplus
++}
++#endif
++#endif /* !Py_INTERNAL_RETRACE_H */
+diff --git a/Modules/retracemodule.c b/Modules/retracemodule.c
+index 4c8a49c..57b7c7f 100644
+--- a/Modules/retracemodule.c
++++ b/Modules/retracemodule.c
+@@ -2,6 +2,7 @@
+ 
+ #include "internal/pycore_frame.h"
+ #include "internal/pycore_pystate.h"
++#include "internal/pycore_retrace.h"
+ 
+ #include <stddef.h>
+ #include <stdint.h>
+@@ -326,43 +327,241 @@ retrace_frame_instruction_counter(_PyInterpreterFrame *frame)
+     return (uint64_t)coordinate;
+ }
+ 
+-PyDoc_STRVAR(retrace_instruction_counters_doc,
+-"instruction_counters($module, /)\n"
+-"--\n"
+-"\n"
+-"Return this thread's visible Python frame instruction counters.");
++static _PyInterpreterFrame *
++retrace_thread_state_frame(PyThreadState *current_tstate,
++                           PyThreadState *target_tstate)
++{
++    PyInterpreterState *interp = current_tstate->interp;
++    if (interp->retrace_thread_switch_callback_active &&
++        target_tstate == interp->retrace_thread_switch_callback_tstate &&
++        interp->retrace_thread_switch_callback_frame != NULL)
++    {
++        return interp->retrace_thread_switch_callback_frame;
++    }
++    if (target_tstate->cframe == NULL) {
++        return NULL;
++    }
++    return target_tstate->cframe->current_frame;
++}
+ 
+-static PyObject *
+-retrace_instruction_counters(PyObject *module, PyObject *Py_UNUSED(ignored))
++static PyThreadState *
++retrace_find_thread_state(PyInterpreterState *interp, unsigned long thread_id)
+ {
+-    PyThreadState *tstate = _PyThreadState_GET();
+-    _PyInterpreterFrame *frame = tstate->cframe->current_frame;
+-    Py_ssize_t size = 0;
++    for (PyThreadState *scan = interp->threads.head; scan != NULL; scan = scan->next) {
++        if (scan->thread_id == thread_id) {
++            return scan;
++        }
++    }
++    return NULL;
++}
+ 
++static Py_ssize_t
++retrace_visible_frame_count(_PyInterpreterFrame *frame)
++{
++    Py_ssize_t size = 0;
+     for (_PyInterpreterFrame *scan = frame; scan != NULL; scan = scan->previous) {
+         if (retrace_frame_is_visible(scan)) {
+             size++;
+         }
+     }
++    return size;
++}
+ 
+-    RetraceU64BufferObject *buffer = retrace_u64buffer_new(size);
+-    if (buffer == NULL) {
+-        return NULL;
+-    }
+-
++static void
++retrace_fill_instruction_counters(RetraceU64BufferObject *buffer,
++                                  _PyInterpreterFrame *frame)
++{
+     Py_ssize_t index = 0;
+     for (_PyInterpreterFrame *scan = frame; scan != NULL; scan = scan->previous) {
+         if (retrace_frame_is_visible(scan)) {
+             buffer->ob_item[index++] = retrace_frame_instruction_counter(scan);
+         }
+     }
++}
++
++PyDoc_STRVAR(retrace_instruction_counters_doc,
++"instruction_counters($module, thread_id=None, /)\n"
++"--\n"
++"\n"
++"Return a thread's visible Python frame instruction counters.");
++
++static PyObject *
++retrace_instruction_counters(PyObject *module, PyObject *args)
++{
++    PyThreadState *current_tstate = _PyThreadState_GET();
++    unsigned long thread_id = current_tstate->thread_id;
++
++    if (!PyArg_ParseTuple(args, "|k:instruction_counters", &thread_id)) {
++        return NULL;
++    }
++
++    _PyRuntimeState *runtime = &_PyRuntime;
++    PyInterpreterState *interp = current_tstate->interp;
++    RetraceU64BufferObject *buffer = NULL;
++
++    HEAD_LOCK(runtime);
++    PyThreadState *target_tstate = retrace_find_thread_state(interp, thread_id);
++    if (target_tstate == NULL) {
++        HEAD_UNLOCK(runtime);
++        PyErr_Format(PyExc_LookupError, "unknown thread id: %lu", thread_id);
++        return NULL;
++    }
++    _PyInterpreterFrame *frame =
++        retrace_thread_state_frame(current_tstate, target_tstate);
++    Py_ssize_t size = retrace_visible_frame_count(frame);
++    HEAD_UNLOCK(runtime);
++
++    buffer = retrace_u64buffer_new(size);
++    if (buffer == NULL) {
++        return NULL;
++    }
++
++    HEAD_LOCK(runtime);
++    target_tstate = retrace_find_thread_state(interp, thread_id);
++    if (target_tstate == NULL) {
++        HEAD_UNLOCK(runtime);
++        Py_DECREF(buffer);
++        PyErr_Format(PyExc_LookupError, "unknown thread id: %lu", thread_id);
++        return NULL;
++    }
++    frame = retrace_thread_state_frame(current_tstate, target_tstate);
++    if (retrace_visible_frame_count(frame) != size) {
++        HEAD_UNLOCK(runtime);
++        Py_DECREF(buffer);
++        PyErr_SetString(PyExc_RuntimeError, "thread frame stack changed");
++        return NULL;
++    }
++    retrace_fill_instruction_counters(buffer, frame);
++    HEAD_UNLOCK(runtime);
+ 
+     return (PyObject *)buffer;
+ }
+ 
++PyDoc_STRVAR(retrace_set_thread_switch_callback_doc,
++"set_thread_switch_callback($module, callback, /)\n"
++"--\n"
++"\n"
++"Set a Python callback invoked as callback(from_thread_id, to_thread_id).");
++
++static PyObject *
++retrace_set_thread_switch_callback(PyObject *module, PyObject *callback)
++{
++    PyThreadState *tstate = _PyThreadState_GET();
++    PyInterpreterState *interp = tstate->interp;
++
++    if (callback == Py_None) {
++        callback = NULL;
++    }
++    else if (!PyCallable_Check(callback)) {
++        PyErr_SetString(PyExc_TypeError,
++                        "thread switch callback must be callable or None");
++        return NULL;
++    }
++
++    PyObject *old_callback = interp->retrace_thread_switch_callback;
++    interp->retrace_thread_switch_callback = Py_XNewRef(callback);
++    Py_XDECREF(old_callback);
++
++    Py_RETURN_NONE;
++}
++
++PyDoc_STRVAR(retrace_get_thread_switch_callback_doc,
++"get_thread_switch_callback($module, /)\n"
++"--\n"
++"\n"
++"Return the active thread switch callback, or None.");
++
++static PyObject *
++retrace_get_thread_switch_callback(PyObject *module, PyObject *Py_UNUSED(ignored))
++{
++    PyThreadState *tstate = _PyThreadState_GET();
++    PyObject *callback = tstate->interp->retrace_thread_switch_callback;
++    if (callback == NULL) {
++        Py_RETURN_NONE;
++    }
++    return Py_NewRef(callback);
++}
++
++void
++_PyRetrace_NoteThreadSwitch(PyThreadState *from_tstate,
++                            PyThreadState *to_tstate)
++{
++    if (to_tstate == NULL) {
++        return;
++    }
++
++    PyInterpreterState *interp = to_tstate->interp;
++    if (interp->retrace_thread_switch_callback == NULL ||
++        interp->retrace_thread_switch_callback_active)
++    {
++        return;
++    }
++
++    to_tstate->retrace_thread_switch_pending = 1;
++    to_tstate->retrace_thread_switch_from_id =
++        from_tstate != NULL ? from_tstate->thread_id : 0;
++    to_tstate->retrace_thread_switch_frame =
++        to_tstate->cframe != NULL ? to_tstate->cframe->current_frame : NULL;
++}
++
++void
++_PyRetrace_DeliverThreadSwitchCallback(PyThreadState *tstate)
++{
++    if (tstate == NULL || !tstate->retrace_thread_switch_pending) {
++        return;
++    }
++
++    PyInterpreterState *interp = tstate->interp;
++    unsigned long from_thread_id = tstate->retrace_thread_switch_from_id;
++    unsigned long to_thread_id = tstate->thread_id;
++    _PyInterpreterFrame *frame = tstate->retrace_thread_switch_frame;
++    tstate->retrace_thread_switch_pending = 0;
++    tstate->retrace_thread_switch_frame = NULL;
++
++    PyObject *callback = interp->retrace_thread_switch_callback;
++    if (callback == NULL || interp->retrace_thread_switch_callback_active) {
++        return;
++    }
++
++    callback = Py_NewRef(callback);
++    PyObject *saved_exc = PyErr_GetRaisedException();
++
++    interp->retrace_thread_switch_callback_active = 1;
++    interp->retrace_thread_switch_callback_tstate = tstate;
++    interp->retrace_thread_switch_callback_frame = frame;
++
++    PyObject *from_arg = PyLong_FromUnsignedLong(from_thread_id);
++    PyObject *to_arg = PyLong_FromUnsignedLong(to_thread_id);
++    PyObject *result = NULL;
++    if (from_arg != NULL && to_arg != NULL) {
++        result = PyObject_CallFunctionObjArgs(callback, from_arg, to_arg, NULL);
++    }
++
++    Py_XDECREF(from_arg);
++    Py_XDECREF(to_arg);
++    if (result == NULL) {
++        PyErr_WriteUnraisable(callback);
++    }
++    else {
++        Py_DECREF(result);
++    }
++
++    interp->retrace_thread_switch_callback_frame = NULL;
++    interp->retrace_thread_switch_callback_tstate = NULL;
++    interp->retrace_thread_switch_callback_active = 0;
++
++    Py_DECREF(callback);
++    PyErr_SetRaisedException(saved_exc);
++}
++
++
+ static PyMethodDef retrace_methods[] = {
+-    {"instruction_counters", retrace_instruction_counters, METH_NOARGS,
++    {"instruction_counters", retrace_instruction_counters, METH_VARARGS,
+      retrace_instruction_counters_doc},
++    {"set_thread_switch_callback", retrace_set_thread_switch_callback, METH_O,
++     retrace_set_thread_switch_callback_doc},
++    {"get_thread_switch_callback", retrace_get_thread_switch_callback,
++     METH_NOARGS, retrace_get_thread_switch_callback_doc},
+     {NULL, NULL, 0, NULL},
+ };
+ 
+diff --git a/Python/ceval_gil.c b/Python/ceval_gil.c
+index c1ab588..345fad2 100644
+--- a/Python/ceval_gil.c
++++ b/Python/ceval_gil.c
+@@ -7,6 +7,7 @@
+ #include "pycore_initconfig.h"    // _PyStatus_OK()
+ #include "pycore_interp.h"        // _Py_RunGC()
+ #include "pycore_pymem.h"         // _PyMem_IsPtrFreed()
++#include "pycore_retrace.h"       // _PyRetrace_NoteThreadSwitch()
+ 
+ /*
+    Notes about the implementation:
+@@ -411,9 +412,12 @@ take_gil(PyThreadState *tstate)
+     _Py_atomic_store_relaxed(&gil->locked, 1);
+     _Py_ANNOTATE_RWLOCK_ACQUIRED(&gil->locked, /*is_write=*/1);
+ 
+-    if (tstate != (PyThreadState*)_Py_atomic_load_relaxed(&gil->last_holder)) {
++    PyThreadState *previous_holder =
++        (PyThreadState*)_Py_atomic_load_relaxed(&gil->last_holder);
++    if (tstate != previous_holder) {
+         _Py_atomic_store_relaxed(&gil->last_holder, (uintptr_t)tstate);
+         ++gil->switch_number;
++        _PyRetrace_NoteThreadSwitch(previous_holder, tstate);
+     }
+ 
+ #ifdef FORCE_SWITCHING
+@@ -596,6 +600,7 @@ PyEval_AcquireLock(void)
+     _Py_EnsureTstateNotNULL(tstate);
+ 
+     take_gil(tstate);
++    _PyRetrace_DeliverThreadSwitchCallback(tstate);
+ }
+ 
+ void
+@@ -614,6 +619,7 @@ _PyEval_AcquireLock(PyThreadState *tstate)
+ {
+     _Py_EnsureTstateNotNULL(tstate);
+     take_gil(tstate);
++    _PyRetrace_DeliverThreadSwitchCallback(tstate);
+ }
+ 
+ void
+@@ -636,6 +642,7 @@ PyEval_AcquireThread(PyThreadState *tstate)
+     if (_PyThreadState_SwapNoGIL(tstate) != NULL) {
+         Py_FatalError("non-NULL old thread state");
+     }
++    _PyRetrace_DeliverThreadSwitchCallback(tstate);
+ }
+ 
+ void
+@@ -708,6 +715,7 @@ PyEval_RestoreThread(PyThreadState *tstate)
+     take_gil(tstate);
+ 
+     _PyThreadState_SwapNoGIL(tstate);
++    _PyRetrace_DeliverThreadSwitchCallback(tstate);
+ }
+ 
+ 
+@@ -1060,6 +1068,7 @@ _Py_HandlePending(PyThreadState *tstate)
+         if (_PyThreadState_SwapNoGIL(tstate) != NULL) {
+             Py_FatalError("orphan tstate");
+         }
++        _PyRetrace_DeliverThreadSwitchCallback(tstate);
+     }
+ 
+     /* Check for asynchronous exception. */
+@@ -1086,4 +1095,3 @@ _Py_HandlePending(PyThreadState *tstate)
+ 
+     return 0;
+ }
+-
+diff --git a/Python/pystate.c b/Python/pystate.c
+index 6aed9ac..2118eea 100644
+--- a/Python/pystate.c
++++ b/Python/pystate.c
+@@ -851,6 +851,10 @@ interpreter_clear(PyInterpreterState *interp, PyThreadState *tstate)
+     // XXX Make sure we properly deal with problematic finalizers.
+ 
+     Py_CLEAR(interp->audit_hooks);
++    Py_CLEAR(interp->retrace_thread_switch_callback);
++    interp->retrace_thread_switch_callback_active = 0;
++    interp->retrace_thread_switch_callback_tstate = NULL;
++    interp->retrace_thread_switch_callback_frame = NULL;
+ 
+     for (int i = 0; i < _PY_MONITORING_UNGROUPED_EVENTS; i++) {
+         interp->monitors.tools[i] = 0;
+-- 
+2.50.1 (Apple Git-155)
+
