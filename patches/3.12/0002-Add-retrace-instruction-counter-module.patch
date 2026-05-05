@@ -1,0 +1,429 @@
+From 3c280860019125a2c655584c13c98bb06800c6bf Mon Sep 17 00:00:00 2001
+From: nathan-retrace <nathan@retracesoftware.com>
+Date: Tue, 5 May 2026 17:47:39 +0100
+Subject: [PATCH] Add retrace instruction counter module
+
+---
+ Modules/Setup.bootstrap.in |   1 +
+ Modules/retracemodule.c    | 397 +++++++++++++++++++++++++++++++++++++
+ 2 files changed, 398 insertions(+)
+ create mode 100644 Modules/retracemodule.c
+
+diff --git a/Modules/Setup.bootstrap.in b/Modules/Setup.bootstrap.in
+index 8ef0f20..5224b0f 100644
+--- a/Modules/Setup.bootstrap.in
++++ b/Modules/Setup.bootstrap.in
+@@ -31,6 +31,7 @@ _locale _localemodule.c
+ _operator _operator.c
+ _stat _stat.c
+ _symtable symtablemodule.c
++retrace retracemodule.c
+ 
+ # for systems without $HOME env, used by site._getuserbase()
+ @MODULE_PWD_TRUE@pwd pwdmodule.c
+diff --git a/Modules/retracemodule.c b/Modules/retracemodule.c
+new file mode 100644
+index 0000000..4c8a49c
+--- /dev/null
++++ b/Modules/retracemodule.c
+@@ -0,0 +1,397 @@
++#include "Python.h"
++
++#include "internal/pycore_frame.h"
++#include "internal/pycore_pystate.h"
++
++#include <stddef.h>
++#include <stdint.h>
++
++typedef struct {
++    PyObject_VAR_HEAD
++    uint64_t ob_item[1];
++} RetraceU64BufferObject;
++
++static PyTypeObject RetraceU64Buffer_Type;
++
++static RetraceU64BufferObject *
++retrace_u64buffer_new(Py_ssize_t size)
++{
++    return PyObject_NewVar(RetraceU64BufferObject, &RetraceU64Buffer_Type, size);
++}
++
++static void
++retrace_u64buffer_dealloc(RetraceU64BufferObject *self)
++{
++    PyObject_Free(self);
++}
++
++static Py_ssize_t
++retrace_u64buffer_len(RetraceU64BufferObject *self)
++{
++    return Py_SIZE(self);
++}
++
++static PyObject *
++retrace_u64buffer_item(RetraceU64BufferObject *self, Py_ssize_t i)
++{
++    if (i < 0 || i >= Py_SIZE(self)) {
++        PyErr_SetString(PyExc_IndexError, "U64Buffer index out of range");
++        return NULL;
++    }
++    return PyLong_FromUnsignedLongLong((unsigned long long)self->ob_item[i]);
++}
++
++static int
++retrace_u64buffer_value(PyObject *value, uint64_t *out)
++{
++    unsigned long long converted = PyLong_AsUnsignedLongLong(value);
++    if (converted == (unsigned long long)-1 && PyErr_Occurred()) {
++        PyErr_Clear();
++        return 0;
++    }
++    *out = (uint64_t)converted;
++    return 1;
++}
++
++static int
++retrace_u64buffer_contains(RetraceU64BufferObject *self, PyObject *value)
++{
++    uint64_t needle;
++    if (!retrace_u64buffer_value(value, &needle)) {
++        return 0;
++    }
++
++    for (Py_ssize_t i = 0; i < Py_SIZE(self); i++) {
++        if (self->ob_item[i] == needle) {
++            return 1;
++        }
++    }
++    return 0;
++}
++
++static PyObject *
++retrace_u64buffer_slice(RetraceU64BufferObject *self, Py_ssize_t start,
++                        Py_ssize_t step, Py_ssize_t slicelen)
++{
++    RetraceU64BufferObject *result = retrace_u64buffer_new(slicelen);
++    if (result == NULL) {
++        return NULL;
++    }
++
++    for (Py_ssize_t i = 0, source = start; i < slicelen; i++, source += step) {
++        result->ob_item[i] = self->ob_item[source];
++    }
++    return (PyObject *)result;
++}
++
++static PyObject *
++retrace_u64buffer_subscript(RetraceU64BufferObject *self, PyObject *item)
++{
++    if (PyIndex_Check(item)) {
++        Py_ssize_t i = PyNumber_AsSsize_t(item, PyExc_IndexError);
++        if (i == -1 && PyErr_Occurred()) {
++            return NULL;
++        }
++        if (i < 0) {
++            i += Py_SIZE(self);
++        }
++        return retrace_u64buffer_item(self, i);
++    }
++
++    if (PySlice_Check(item)) {
++        Py_ssize_t start, stop, step;
++        if (PySlice_Unpack(item, &start, &stop, &step) < 0) {
++            return NULL;
++        }
++        Py_ssize_t slicelen = PySlice_AdjustIndices(Py_SIZE(self), &start,
++                                                    &stop, step);
++        return retrace_u64buffer_slice(self, start, step, slicelen);
++    }
++
++    PyErr_Format(PyExc_TypeError,
++                 "U64Buffer indices must be integers or slices, not %.200s",
++                 Py_TYPE(item)->tp_name);
++    return NULL;
++}
++
++static Py_hash_t
++retrace_u64buffer_hash(RetraceU64BufferObject *self)
++{
++    PyObject *tuple = PySequence_Tuple((PyObject *)self);
++    if (tuple == NULL) {
++        return -1;
++    }
++    Py_hash_t hash = PyObject_Hash(tuple);
++    Py_DECREF(tuple);
++    return hash;
++}
++
++static PyObject *
++retrace_u64buffer_richcompare(PyObject *self, PyObject *other, int op)
++{
++    PyObject *self_tuple = PySequence_Tuple(self);
++    if (self_tuple == NULL) {
++        return NULL;
++    }
++
++    PyObject *other_tuple;
++    if (PyObject_TypeCheck(other, &RetraceU64Buffer_Type)) {
++        other_tuple = PySequence_Tuple(other);
++        if (other_tuple == NULL) {
++            Py_DECREF(self_tuple);
++            return NULL;
++        }
++    }
++    else if (PyTuple_Check(other)) {
++        other_tuple = Py_NewRef(other);
++    }
++    else {
++        Py_DECREF(self_tuple);
++        if (op == Py_EQ) {
++            Py_RETURN_FALSE;
++        }
++        if (op == Py_NE) {
++            Py_RETURN_TRUE;
++        }
++        Py_RETURN_NOTIMPLEMENTED;
++    }
++
++    PyObject *result = PyObject_RichCompare(self_tuple, other_tuple, op);
++    Py_DECREF(self_tuple);
++    Py_DECREF(other_tuple);
++    return result;
++}
++
++static PyObject *
++retrace_u64buffer_count(RetraceU64BufferObject *self, PyObject *value)
++{
++    uint64_t needle;
++    Py_ssize_t count = 0;
++    if (retrace_u64buffer_value(value, &needle)) {
++        for (Py_ssize_t i = 0; i < Py_SIZE(self); i++) {
++            if (self->ob_item[i] == needle) {
++                count++;
++            }
++        }
++    }
++    return PyLong_FromSsize_t(count);
++}
++
++static PyObject *
++retrace_u64buffer_index(RetraceU64BufferObject *self, PyObject *args)
++{
++    PyObject *value;
++    Py_ssize_t start = 0;
++    Py_ssize_t stop = Py_SIZE(self);
++    if (!PyArg_ParseTuple(args, "O|nn:index", &value, &start, &stop)) {
++        return NULL;
++    }
++
++    Py_ssize_t size = Py_SIZE(self);
++    if (start < 0) {
++        start += size;
++        if (start < 0) {
++            start = 0;
++        }
++    }
++    if (stop < 0) {
++        stop += size;
++        if (stop < 0) {
++            stop = 0;
++        }
++    }
++    if (stop > size) {
++        stop = size;
++    }
++
++    uint64_t needle;
++    if (retrace_u64buffer_value(value, &needle)) {
++        for (Py_ssize_t i = start; i < stop; i++) {
++            if (self->ob_item[i] == needle) {
++                return PyLong_FromSsize_t(i);
++            }
++        }
++    }
++
++    PyErr_SetString(PyExc_ValueError, "U64Buffer.index(x): x not in U64Buffer");
++    return NULL;
++}
++
++static PyObject *
++retrace_u64buffer_repr(RetraceU64BufferObject *self)
++{
++    PyObject *tuple = PySequence_Tuple((PyObject *)self);
++    if (tuple == NULL) {
++        return NULL;
++    }
++    PyObject *repr = PyUnicode_FromFormat("retrace.U64Buffer(%R)", tuple);
++    Py_DECREF(tuple);
++    return repr;
++}
++
++static int
++retrace_u64buffer_getbuffer(RetraceU64BufferObject *self, Py_buffer *view,
++                            int flags)
++{
++    if (view == NULL) {
++        PyErr_SetString(PyExc_BufferError,
++                        "U64Buffer getbuffer view argument is NULL");
++        return -1;
++    }
++
++    view->buf = self->ob_item;
++    view->obj = Py_NewRef(self);
++    view->len = Py_SIZE(self) * (Py_ssize_t)sizeof(uint64_t);
++    view->readonly = 1;
++    view->ndim = 1;
++    view->itemsize = (Py_ssize_t)sizeof(uint64_t);
++    view->suboffsets = NULL;
++    view->shape = NULL;
++    if ((flags & PyBUF_ND) == PyBUF_ND) {
++        view->shape = &((PyVarObject *)self)->ob_size;
++    }
++    view->strides = NULL;
++    if ((flags & PyBUF_STRIDES) == PyBUF_STRIDES) {
++        view->strides = &view->itemsize;
++    }
++    view->format = NULL;
++    if ((flags & PyBUF_FORMAT) == PyBUF_FORMAT) {
++        view->format = "Q";
++    }
++    view->internal = NULL;
++    return 0;
++}
++
++static void
++retrace_u64buffer_releasebuffer(RetraceU64BufferObject *self, Py_buffer *view)
++{
++}
++
++static PySequenceMethods retrace_u64buffer_as_sequence = {
++    .sq_length = (lenfunc)retrace_u64buffer_len,
++    .sq_item = (ssizeargfunc)retrace_u64buffer_item,
++    .sq_contains = (objobjproc)retrace_u64buffer_contains,
++};
++
++static PyMappingMethods retrace_u64buffer_as_mapping = {
++    .mp_length = (lenfunc)retrace_u64buffer_len,
++    .mp_subscript = (binaryfunc)retrace_u64buffer_subscript,
++};
++
++static PyBufferProcs retrace_u64buffer_as_buffer = {
++    .bf_getbuffer = (getbufferproc)retrace_u64buffer_getbuffer,
++    .bf_releasebuffer = (releasebufferproc)retrace_u64buffer_releasebuffer,
++};
++
++static PyMethodDef retrace_u64buffer_methods[] = {
++    {"count", (PyCFunction)retrace_u64buffer_count, METH_O,
++     PyDoc_STR("Return number of occurrences of value.")},
++    {"index", (PyCFunction)retrace_u64buffer_index, METH_VARARGS,
++     PyDoc_STR("Return first index of value.")},
++    {NULL, NULL, 0, NULL},
++};
++
++static PyTypeObject RetraceU64Buffer_Type = {
++    PyVarObject_HEAD_INIT(NULL, 0)
++    .tp_name = "retrace.U64Buffer",
++    .tp_basicsize = offsetof(RetraceU64BufferObject, ob_item),
++    .tp_itemsize = sizeof(uint64_t),
++    .tp_dealloc = (destructor)retrace_u64buffer_dealloc,
++    .tp_repr = (reprfunc)retrace_u64buffer_repr,
++    .tp_hash = (hashfunc)retrace_u64buffer_hash,
++    .tp_richcompare = retrace_u64buffer_richcompare,
++    .tp_as_sequence = &retrace_u64buffer_as_sequence,
++    .tp_as_mapping = &retrace_u64buffer_as_mapping,
++    .tp_as_buffer = &retrace_u64buffer_as_buffer,
++    .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_IMMUTABLETYPE |
++                Py_TPFLAGS_DISALLOW_INSTANTIATION,
++    .tp_methods = retrace_u64buffer_methods,
++    .tp_iter = PySeqIter_New,
++};
++
++static int
++retrace_frame_is_visible(_PyInterpreterFrame *frame)
++{
++    return frame != NULL && frame->owner != FRAME_OWNED_BY_CSTACK &&
++           !_PyFrame_IsIncomplete(frame);
++}
++
++static uint64_t
++retrace_frame_instruction_counter(_PyInterpreterFrame *frame)
++{
++    int64_t coordinate = _PyFrame_RetraceInstructionCoordinate(frame);
++    if (coordinate < 0) {
++        return 0;
++    }
++    return (uint64_t)coordinate;
++}
++
++PyDoc_STRVAR(retrace_instruction_counters_doc,
++"instruction_counters($module, /)\n"
++"--\n"
++"\n"
++"Return this thread's visible Python frame instruction counters.");
++
++static PyObject *
++retrace_instruction_counters(PyObject *module, PyObject *Py_UNUSED(ignored))
++{
++    PyThreadState *tstate = _PyThreadState_GET();
++    _PyInterpreterFrame *frame = tstate->cframe->current_frame;
++    Py_ssize_t size = 0;
++
++    for (_PyInterpreterFrame *scan = frame; scan != NULL; scan = scan->previous) {
++        if (retrace_frame_is_visible(scan)) {
++            size++;
++        }
++    }
++
++    RetraceU64BufferObject *buffer = retrace_u64buffer_new(size);
++    if (buffer == NULL) {
++        return NULL;
++    }
++
++    Py_ssize_t index = 0;
++    for (_PyInterpreterFrame *scan = frame; scan != NULL; scan = scan->previous) {
++        if (retrace_frame_is_visible(scan)) {
++            buffer->ob_item[index++] = retrace_frame_instruction_counter(scan);
++        }
++    }
++
++    return (PyObject *)buffer;
++}
++
++static PyMethodDef retrace_methods[] = {
++    {"instruction_counters", retrace_instruction_counters, METH_NOARGS,
++     retrace_instruction_counters_doc},
++    {NULL, NULL, 0, NULL},
++};
++
++static int
++retrace_exec(PyObject *module)
++{
++    if (PyModule_AddType(module, &RetraceU64Buffer_Type) < 0) {
++        return -1;
++    }
++    return 0;
++}
++
++static PyModuleDef_Slot retrace_slots[] = {
++    {Py_mod_exec, retrace_exec},
++    {Py_mod_multiple_interpreters, Py_MOD_PER_INTERPRETER_GIL_SUPPORTED},
++    {0, NULL},
++};
++
++static struct PyModuleDef retracemodule = {
++    PyModuleDef_HEAD_INIT,
++    .m_name = "retrace",
++    .m_doc = "Retrace CPython probe support.",
++    .m_size = 0,
++    .m_methods = retrace_methods,
++    .m_slots = retrace_slots,
++};
++
++PyMODINIT_FUNC
++PyInit_retrace(void)
++{
++    return PyModuleDef_Init(&retracemodule);
++}
+-- 
+2.50.1 (Apple Git-155)
+
