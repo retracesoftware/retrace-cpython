@@ -1,4 +1,4 @@
-From 184a3864798cc368f7cac58ee2c2d1c70b2a82b3 Mon Sep 17 00:00:00 2001
+From 1e9c3809cf751d2fe7b6a037c23443b7e646b87b Mon Sep 17 00:00:00 2001
 From: nathan-retrace <nathan@retracesoftware.com>
 Date: Tue, 5 May 2026 18:01:48 +0100
 Subject: [PATCH] Add retrace thread switch callback
@@ -7,10 +7,10 @@ Subject: [PATCH] Add retrace thread switch callback
  Include/cpython/pystate.h         |   4 +
  Include/internal/pycore_interp.h  |   5 +
  Include/internal/pycore_retrace.h |  19 +++
- Modules/retracemodule.c           | 231 +++++++++++++++++++++++++++---
+ Modules/retracemodule.c           | 228 +++++++++++++++++++++++++++---
  Python/ceval_gil.c                |  12 +-
  Python/pystate.c                  |   4 +
- 6 files changed, 257 insertions(+), 18 deletions(-)
+ 6 files changed, 254 insertions(+), 18 deletions(-)
  create mode 100644 Include/internal/pycore_retrace.h
 
 diff --git a/Include/cpython/pystate.h b/Include/cpython/pystate.h
@@ -70,7 +70,7 @@ index 0000000..0dff810
 +#endif
 +#endif /* !Py_INTERNAL_RETRACE_H */
 diff --git a/Modules/retracemodule.c b/Modules/retracemodule.c
-index 4c8a49c..57b7c7f 100644
+index 4c8a49c..aa212f2 100644
 --- a/Modules/retracemodule.c
 +++ b/Modules/retracemodule.c
 @@ -2,6 +2,7 @@
@@ -81,7 +81,7 @@ index 4c8a49c..57b7c7f 100644
  
  #include <stddef.h>
  #include <stdint.h>
-@@ -326,43 +327,241 @@ retrace_frame_instruction_counter(_PyInterpreterFrame *frame)
+@@ -326,43 +327,238 @@ retrace_frame_instruction_counter(_PyInterpreterFrame *frame)
      return (uint64_t)coordinate;
  }
  
@@ -214,7 +214,7 @@ index 4c8a49c..57b7c7f 100644
 +"set_thread_switch_callback($module, callback, /)\n"
 +"--\n"
 +"\n"
-+"Set a Python callback invoked as callback(from_thread_id, to_thread_id).");
++"Set a Python callback invoked as callback(from_thread_id).");
 +
 +static PyObject *
 +retrace_set_thread_switch_callback(PyObject *module, PyObject *callback)
@@ -286,7 +286,6 @@ index 4c8a49c..57b7c7f 100644
 +
 +    PyInterpreterState *interp = tstate->interp;
 +    unsigned long from_thread_id = tstate->retrace_thread_switch_from_id;
-+    unsigned long to_thread_id = tstate->thread_id;
 +    _PyInterpreterFrame *frame = tstate->retrace_thread_switch_frame;
 +    tstate->retrace_thread_switch_pending = 0;
 +    tstate->retrace_thread_switch_frame = NULL;
@@ -304,14 +303,12 @@ index 4c8a49c..57b7c7f 100644
 +    interp->retrace_thread_switch_callback_frame = frame;
 +
 +    PyObject *from_arg = PyLong_FromUnsignedLong(from_thread_id);
-+    PyObject *to_arg = PyLong_FromUnsignedLong(to_thread_id);
 +    PyObject *result = NULL;
-+    if (from_arg != NULL && to_arg != NULL) {
-+        result = PyObject_CallFunctionObjArgs(callback, from_arg, to_arg, NULL);
++    if (from_arg != NULL) {
++        result = PyObject_CallOneArg(callback, from_arg);
 +    }
 +
 +    Py_XDECREF(from_arg);
-+    Py_XDECREF(to_arg);
 +    if (result == NULL) {
 +        PyErr_WriteUnraisable(callback);
 +    }

@@ -37,12 +37,14 @@ unknown thread ids raise `LookupError`.
 callback signature is:
 
 ```python
-callback(from_thread_id, to_thread_id)
+callback(from_thread_id)
 ```
 
 The GIL handoff path only records the pending switch. The Python callback is
 delivered after the acquiring thread has restored its current thread state, so
-the hook avoids running Python code inside the low-level GIL mutex handoff.
+the hook avoids running Python code inside the low-level GIL mutex handoff. The
+destination thread is therefore the current thread and can be read with
+`threading.get_ident()` or `_thread.get_ident()`.
 
 Native Retrace extensions should eventually discover a native API through a
 capsule, for example:
@@ -116,9 +118,10 @@ Avoid per-instruction Python callbacks, atomics, allocation, or lock traffic.
 The first record-side callback is telemetry. The Python API reports:
 
 ```text
-from thread, to thread
+from thread
 ```
 
+The destination thread is implicit because the callback runs on that thread.
 The callback is reentrancy-guarded and errors are reported through
 `PyErr_WriteUnraisable()`. It should remain small and must not route
 control-plane I/O through Retrace gates.

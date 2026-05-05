@@ -20,7 +20,7 @@ def main() -> int:
         assert len(counters_by_id) == len(counters)
         assert module.get_thread_switch_callback() is None
 
-        def callback(_from_thread_id, _to_thread_id):
+        def callback(_from_thread_id):
             return None
 
         module.set_thread_switch_callback(callback)
