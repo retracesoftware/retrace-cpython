@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+usage: scripts/build-release VERSION [PREFIX]
+
+Apply patches if needed, then configure, build, and install CPython.
+
+Environment:
+  JOBS              parallel build jobs
+  CONFIGURE_FLAGS   extra flags passed to ./configure
+EOF
+}
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  usage
+  exit 0
+fi
+
+if [[ $# -lt 1 || $# -gt 2 ]]; then
+  usage >&2
+  exit 2
+fi
+
+version="${1#v}"
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source_dir="${repo_root}/build/src/cpython-${version}+retrace"
+prefix="${2:-${repo_root}/build/install/${version}+retrace}"
+
+if [[ -z "${JOBS:-}" ]]; then
+  if command -v nproc >/dev/null 2>&1; then
+    JOBS="$(nproc)"
+  elif command -v sysctl >/dev/null 2>&1; then
+    JOBS="$(sysctl -n hw.ncpu)"
+  else
+    JOBS=2
+  fi
+fi
+
+if [[ ! -d "${source_dir}/.git" ]]; then
+  "${repo_root}/scripts/apply-patches" "${version}" "${source_dir}"
+fi
+
+mkdir -p "${prefix}" "${repo_root}/build/logs"
+
+(
+  cd "${source_dir}"
+  ./configure --prefix="${prefix}" ${CONFIGURE_FLAGS:-}
+  make -j"${JOBS}"
+  make install
+)
+
+mkdir -p "${repo_root}/build/manifests"
+{
+  echo "version=${version}"
+  echo "prefix=${prefix}"
+  echo "source_dir=${source_dir}"
+  echo "git_head=$(git -C "${source_dir}" rev-parse HEAD)"
+  echo "built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+} > "${repo_root}/build/manifests/${version}.txt"
+
+echo "Installed retrace-cpython ${version} to ${prefix}"
+

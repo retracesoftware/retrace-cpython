@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+usage: scripts/apply-patches VERSION [DEST]
+
+Clone or reset CPython at tag vVERSION, then apply the matching Retrace patch
+stack. VERSION should normally be an exact CPython release such as 3.12.8.
+
+Environment:
+  CPYTHON_REPO_URL  source remote, default https://github.com/python/cpython.git
+EOF
+}
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  usage
+  exit 0
+fi
+
+if [[ $# -lt 1 || $# -gt 2 ]]; then
+  usage >&2
+  exit 2
+fi
+
+version="${1#v}"
+tag="v${version}"
+dest="${2:-build/src/cpython-${version}+retrace}"
+repo_url="${CPYTHON_REPO_URL:-https://github.com/python/cpython.git}"
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+IFS=. read -r major minor _patch <<<"${version}"
+if [[ -z "${major:-}" || -z "${minor:-}" ]]; then
+  echo "VERSION must include at least major.minor, got: ${version}" >&2
+  exit 2
+fi
+
+exact_patch_dir="${repo_root}/patches/${version}"
+minor_patch_dir="${repo_root}/patches/${major}.${minor}"
+
+if [[ -d "${exact_patch_dir}" ]]; then
+  patch_dir="${exact_patch_dir}"
+elif [[ -d "${minor_patch_dir}" ]]; then
+  patch_dir="${minor_patch_dir}"
+else
+  echo "No patch directory found for ${version}." >&2
+  echo "Expected ${exact_patch_dir} or ${minor_patch_dir}." >&2
+  exit 1
+fi
+
+mkdir -p "$(dirname "${dest}")"
+
+if [[ -d "${dest}/.git" ]]; then
+  git -C "${dest}" fetch --tags --force origin "${tag}"
+  git -C "${dest}" checkout -B "retrace-${version}" "${tag}"
+  git -C "${dest}" reset --hard "${tag}"
+  git -C "${dest}" clean -fdx
+else
+  if [[ -e "${dest}" ]]; then
+    echo "Destination exists but is not a git checkout: ${dest}" >&2
+    exit 1
+  fi
+  git clone --branch "${tag}" --depth 1 "${repo_url}" "${dest}"
+  git -C "${dest}" checkout -B "retrace-${version}" "${tag}"
+fi
+
+shopt -s nullglob
+patches=("${patch_dir}"/*.patch)
+
+if (( ${#patches[@]} == 0 )); then
+  echo "No patches found in ${patch_dir}; checkout remains vanilla ${tag}."
+else
+  git -C "${dest}" am --3way "${patches[@]}"
+fi
+
+echo "Prepared ${dest}"
+echo "CPython tag: ${tag}"
+echo "Patch dir: ${patch_dir}"
+
