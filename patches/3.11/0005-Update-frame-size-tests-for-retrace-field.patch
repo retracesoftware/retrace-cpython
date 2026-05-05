@@ -1,0 +1,26 @@
+From ea3004420828e1779b146d20c7ff378b33f735a2 Mon Sep 17 00:00:00 2001
+From: nathan-retrace <nathan@retracesoftware.com>
+Date: Tue, 5 May 2026 21:57:15 +0100
+Subject: [PATCH 5/5] Update frame size tests for retrace field
+
+---
+ Lib/test/test_sys.py | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/Lib/test/test_sys.py b/Lib/test/test_sys.py
+index 3f65d5e..26f539b 100644
+--- a/Lib/test/test_sys.py
++++ b/Lib/test/test_sys.py
+@@ -1500,3 +1500,3 @@ def func():
+         x = func()
+-        check(x, size('3Pi3c7P2ic??2P'))
++        check(x, size('3Pi3c7P2ic??q2P'))
+         # function
+@@ -1517,3 +1517,3 @@ def bar(cls):
+         def get_gen(): yield 1
+-        check(get_gen(), size('P2P4P4c7P2ic??P'))
++        check(get_gen(), size('P2P4P4c7P2ic??qP'))
+         # iterator
+-- 
+2.50.1 (Apple Git-155)
+

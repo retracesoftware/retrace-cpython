@@ -1,0 +1,340 @@
+From 30391b7802bc0c8e4ae25ee8805452829e5a5737 Mon Sep 17 00:00:00 2001
+From: nathan-retrace <nathan@retracesoftware.com>
+Date: Tue, 5 May 2026 21:57:04 +0100
+Subject: [PATCH 4/5] Add retrace replay checkpoint callback
+
+---
+ Include/internal/pycore_interp.h  |   9 ++
+ Include/internal/pycore_retrace.h |  21 ++++
+ Modules/retracemodule.c           | 193 +++++++++++++++++++++++++++++-
+ Python/ceval.c                    |  28 ++++-
+ Python/pystate.c                  |   6 +
+ 5 files changed, 249 insertions(+), 8 deletions(-)
+
+diff --git a/Include/internal/pycore_interp.h b/Include/internal/pycore_interp.h
+index 98614d0..d710889 100644
+--- a/Include/internal/pycore_interp.h
++++ b/Include/internal/pycore_interp.h
+@@ -185,2 +185,11 @@ struct _is {
+ 
++    int retrace_replay_checkpoint_armed;
++    unsigned long retrace_replay_checkpoint_thread_id;
++    uint64_t retrace_replay_checkpoint_top;
++    PyObject *retrace_replay_checkpoint_counters;
++    PyObject *retrace_replay_checkpoint_callback;
++    int retrace_replay_checkpoint_callback_active;
++    PyThreadState *retrace_replay_checkpoint_callback_tstate;
++    struct _PyInterpreterFrame *retrace_replay_checkpoint_callback_frame;
++
+     /* The following fields are here to avoid allocation during init.
+diff --git a/Include/internal/pycore_retrace.h b/Include/internal/pycore_retrace.h
+index 0dff810..3588b30 100644
+--- a/Include/internal/pycore_retrace.h
++++ b/Include/internal/pycore_retrace.h
+@@ -10,2 +10,20 @@ extern "C" {
+ 
++#include "pycore_frame.h"         // _PyFrame_RetraceInstructionCoordinate()
++
++static inline int
++_PyRetrace_FrameIsVisible(_PyInterpreterFrame *frame)
++{
++    return frame != NULL && !_PyFrame_IsIncomplete(frame);
++}
++
++static inline uint64_t
++_PyRetrace_FrameInstructionCounter(_PyInterpreterFrame *frame)
++{
++    int64_t coordinate = _PyFrame_RetraceInstructionCoordinate(frame);
++    if (coordinate < 0) {
++        return 0;
++    }
++    return (uint64_t)coordinate;
++}
++
+ PyAPI_FUNC(void) _PyRetrace_NoteThreadSwitch(
+@@ -14,2 +32,5 @@ PyAPI_FUNC(void) _PyRetrace_NoteThreadSwitch(
+ PyAPI_FUNC(void) _PyRetrace_DeliverThreadSwitchCallback(PyThreadState *tstate);
++PyAPI_FUNC(int) _PyRetrace_CheckReplayCheckpoint(
++    PyThreadState *tstate,
++    _PyInterpreterFrame *frame);
+ 
+diff --git a/Modules/retracemodule.c b/Modules/retracemodule.c
+index 9e45197..91ac95d 100644
+--- a/Modules/retracemodule.c
++++ b/Modules/retracemodule.c
+@@ -62,2 +62,31 @@ retrace_u64buffer_value(PyObject *value, uint64_t *out)
+ 
++static RetraceU64BufferObject *
++retrace_u64buffer_from_sequence(PyObject *sequence)
++{
++    PyObject *fast = PySequence_Fast(
++        sequence, "checkpoint counters must be a sequence");
++    if (fast == NULL) {
++        return NULL;
++    }
++
++    Py_ssize_t size = PySequence_Fast_GET_SIZE(fast);
++    RetraceU64BufferObject *buffer = retrace_u64buffer_new(size);
++    if (buffer == NULL) {
++        Py_DECREF(fast);
++        return NULL;
++    }
++
++    PyObject **items = PySequence_Fast_ITEMS(fast);
++    for (Py_ssize_t index = 0; index < size; index++) {
++        if (!retrace_u64buffer_value(items[index], &buffer->ob_item[index])) {
++            Py_DECREF(buffer);
++            Py_DECREF(fast);
++            return NULL;
++        }
++    }
++
++    Py_DECREF(fast);
++    return buffer;
++}
++
+ static int
+@@ -321,3 +350,3 @@ retrace_frame_is_visible(_PyInterpreterFrame *frame)
+ {
+-    return frame != NULL && !_PyFrame_IsIncomplete(frame);
++    return _PyRetrace_FrameIsVisible(frame);
+ }
+@@ -327,7 +356,3 @@ retrace_frame_instruction_counter(_PyInterpreterFrame *frame)
+ {
+-    int64_t coordinate = _PyFrame_RetraceInstructionCoordinate(frame);
+-    if (coordinate < 0) {
+-        return 0;
+-    }
+-    return (uint64_t)coordinate;
++    return _PyRetrace_FrameInstructionCounter(frame);
+ }
+@@ -345,2 +370,8 @@ retrace_thread_state_frame(PyThreadState *current_tstate,
+     }
++    if (interp->retrace_replay_checkpoint_callback_active &&
++        target_tstate == interp->retrace_replay_checkpoint_callback_tstate &&
++        interp->retrace_replay_checkpoint_callback_frame != NULL)
++    {
++        return interp->retrace_replay_checkpoint_callback_frame;
++    }
+     if (target_tstate->cframe == NULL) {
+@@ -386,2 +417,39 @@ retrace_fill_instruction_counters(RetraceU64BufferObject *buffer,
+ 
++static void
++retrace_clear_replay_checkpoint(PyInterpreterState *interp)
++{
++    interp->retrace_replay_checkpoint_armed = 0;
++    interp->retrace_replay_checkpoint_thread_id = 0;
++    interp->retrace_replay_checkpoint_top = 0;
++    Py_CLEAR(interp->retrace_replay_checkpoint_counters);
++    Py_CLEAR(interp->retrace_replay_checkpoint_callback);
++}
++
++static int
++retrace_replay_checkpoint_matches(PyInterpreterState *interp,
++                                  _PyInterpreterFrame *frame)
++{
++    RetraceU64BufferObject *target =
++        (RetraceU64BufferObject *)interp->retrace_replay_checkpoint_counters;
++    if (target == NULL) {
++        return 0;
++    }
++
++    Py_ssize_t target_size = Py_SIZE(target);
++    Py_ssize_t index = 0;
++    for (_PyInterpreterFrame *scan = frame; scan != NULL; scan = scan->previous) {
++        if (!retrace_frame_is_visible(scan)) {
++            continue;
++        }
++        if (index >= target_size) {
++            return 0;
++        }
++        if (target->ob_item[index] != retrace_frame_instruction_counter(scan)) {
++            return 0;
++        }
++        index++;
++    }
++    return index == target_size;
++}
++
+ PyDoc_STRVAR(retrace_instruction_counters_doc,
+@@ -489,2 +557,63 @@ retrace_get_thread_switch_callback(PyObject *module, PyObject *Py_UNUSED(ignored
+ 
++PyDoc_STRVAR(retrace_set_replay_checkpoint_doc,
++"set_replay_checkpoint($module, thread_id, counters, callback, /)\n"
++"--\n"
++"\n"
++"Invoke callback() when thread_id reaches the given instruction counters.\n"
++"\n"
++"Pass None as the only argument to clear the active checkpoint.");
++
++static PyObject *
++retrace_set_replay_checkpoint(PyObject *module, PyObject *args)
++{
++    PyThreadState *tstate = _PyThreadState_GET();
++    PyInterpreterState *interp = tstate->interp;
++
++    Py_ssize_t argc = PyTuple_GET_SIZE(args);
++    if (argc == 1 && PyTuple_GET_ITEM(args, 0) == Py_None) {
++        retrace_clear_replay_checkpoint(interp);
++        Py_RETURN_NONE;
++    }
++    if (argc != 3) {
++        PyErr_SetString(PyExc_TypeError,
++                        "set_replay_checkpoint expects None or "
++                        "(thread_id, counters, callback)");
++        return NULL;
++    }
++
++    unsigned long thread_id = PyLong_AsUnsignedLong(PyTuple_GET_ITEM(args, 0));
++    if (thread_id == (unsigned long)-1 && PyErr_Occurred()) {
++        return NULL;
++    }
++
++    PyObject *callback = PyTuple_GET_ITEM(args, 2);
++    if (!PyCallable_Check(callback)) {
++        PyErr_SetString(PyExc_TypeError,
++                        "replay checkpoint callback must be callable");
++        return NULL;
++    }
++
++    RetraceU64BufferObject *counters =
++        retrace_u64buffer_from_sequence(PyTuple_GET_ITEM(args, 1));
++    if (counters == NULL) {
++        return NULL;
++    }
++    if (Py_SIZE(counters) == 0) {
++        Py_DECREF(counters);
++        PyErr_SetString(PyExc_ValueError,
++                        "checkpoint counters must not be empty");
++        return NULL;
++    }
++
++    PyObject *callback_ref = Py_NewRef(callback);
++    retrace_clear_replay_checkpoint(interp);
++    interp->retrace_replay_checkpoint_thread_id = thread_id;
++    interp->retrace_replay_checkpoint_top = counters->ob_item[0];
++    interp->retrace_replay_checkpoint_counters = (PyObject *)counters;
++    interp->retrace_replay_checkpoint_callback = callback_ref;
++    interp->retrace_replay_checkpoint_armed = 1;
++
++    Py_RETURN_NONE;
++}
++
+ void
+@@ -561,2 +690,52 @@ _PyRetrace_DeliverThreadSwitchCallback(PyThreadState *tstate)
+ 
++int
++_PyRetrace_CheckReplayCheckpoint(PyThreadState *tstate,
++                                 _PyInterpreterFrame *frame)
++{
++    if (tstate == NULL || frame == NULL) {
++        return 0;
++    }
++
++    PyInterpreterState *interp = tstate->interp;
++    if (!interp->retrace_replay_checkpoint_armed ||
++        interp->retrace_replay_checkpoint_callback_active ||
++        interp->retrace_replay_checkpoint_thread_id != tstate->thread_id)
++    {
++        return 0;
++    }
++    if (interp->retrace_replay_checkpoint_top !=
++            retrace_frame_instruction_counter(frame))
++    {
++        return 0;
++    }
++    if (!retrace_replay_checkpoint_matches(interp, frame)) {
++        return 0;
++    }
++
++    PyObject *callback = interp->retrace_replay_checkpoint_callback;
++    if (callback == NULL) {
++        retrace_clear_replay_checkpoint(interp);
++        return 0;
++    }
++    callback = Py_NewRef(callback);
++    retrace_clear_replay_checkpoint(interp);
++
++    interp->retrace_replay_checkpoint_callback_active = 1;
++    interp->retrace_replay_checkpoint_callback_tstate = tstate;
++    interp->retrace_replay_checkpoint_callback_frame = frame;
++
++    PyObject *result = PyObject_CallNoArgs(callback);
++
++    interp->retrace_replay_checkpoint_callback_frame = NULL;
++    interp->retrace_replay_checkpoint_callback_tstate = NULL;
++    interp->retrace_replay_checkpoint_callback_active = 0;
++
++    Py_DECREF(callback);
++    if (result == NULL) {
++        return -1;
++    }
++    Py_DECREF(result);
++    return 0;
++}
++
+ 
+@@ -569,2 +748,4 @@ static PyMethodDef retrace_methods[] = {
+      METH_NOARGS, retrace_get_thread_switch_callback_doc},
++    {"set_replay_checkpoint", retrace_set_replay_checkpoint, METH_VARARGS,
++     retrace_set_replay_checkpoint_doc},
+     {NULL, NULL, 0, NULL},
+diff --git a/Python/ceval.c b/Python/ceval.c
+index c7f7e7e..88ac485 100644
+--- a/Python/ceval.c
++++ b/Python/ceval.c
+@@ -22,3 +22,3 @@
+ #include "pycore_pystate.h"       // _PyInterpreterState_GET()
+-#include "pycore_retrace.h"       // _PyRetrace_NoteThreadSwitch()
++#include "pycore_retrace.h"       // _PyRetrace_CheckReplayCheckpoint()
+ #include "pycore_sysmodule.h"     // _PySys_Audit()
+@@ -1300,2 +1300,21 @@ eval_frame_handle_pending(PyThreadState *tstate)
+ 
++#define RETRACE_REPLAY_CHECKPOINT() \
++    do { \
++        PyInterpreterState *retrace_interp = tstate->interp; \
++        if (retrace_interp->retrace_replay_checkpoint_armed && \
++            retrace_interp->retrace_replay_checkpoint_thread_id == tstate->thread_id && \
++            _PyRetrace_FrameIsVisible(frame) && \
++            retrace_interp->retrace_replay_checkpoint_top == \
++                _PyRetrace_FrameInstructionCounter(frame)) \
++        { \
++            _PyFrame_SetStackPointer(frame, stack_pointer); \
++            int retrace_err = _PyRetrace_CheckReplayCheckpoint(tstate, frame); \
++            stack_pointer = _PyFrame_GetStackPointer(frame); \
++            frame->stacktop = -1; \
++            if (retrace_err < 0) { \
++                goto error; \
++            } \
++        } \
++    } while (0)
++
+ #ifdef Py_STATS
+@@ -1307,5 +1326,10 @@ eval_frame_handle_pending(PyThreadState *tstate)
+         lastopcode = op; \
++        RETRACE_REPLAY_CHECKPOINT(); \
+     } while (0)
+ #else
+-#define INSTRUCTION_START(op) (frame->prev_instr = next_instr++)
++#define INSTRUCTION_START(op) \
++    do { \
++        frame->prev_instr = next_instr++; \
++        RETRACE_REPLAY_CHECKPOINT(); \
++    } while (0)
+ #endif
+diff --git a/Python/pystate.c b/Python/pystate.c
+index f3bf9fc..a03990d 100644
+--- a/Python/pystate.c
++++ b/Python/pystate.c
+@@ -417,2 +417,8 @@ interpreter_clear(PyInterpreterState *interp, PyThreadState *tstate)
+     interp->retrace_thread_switch_callback_frame = NULL;
++    interp->retrace_replay_checkpoint_armed = 0;
++    Py_CLEAR(interp->retrace_replay_checkpoint_counters);
++    Py_CLEAR(interp->retrace_replay_checkpoint_callback);
++    interp->retrace_replay_checkpoint_callback_active = 0;
++    interp->retrace_replay_checkpoint_callback_tstate = NULL;
++    interp->retrace_replay_checkpoint_callback_frame = NULL;
+ 
+-- 
+2.50.1 (Apple Git-155)
+
