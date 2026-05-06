@@ -1,13 +1,16 @@
-From 101a180a1bc3bbedbeb490b703ec568ef2ddf5d5 Mon Sep 17 00:00:00 2001
+From e800a8f79b95268bd73fd7707a00e4cd400a2a90 Mon Sep 17 00:00:00 2001
 From: nathan-retrace <nathan@retracesoftware.com>
 Date: Tue, 5 May 2026 22:29:50 +0100
 Subject: [PATCH] Build retrace as a Windows builtin module
 
 ---
- PC/config.c                        | 2 ++
- PCbuild/pythoncore.vcxproj         | 1 +
- PCbuild/pythoncore.vcxproj.filters | 3 +++
- 3 files changed, 6 insertions(+)
+ PC/config.c                        |  2 ++
+ PCbuild/_freeze_module.vcxproj     |  1 +
+ PCbuild/pythoncore.vcxproj         |  1 +
+ PCbuild/pythoncore.vcxproj.filters |  3 +++
+ Python/retrace_bootstrap.c         | 20 ++++++++++++++++++++
+ 5 files changed, 27 insertions(+)
+ create mode 100644 Python/retrace_bootstrap.c
 
 diff --git a/PC/config.c b/PC/config.c
 index 9d900c7..58429bb 100644
@@ -17,6 +20,12 @@ index 9d900c7..58429bb 100644
 +extern PyObject* PyInit_retrace(void);
 @@ -171,0 +173 @@ struct _inittab _PyImport_Inittab[] = {
 +    {"retrace", PyInit_retrace},
+diff --git a/PCbuild/_freeze_module.vcxproj b/PCbuild/_freeze_module.vcxproj
+index 442e343..b3fd2a6 100644
+--- a/PCbuild/_freeze_module.vcxproj
++++ b/PCbuild/_freeze_module.vcxproj
+@@ -103,0 +104 @@
++    <ClCompile Include="..\Python\retrace_bootstrap.c" />
 diff --git a/PCbuild/pythoncore.vcxproj b/PCbuild/pythoncore.vcxproj
 index 078cc59..7f8bf81 100644
 --- a/PCbuild/pythoncore.vcxproj
@@ -31,3 +40,29 @@ index e3fe927..a589e32 100644
 +    <ClCompile Include="..\Modules\retracemodule.c">
 +      <Filter>Modules</Filter>
 +    </ClCompile>
+diff --git a/Python/retrace_bootstrap.c b/Python/retrace_bootstrap.c
+new file mode 100644
+index 0000000..3f101f3
+--- /dev/null
++++ b/Python/retrace_bootstrap.c
+@@ -0,0 +1,20 @@
++#include "Python.h"
++#include "pycore_retrace.h"
++
++void
++_PyRetrace_NoteThreadSwitch(PyThreadState *from_tstate,
++                            PyThreadState *to_tstate)
++{
++}
++
++void
++_PyRetrace_DeliverThreadSwitchCallback(PyThreadState *tstate)
++{
++}
++
++int
++_PyRetrace_CheckReplayCheckpoint(PyThreadState *tstate,
++                                 _PyInterpreterFrame *frame)
++{
++    return 0;
++}

@@ -82,6 +82,9 @@ jobs:
     needs: versions
     runs-on: ${{ matrix.platform.os }}
     timeout-minutes: 360
+    permissions:
+      actions: write
+      contents: read
     strategy:
       fail-fast: true
       matrix:
@@ -237,11 +240,20 @@ jobs:
           path: build/dist/*.tar.gz
           if-no-files-found: error
 
+      - name: Cancel workflow on failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run cancel "${{ github.run_id }}"
+
   windows:
     name: ${{ matrix.python-version }} ${{ matrix.platform.target }}
     needs: versions
     runs-on: ${{ matrix.platform.os }}
     timeout-minutes: 360
+    permissions:
+      actions: write
+      contents: read
     strategy:
       fail-fast: true
       matrix:
@@ -393,6 +405,12 @@ jobs:
           name: retrace-cpython-${{ matrix.python-version }}-${{ matrix.platform.target }}
           path: build/dist/*.zip
           if-no-files-found: error
+
+      - name: Cancel workflow on failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run cancel "${{ github.run_id }}"
 
   publish-pypi:
     name: Publish wheels to PyPI
