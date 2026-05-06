@@ -8,10 +8,15 @@ on:
         required: true
         default: "manifest-latest"
         type: string
-      package_version:
-        description: "Retrace package version for PyPI wheels, independent of CPython versions"
+      package_bump:
+        description: "Retrace package version component to bump from the latest PyPI release"
         required: true
-        type: string
+        default: "point"
+        type: choice
+        options:
+          - point
+          - minor
+          - major
       release_build:
         description: "Use optimized CPython configure flags on POSIX builds"
         required: true
@@ -36,7 +41,6 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  PACKAGE_VERSION: ${{ inputs.package_version }}
   RELEASE_BUILD: ${{ inputs.release_build || false }}
   UPLOAD_ARTIFACTS: ${{ inputs.upload_artifacts }}
   PUBLISH_PYPI: ${{ inputs.publish_pypi || false }}
@@ -46,6 +50,7 @@ jobs:
     name: Select CPython versions
     runs-on: ubuntu-24.04
     outputs:
+      package_version: ${{ steps.package_version.outputs.package_version }}
       versions: ${{ steps.versions.outputs.versions }}
     steps:
       - name: Check out retrace-cpython
@@ -82,11 +87,23 @@ jobs:
           print("Selected CPython versions:", ", ".join(versions))
           PY
 
+      - name: Resolve package version
+        id: package_version
+        env:
+          PACKAGE_BUMP: ${{ inputs.package_bump || 'point' }}
+        run: |
+          set -euo pipefail
+          package_version="$(scripts/resolve-package-version "${PACKAGE_BUMP}")"
+          echo "package_version=${package_version}" >> "${GITHUB_OUTPUT}"
+          echo "Selected package version: ${package_version}"
+
   posix:
     name: ${{ matrix.python-version }} ${{ matrix.platform.target }}
     needs: versions
     runs-on: ${{ matrix.platform.os }}
     timeout-minutes: 360
+    env:
+      PACKAGE_VERSION: ${{ needs.versions.outputs.package_version }}
     permissions:
       actions: write
       contents: read
@@ -257,6 +274,8 @@ jobs:
     needs: versions
     runs-on: ${{ matrix.platform.os }}
     timeout-minutes: 360
+    env:
+      PACKAGE_VERSION: ${{ needs.versions.outputs.package_version }}
     permissions:
       actions: write
       contents: read
