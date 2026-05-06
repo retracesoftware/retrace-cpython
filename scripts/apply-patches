@@ -124,6 +124,7 @@ PY
   patches=()
   if [[ -n "${patch_list}" ]]; then
     while IFS= read -r patch; do
+      patch="${patch%$'\r'}"
       patches+=("${patch}")
     done <<<"${patch_list}"
   fi
