@@ -294,11 +294,6 @@ jobs:
             pcbuild-platform: x64
             pcbuild-output: amd64
             pcbuild-test-platform: -x64
-          - target: windows-x86
-            os: windows-2022
-            pcbuild-platform: Win32
-            pcbuild-output: win32
-            pcbuild-test-platform: -win32
           - target: windows-arm64
             os: windows-11-arm
             pcbuild-platform: ARM64
