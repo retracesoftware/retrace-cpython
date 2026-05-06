@@ -16,10 +16,24 @@ diff --git a/PC/config.c b/PC/config.c
 index 9d900c7..58429bb 100644
 --- a/PC/config.c
 +++ b/PC/config.c
-@@ -76,0 +77 @@ extern PyObject* PyInit__tokenize(void);
+@@ -76,7 +76,8 @@ extern PyObject* PyInit__contextvars(void);
+ extern PyObject* PyInit__tokenize(void);
+ 
+ /* tools/freeze/makeconfig.py marker for additional "extern" */
+ /* -- ADDMODULE MARKER 1 -- */
 +extern PyObject* PyInit_retrace(void);
-@@ -171,0 +173 @@ struct _inittab _PyImport_Inittab[] = {
+ 
+ extern PyObject* PyMarshal_Init(void);
+ extern PyObject* PyInit__imp(void);
+@@ -148,7 +149,8 @@ struct _inittab _PyImport_Inittab[] = {
+     {"_codecs_tw", PyInit__codecs_tw},
+ 
+ /* tools/freeze/makeconfig.py marker for additional "_inittab" entries */
+ /* -- ADDMODULE MARKER 2 -- */
 +    {"retrace", PyInit_retrace},
+ 
+     /* This module "lives in" with marshal.c */
+     {"marshal", PyMarshal_Init},
 diff --git a/PCbuild/_freeze_module.vcxproj b/PCbuild/_freeze_module.vcxproj
 index 442e343..b3fd2a6 100644
 --- a/PCbuild/_freeze_module.vcxproj
