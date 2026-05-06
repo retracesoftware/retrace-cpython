@@ -8,6 +8,10 @@ on:
         required: true
         default: "manifest-latest"
         type: string
+      package_version:
+        description: "Retrace package version for PyPI wheels, independent of CPython versions"
+        required: true
+        type: string
       release_build:
         description: "Use optimized CPython configure flags on POSIX builds"
         required: true
@@ -32,6 +36,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
+  PACKAGE_VERSION: ${{ inputs.package_version }}
   RELEASE_BUILD: ${{ inputs.release_build || false }}
   UPLOAD_ARTIFACTS: ${{ inputs.upload_artifacts }}
   PUBLISH_PYPI: ${{ inputs.publish_pypi || false }}
@@ -221,6 +226,7 @@ jobs:
         run: |
           scripts/package-wheel \
             "${{ matrix.python-version }}" \
+            "${PACKAGE_VERSION}" \
             "${{ matrix.platform.target }}" \
             "build/package/retrace-cpython-${{ matrix.python-version }}-${{ matrix.platform.target }}"
 
@@ -381,12 +387,14 @@ jobs:
       - name: Build PyPI wheel
         shell: pwsh
         env:
+          PACKAGE_VERSION: ${{ env.PACKAGE_VERSION }}
           PYTHON_VERSION: ${{ matrix.python-version }}
           TARGET: ${{ matrix.platform.target }}
         run: |
           $runtime = Join-Path $env:GITHUB_WORKSPACE "build/package/retrace-cpython-$env:PYTHON_VERSION-$env:TARGET"
           python "$env:GITHUB_WORKSPACE/scripts/package-wheel" `
             $env:PYTHON_VERSION `
+            $env:PACKAGE_VERSION `
             $env:TARGET `
             $runtime
 

@@ -63,10 +63,14 @@ setting `PYTHONHOME`.
 
 The GitHub workflow also builds platform wheels for the
 `retracesoftware-cpython` PyPI project. Each wheel contains the minimal runtime
-overlay plus a `retrace-python` launcher. Publishing is opt-in through the
-workflow's `publish_pypi` input and uses PyPI Trusted Publishing. The publish
-job only runs after every platform build has completed the patched CPython test
-suite and uploaded its wheel artifact.
+overlay plus a `retrace-python` launcher. The workflow's `package_version`
+input is the Retrace package release version; it is independent from the
+CPython versions being built. The CPython version remains in the wheel's
+interpreter tag, `Requires-Python`, and wheel build tag so a single Retrace
+release can carry multiple CPython builds without reusing filenames. Publishing
+is opt-in through the workflow's `publish_pypi` input and uses PyPI Trusted
+Publishing. The publish job only runs after every platform build has completed
+the patched CPython test suite and uploaded its wheel artifact.
 
 Linux wheels are tagged for the Ubuntu 24.04 runner baseline
 (`manylinux_2_39_*`). Use older manylinux container builds later if broader
