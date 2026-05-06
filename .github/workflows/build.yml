@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       python_version:
-        description: "Exact version to build, or manifest-latest for each patch series"
+        description: "Exact version, manifest-all, or manifest-latest"
         required: true
-        default: "manifest-latest"
+        default: "manifest-all"
         type: string
       package_bump:
         description: "Retrace package version component to bump from the latest PyPI release"
@@ -68,7 +68,7 @@ jobs:
           import tomllib
 
           requested = os.environ["VERSION_INPUT"].strip()
-          if requested and requested != "manifest-latest":
+          if requested and requested not in {"manifest-all", "manifest-latest"}:
               versions = [requested.removeprefix("v")]
           else:
               versions = []
@@ -76,10 +76,15 @@ jobs:
                   data = tomllib.loads(manifest.read_text())
                   verified = data.get("verified_applies") or []
                   if verified:
-                      versions.append(verified[-1])
+                      if requested == "manifest-latest":
+                          versions.append(verified[-1])
+                      else:
+                          versions.extend(verified)
 
           if not versions:
               raise SystemExit("No CPython versions selected")
+
+          versions = list(dict.fromkeys(versions))
 
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
               print(f"versions={json.dumps(versions)}", file=output)
