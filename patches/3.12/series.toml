@@ -30,4 +30,5 @@ patches = [
   "0004-Add-retrace-replay-checkpoint-callback.patch",
   "0005-Update-frame-size-tests-for-retrace-field.patch",
   "0006-Build-retrace-as-a-Windows-builtin-module.patch",
+  "0007-Build-Windows-freeze-helper-with-Win8.1-API-target.patch",
 ]

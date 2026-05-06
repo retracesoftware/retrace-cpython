@@ -1,0 +1,25 @@
+From 3389ec8830be3b8bd5558d71eb908edc3017b8f6 Mon Sep 17 00:00:00 2001
+From: nathan-retrace <nathan@retracesoftware.com>
+Date: Wed, 6 May 2026 13:03:00 +0100
+Subject: [PATCH] Build Windows freeze helper with Win8.1 API target
+
+---
+ PCbuild/_freeze_module.vcxproj | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/PCbuild/_freeze_module.vcxproj b/PCbuild/_freeze_module.vcxproj
+index c114bfd..0e580c7 100644
+--- a/PCbuild/_freeze_module.vcxproj
++++ b/PCbuild/_freeze_module.vcxproj
+@@ -88,7 +88,7 @@
+   <PropertyGroup Label="UserMacros" />
+   <ItemDefinitionGroup>
+     <ClCompile>
+-      <PreprocessorDefinitions>Py_NO_ENABLE_SHARED;Py_BUILD_CORE;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
++      <PreprocessorDefinitions>Py_NO_ENABLE_SHARED;Py_BUILD_CORE;_CONSOLE;WINVER=0x0603;_WIN32_WINNT=0x0603;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+       <Optimization>Disabled</Optimization>
+       <WholeProgramOptimization>false</WholeProgramOptimization>
+     </ClCompile>
+-- 
+2.39.5
+
