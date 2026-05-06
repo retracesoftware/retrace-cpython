@@ -151,7 +151,12 @@ fi
 if (( ${#patches[@]} == 0 )); then
   echo "No patches found in ${patch_dir}; checkout remains vanilla ${tag}."
 else
-  git -C "${dest}" am --3way "${patches[@]}"
+  if ! git -C "${dest}" am "${patches[@]}"; then
+    git -C "${dest}" am --abort || true
+    git -C "${dest}" reset --hard "${tag}"
+    git -C "${dest}" clean -fdx
+    git -C "${dest}" am --3way "${patches[@]}"
+  fi
 fi
 
 echo "Prepared ${dest}"

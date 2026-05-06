@@ -1,0 +1,102 @@
+#!/usr/bin/env python3
+import argparse
+import platform
+import shutil
+import tarfile
+import zipfile
+from pathlib import Path
+
+
+EXECUTABLE_NAMES = {
+    "python",
+    "python.exe",
+}
+LIBRARY_PATTERNS = (
+    "python*.dll",
+    "vcruntime*.dll",
+    "libpython*.so",
+    "libpython*.so.*",
+    "libpython*.dylib",
+)
+
+
+def matches(name, patterns):
+    import fnmatch
+
+    return any(fnmatch.fnmatchcase(name, pattern) for pattern in patterns)
+
+
+def selected_files(root):
+    files = []
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        name = path.name
+        if name in EXECUTABLE_NAMES or matches(name, LIBRARY_PATTERNS):
+            files.append(path)
+
+    executable_files = [p for p in files if p.name in EXECUTABLE_NAMES]
+    if not executable_files:
+        raise SystemExit(f"no Python executable found under {root}")
+
+    return sorted(set(files))
+
+
+def make_archive(stage, archive):
+    if archive.suffix == ".zip":
+        with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zf:
+            for path in sorted(stage.rglob("*")):
+                if path.is_file():
+                    zf.write(path, path.relative_to(stage))
+    else:
+        with tarfile.open(archive, "w:gz") as tf:
+            tf.add(stage, arcname=stage.name)
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Package the patched executable and required CPython runtime libraries."
+    )
+    parser.add_argument("version")
+    parser.add_argument("target")
+    parser.add_argument("runtime_root", type=Path)
+    parser.add_argument(
+        "--dist-dir",
+        type=Path,
+        default=Path("build/dist"),
+        help="Directory for the output archive.",
+    )
+    args = parser.parse_args()
+
+    runtime_root = args.runtime_root.resolve()
+    if not runtime_root.is_dir():
+        raise SystemExit(f"runtime root does not exist: {runtime_root}")
+
+    dist_dir = args.dist_dir.resolve()
+    package_root = Path("build/package") / f"retrace-cpython-{args.version}-{args.target}"
+    if package_root.exists():
+        shutil.rmtree(package_root)
+    package_root.mkdir(parents=True)
+
+    copied = []
+    for src in selected_files(runtime_root):
+        rel = src.relative_to(runtime_root)
+        dest = package_root / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dest)
+        copied.append(rel.as_posix())
+
+    dist_dir.mkdir(parents=True, exist_ok=True)
+    suffix = ".zip" if platform.system() == "Windows" else ".tar.gz"
+    archive = dist_dir / f"{package_root.name}{suffix}"
+    if archive.exists():
+        archive.unlink()
+    make_archive(package_root, archive)
+
+    print(f"Packaged {archive}")
+    for rel in copied:
+        print(f"  {rel}")
+
+
+if __name__ == "__main__":
+    main()

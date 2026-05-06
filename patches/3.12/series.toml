@@ -1,5 +1,6 @@
 python = ">=3.12.0,<3.13.0"
 probe_abi = "retrace_probe_abi_1"
+retrace_module = "builtin"
 
 verified_applies = [
   "3.12.0",
@@ -28,4 +29,5 @@ patches = [
   "0003-Add-retrace-thread-switch-callback.patch",
   "0004-Add-retrace-replay-checkpoint-callback.patch",
   "0005-Update-frame-size-tests-for-retrace-field.patch",
+  "0006-Build-retrace-as-a-Windows-builtin-module.patch",
 ]

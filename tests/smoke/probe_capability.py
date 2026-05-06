@@ -35,6 +35,7 @@ def main() -> int:
 
     spec = importlib.util.find_spec("retrace")
     if spec is not None:
+        assert "retrace" in sys.builtin_module_names
         module = __import__("retrace")
         counters = module.instruction_counters()
         counters_by_id = module.instruction_counters(threading.get_ident())
@@ -55,7 +56,7 @@ def main() -> int:
         assert module.get_thread_switch_callback() is None
         check_replay_checkpoint(module)
 
-        print("retrace_module=available")
+        print("retrace_module=builtin")
         print(f"instruction_counters_type={type(counters).__name__}")
         print(f"instruction_counters_len={len(counters)}")
         print(f"instruction_counters_format={view.format}")

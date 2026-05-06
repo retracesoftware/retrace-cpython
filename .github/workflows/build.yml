@@ -1,0 +1,330 @@
+name: Build patched CPython
+
+on:
+  workflow_dispatch:
+    inputs:
+      python_version:
+        description: "Exact version to build, or manifest-latest for each patch series"
+        required: true
+        default: "manifest-latest"
+        type: string
+      release_build:
+        description: "Use optimized CPython configure flags on POSIX builds"
+        required: true
+        default: false
+        type: boolean
+      upload_artifacts:
+        description: "Upload minimal runtime archives"
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RELEASE_BUILD: ${{ inputs.release_build || false }}
+  UPLOAD_ARTIFACTS: ${{ inputs.upload_artifacts }}
+
+jobs:
+  versions:
+    name: Select CPython versions
+    runs-on: ubuntu-24.04
+    outputs:
+      versions: ${{ steps.versions.outputs.versions }}
+    steps:
+      - name: Check out retrace-cpython
+        uses: actions/checkout@v4
+
+      - name: Resolve versions
+        id: versions
+        env:
+          VERSION_INPUT: ${{ inputs.python_version || 'manifest-latest' }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import pathlib
+          import tomllib
+
+          requested = os.environ["VERSION_INPUT"].strip()
+          if requested and requested != "manifest-latest":
+              versions = [requested.removeprefix("v")]
+          else:
+              versions = []
+              for manifest in sorted(pathlib.Path("patches").glob("*/series.toml")):
+                  data = tomllib.loads(manifest.read_text())
+                  verified = data.get("verified_applies") or []
+                  if verified:
+                      versions.append(verified[-1])
+
+          if not versions:
+              raise SystemExit("No CPython versions selected")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              print(f"versions={json.dumps(versions)}", file=output)
+
+          print("Selected CPython versions:", ", ".join(versions))
+          PY
+
+  posix:
+    name: ${{ matrix.python-version }} ${{ matrix.platform.target }}
+    needs: versions
+    runs-on: ${{ matrix.platform.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ${{ fromJSON(needs.versions.outputs.versions) }}
+        platform:
+          - target: linux-x64
+            os: ubuntu-24.04
+          - target: linux-arm64
+            os: ubuntu-24.04-arm
+          - target: macos-intel
+            os: macos-15-intel
+          - target: macos-arm64
+            os: macos-15
+    steps:
+      - name: Check out retrace-cpython
+        uses: actions/checkout@v4
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            libbz2-dev \
+            libdb-dev \
+            libffi-dev \
+            libgdbm-dev \
+            liblzma-dev \
+            libncursesw5-dev \
+            libreadline-dev \
+            libsqlite3-dev \
+            libssl-dev \
+            tk-dev \
+            uuid-dev \
+            zlib1g-dev
+
+      - name: Install macOS build dependencies
+        if: runner.os == 'macOS'
+        run: |
+          brew update
+          brew install pkg-config openssl@3 xz gdbm tcl-tk mpdecimal zstd
+
+      - name: Configure build environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          patched_flags=()
+          vanilla_flags=()
+
+          if [[ "${RELEASE_BUILD}" == "true" ]]; then
+            patched_flags+=(--enable-optimizations --with-lto)
+          fi
+
+          if [[ "${RUNNER_OS}" == "macOS" ]]; then
+            openssl_prefix="$(brew --prefix openssl@3)"
+            gdbm_prefix="$(brew --prefix gdbm)"
+            patched_flags+=(--with-openssl="${openssl_prefix}")
+            vanilla_flags+=(--with-openssl="${openssl_prefix}")
+            {
+              echo "GDBM_CFLAGS=-I${gdbm_prefix}/include"
+              echo "GDBM_LIBS=-L${gdbm_prefix}/lib -lgdbm"
+            } >> "${GITHUB_ENV}"
+          fi
+
+          {
+            echo "CONFIGURE_FLAGS<<EOF"
+            printf '%s\n' "${patched_flags[*]}"
+            echo "EOF"
+            echo "VANILLA_CONFIGURE_FLAGS<<EOF"
+            printf '%s\n' "${vanilla_flags[*]}"
+            echo "EOF"
+          } >> "${GITHUB_ENV}"
+
+      - name: Build and install vanilla CPython
+        env:
+          JOBS: 4
+          PYTHON_VERSION: ${{ matrix.python-version }}
+        run: |
+          set -euo pipefail
+          repo_url="${CPYTHON_REPO_URL:-https://github.com/python/cpython.git}"
+          vanilla_source="${GITHUB_WORKSPACE}/build/src/cpython-${PYTHON_VERSION}+vanilla"
+          vanilla_prefix="${GITHUB_WORKSPACE}/build/vanilla/${PYTHON_VERSION}"
+          git clone --branch "v${PYTHON_VERSION}" --depth 1 "${repo_url}" "${vanilla_source}"
+          (
+            cd "${vanilla_source}"
+            ./configure --prefix="${vanilla_prefix}" ${VANILLA_CONFIGURE_FLAGS:-}
+            make -j"${JOBS}"
+            make install
+          )
+
+      - name: Apply patch stack
+        run: scripts/apply-patches "${{ matrix.python-version }}"
+
+      - name: Build patched CPython executable
+        env:
+          JOBS: 4
+        run: |
+          set -euo pipefail
+          source_dir="${GITHUB_WORKSPACE}/build/src/cpython-${{ matrix.python-version }}+retrace"
+          (
+            cd "${source_dir}"
+            ./configure ${CONFIGURE_FLAGS:-}
+            make -j"${JOBS}"
+          )
+
+      - name: Validate patched executable against vanilla install
+        run: |
+          set -euo pipefail
+          source_dir="${GITHUB_WORKSPACE}/build/src/cpython-${{ matrix.python-version }}+retrace"
+          patched_python="${source_dir}/python"
+          if [[ ! -x "${patched_python}" ]]; then
+            patched_python="${source_dir}/python.exe"
+          fi
+          scripts/test-against-vanilla \
+            "${patched_python}" \
+            "${GITHUB_WORKSPACE}/build/vanilla/${{ matrix.python-version }}" \
+            tests/smoke/probe_capability.py \
+            --version "${{ matrix.python-version }}"
+
+      - name: Package minimal runtime overlay
+        run: |
+          scripts/package-runtime \
+            "${{ matrix.python-version }}" \
+            "${{ matrix.platform.target }}" \
+            "build/src/cpython-${{ matrix.python-version }}+retrace"
+
+      - name: Upload build archive
+        if: env.UPLOAD_ARTIFACTS == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: retrace-cpython-${{ matrix.python-version }}-${{ matrix.platform.target }}
+          path: build/dist/*.tar.gz
+          if-no-files-found: error
+
+  windows:
+    name: ${{ matrix.python-version }} ${{ matrix.platform.target }}
+    needs: versions
+    runs-on: ${{ matrix.platform.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ${{ fromJSON(needs.versions.outputs.versions) }}
+        platform:
+          - target: windows-x64
+            os: windows-2022
+            pcbuild-platform: x64
+            pcbuild-output: amd64
+          - target: windows-x86
+            os: windows-2022
+            pcbuild-platform: Win32
+            pcbuild-output: win32
+          - target: windows-arm64
+            os: windows-11-arm
+            pcbuild-platform: ARM64
+            pcbuild-output: arm64
+    steps:
+      - name: Check out retrace-cpython
+        uses: actions/checkout@v4
+
+      - name: Set up Python for patch manifest parsing
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Apply patch stack
+        shell: bash
+        env:
+          PYTHON: python
+        run: scripts/apply-patches "${{ matrix.python-version }}"
+
+      - name: Check out vanilla CPython
+        shell: pwsh
+        env:
+          PYTHON_VERSION: ${{ matrix.python-version }}
+        run: |
+          $repo = if ($env:CPYTHON_REPO_URL) { $env:CPYTHON_REPO_URL } else { "https://github.com/python/cpython.git" }
+          $vanilla = Join-Path $env:GITHUB_WORKSPACE "build/src/cpython-$env:PYTHON_VERSION+vanilla"
+          git clone --branch "v$env:PYTHON_VERSION" --depth 1 $repo $vanilla
+
+      - name: Build patched CPython
+        shell: pwsh
+        env:
+          PYTHON_VERSION: ${{ matrix.python-version }}
+          PCBUILD_PLATFORM: ${{ matrix.platform.pcbuild-platform }}
+        run: |
+          $source = Join-Path $env:GITHUB_WORKSPACE "build/src/cpython-$env:PYTHON_VERSION+retrace"
+          Push-Location $source
+          .\PCbuild\build.bat -e -p $env:PCBUILD_PLATFORM -c Release
+          if ($LASTEXITCODE -ne 0) {
+              exit $LASTEXITCODE
+          }
+
+      - name: Build and install vanilla CPython
+        shell: pwsh
+        env:
+          PYTHON_VERSION: ${{ matrix.python-version }}
+          PCBUILD_PLATFORM: ${{ matrix.platform.pcbuild-platform }}
+          PCBUILD_OUTPUT: ${{ matrix.platform.pcbuild-output }}
+        run: |
+          $vanilla = Join-Path $env:GITHUB_WORKSPACE "build/src/cpython-$env:PYTHON_VERSION+vanilla"
+          Push-Location $vanilla
+          .\PCbuild\build.bat -e -p $env:PCBUILD_PLATFORM -c Release
+          if ($LASTEXITCODE -ne 0) {
+              exit $LASTEXITCODE
+          }
+          $vanillaBuild = Join-Path $vanilla "PCbuild/$env:PCBUILD_OUTPUT"
+          $vanillaHome = Join-Path $env:GITHUB_WORKSPACE "build/vanilla/$env:PYTHON_VERSION-$env:PCBUILD_OUTPUT"
+          $vanillaPython = Join-Path $vanillaBuild "python.exe"
+          & $vanillaPython "$vanilla/PC/layout" `
+            --source $vanilla `
+            --build $vanillaBuild `
+            --copy $vanillaHome `
+            --arch $env:PCBUILD_OUTPUT
+          if ($LASTEXITCODE -ne 0) {
+              exit $LASTEXITCODE
+          }
+
+      - name: Validate patched executable against vanilla home
+        shell: pwsh
+        env:
+          PYTHON_VERSION: ${{ matrix.python-version }}
+          PCBUILD_OUTPUT: ${{ matrix.platform.pcbuild-output }}
+        run: |
+          $source = Join-Path $env:GITHUB_WORKSPACE "build/src/cpython-$env:PYTHON_VERSION+retrace"
+          $vanilla = Join-Path $env:GITHUB_WORKSPACE "build/vanilla/$env:PYTHON_VERSION-$env:PCBUILD_OUTPUT"
+          $python = Join-Path $source "PCbuild/$env:PCBUILD_OUTPUT/python.exe"
+          python "$env:GITHUB_WORKSPACE/scripts/test-against-vanilla" `
+            $python `
+            $vanilla `
+            "$env:GITHUB_WORKSPACE/tests/smoke/probe_capability.py" `
+            --version $env:PYTHON_VERSION
+
+      - name: Package minimal runtime overlay
+        shell: pwsh
+        env:
+          PYTHON_VERSION: ${{ matrix.python-version }}
+          TARGET: ${{ matrix.platform.target }}
+          PCBUILD_OUTPUT: ${{ matrix.platform.pcbuild-output }}
+        run: |
+          $source = Join-Path $env:GITHUB_WORKSPACE "build/src/cpython-$env:PYTHON_VERSION+retrace"
+          $runtime = Join-Path $source "PCbuild/$env:PCBUILD_OUTPUT"
+          python "$env:GITHUB_WORKSPACE/scripts/package-runtime" `
+            $env:PYTHON_VERSION `
+            $env:TARGET `
+            $runtime
+
+      - name: Upload build archive
+        if: env.UPLOAD_ARTIFACTS == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: retrace-cpython-${{ matrix.python-version }}-${{ matrix.platform.target }}
+          path: build/dist/*.zip
+          if-no-files-found: error

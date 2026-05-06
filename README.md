@@ -26,12 +26,15 @@ the org mirror/fork as the source remote.
 
 ```text
 patches/
+  3.11/
   3.12/
   3.13/
 scripts/
   apply-patches
   build-release
   package
+  package-runtime
+  test-against-vanilla
 docs/
   probe-abi.md
 tests/
@@ -48,6 +51,14 @@ scripts/package 3.12.8
 
 By default, sources are checked out under `build/src/`, installed interpreters
 go under `build/install/`, and release archives go under `build/dist/`.
+
+## Runtime Shape
+
+The patch stack builds `retrace` as a CPython built-in module. Release archives
+therefore contain the patched Python executable and any required CPython runtime
+dynamic libraries, not a separate `retrace.so` or `retrace.pyd`. Validation runs
+that patched executable against a vanilla install of the same CPython version by
+setting `PYTHONHOME`.
 
 ## Source Policy
 

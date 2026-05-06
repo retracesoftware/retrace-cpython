@@ -15,8 +15,10 @@ builds. The ABI is private to Retrace and should be versioned explicitly.
 ## Discovery
 
 Patched CPython exposes a built-in `retrace` module. Python-level consumers can
-probe for `retrace` with `importlib.util.find_spec()` and treat absence as
-"probe unavailable".
+probe for `retrace` with `importlib.util.find_spec()` and can confirm the baked
+in module shape with `"retrace" in sys.builtin_module_names`. Absence means
+"probe unavailable", which is the expected graceful-degradation path on
+unpatched CPython.
 
 The initial Python API is:
 

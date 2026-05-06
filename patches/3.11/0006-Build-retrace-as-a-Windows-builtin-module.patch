@@ -1,0 +1,33 @@
+From 101a180a1bc3bbedbeb490b703ec568ef2ddf5d5 Mon Sep 17 00:00:00 2001
+From: nathan-retrace <nathan@retracesoftware.com>
+Date: Tue, 5 May 2026 22:29:50 +0100
+Subject: [PATCH] Build retrace as a Windows builtin module
+
+---
+ PC/config.c                        | 2 ++
+ PCbuild/pythoncore.vcxproj         | 1 +
+ PCbuild/pythoncore.vcxproj.filters | 3 +++
+ 3 files changed, 6 insertions(+)
+
+diff --git a/PC/config.c b/PC/config.c
+index 9d900c7..58429bb 100644
+--- a/PC/config.c
++++ b/PC/config.c
+@@ -76,0 +77 @@ extern PyObject* PyInit__tokenize(void);
++extern PyObject* PyInit_retrace(void);
+@@ -171,0 +173 @@ struct _inittab _PyImport_Inittab[] = {
++    {"retrace", PyInit_retrace},
+diff --git a/PCbuild/pythoncore.vcxproj b/PCbuild/pythoncore.vcxproj
+index 078cc59..7f8bf81 100644
+--- a/PCbuild/pythoncore.vcxproj
++++ b/PCbuild/pythoncore.vcxproj
+@@ -390,0 +391 @@
++    <ClCompile Include="..\Modules\retracemodule.c" />
+diff --git a/PCbuild/pythoncore.vcxproj.filters b/PCbuild/pythoncore.vcxproj.filters
+index e3fe927..a589e32 100644
+--- a/PCbuild/pythoncore.vcxproj.filters
++++ b/PCbuild/pythoncore.vcxproj.filters
+@@ -811,0 +812,3 @@
++    <ClCompile Include="..\Modules\retracemodule.c">
++      <Filter>Modules</Filter>
++    </ClCompile>
