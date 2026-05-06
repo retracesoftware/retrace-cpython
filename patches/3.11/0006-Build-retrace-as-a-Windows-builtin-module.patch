@@ -24,22 +24,40 @@ diff --git a/PCbuild/_freeze_module.vcxproj b/PCbuild/_freeze_module.vcxproj
 index 442e343..b3fd2a6 100644
 --- a/PCbuild/_freeze_module.vcxproj
 +++ b/PCbuild/_freeze_module.vcxproj
-@@ -103,0 +104 @@
+@@ -101,6 +101,7 @@
+   <ItemGroup>
+     <ClCompile Include="..\Programs\_freeze_module.c" />
+     <ClCompile Include="..\PC\config_minimal.c" />
 +    <ClCompile Include="..\Python\retrace_bootstrap.c" />
+   </ItemGroup>
+   <ItemGroup>
+     <ClCompile Include="..\Modules\atexitmodule.c" />
 diff --git a/PCbuild/pythoncore.vcxproj b/PCbuild/pythoncore.vcxproj
 index 078cc59..7f8bf81 100644
 --- a/PCbuild/pythoncore.vcxproj
 +++ b/PCbuild/pythoncore.vcxproj
-@@ -390,0 +391 @@
+@@ -388,6 +388,7 @@
+     <ClCompile Include="..\Modules\_opcode.c" />
+     <ClCompile Include="..\Modules\_operator.c" />
+     <ClCompile Include="..\Modules\posixmodule.c" />
 +    <ClCompile Include="..\Modules\retracemodule.c" />
+     <ClCompile Include="..\Modules\rotatingtree.c" />
+     <ClCompile Include="..\Modules\sha1module.c" />
+     <ClCompile Include="..\Modules\sha256module.c" />
 diff --git a/PCbuild/pythoncore.vcxproj.filters b/PCbuild/pythoncore.vcxproj.filters
 index e3fe927..a589e32 100644
 --- a/PCbuild/pythoncore.vcxproj.filters
 +++ b/PCbuild/pythoncore.vcxproj.filters
-@@ -811,0 +812,3 @@
+@@ -809,6 +809,9 @@
+     <ClCompile Include="..\Modules\posixmodule.c">
+       <Filter>Modules</Filter>
+     </ClCompile>
 +    <ClCompile Include="..\Modules\retracemodule.c">
 +      <Filter>Modules</Filter>
 +    </ClCompile>
+     <ClCompile Include="..\Modules\rotatingtree.c">
+       <Filter>Modules</Filter>
+     </ClCompile>
 diff --git a/Python/retrace_bootstrap.c b/Python/retrace_bootstrap.c
 new file mode 100644
 index 0000000..3f101f3
