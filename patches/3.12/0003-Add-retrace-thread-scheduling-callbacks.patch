@@ -1,0 +1,141 @@
+From 98f6591243da5177626fe9bbb9858f495805056b Mon Sep 17 00:00:00 2001
+From: Retrace CPython Builder <retrace-cpython@retracesoftware.com>
+Date: Wed, 6 May 2026 22:53:38 +0100
+Subject: [PATCH 3/7] Add retrace thread scheduling callbacks
+
+---
+ Include/cpython/pystate.h        |  5 +++++
+ Include/internal/pycore_interp.h |  3 +++
+ Python/ceval_gil.c               | 14 ++++++++++++--
+ Python/pystate.c                 |  2 ++
+ 4 files changed, 22 insertions(+), 2 deletions(-)
+
+diff --git a/Include/cpython/pystate.h b/Include/cpython/pystate.h
+index 95fad89..5ea4149 100644
+--- a/Include/cpython/pystate.h
++++ b/Include/cpython/pystate.h
+@@ -246,6 +246,11 @@ struct _ts {
+ 
+     /* The bottom-most frame on the stack. */
+     _PyCFrame root_cframe;
++
++    int retrace_thread_resume_pending;
++    struct _PyInterpreterFrame *retrace_thread_resume_frame;
++    int retrace_thread_callback_active;
++    struct _PyInterpreterFrame *retrace_thread_callback_frame;
+ };
+ 
+ /* WASI has limited call stack. Python's recursion limit depends on code
+diff --git a/Include/internal/pycore_interp.h b/Include/internal/pycore_interp.h
+index 37cc88e..90949a1 100644
+--- a/Include/internal/pycore_interp.h
++++ b/Include/internal/pycore_interp.h
+@@ -183,3 +183,6 @@ struct _is {
+     PyObject *audit_hooks;
++    PyObject *retrace_thread_yield_callback;
++    PyObject *retrace_thread_resume_callback;
++
+     PyType_WatchCallback type_watchers[TYPE_MAX_WATCHERS];
+     PyCode_WatchCallback code_watchers[CODE_MAX_WATCHERS];
+diff --git a/Python/ceval_gil.c b/Python/ceval_gil.c
+index c1ab588..6bd4ec4 100644
+--- a/Python/ceval_gil.c
++++ b/Python/ceval_gil.c
+@@ -7,6 +7,7 @@
+ #include "pycore_initconfig.h"    // _PyStatus_OK()
+ #include "pycore_interp.h"        // _Py_RunGC()
+ #include "pycore_pymem.h"         // _PyMem_IsPtrFreed()
++#include "pycore_retrace.h"       // thread scheduling callbacks
+ 
+ /*
+    Notes about the implementation:
+@@ -411,9 +412,12 @@ take_gil(PyThreadState *tstate)
+     _Py_atomic_store_relaxed(&gil->locked, 1);
+     _Py_ANNOTATE_RWLOCK_ACQUIRED(&gil->locked, /*is_write=*/1);
+ 
+-    if (tstate != (PyThreadState*)_Py_atomic_load_relaxed(&gil->last_holder)) {
++    PyThreadState *previous_holder =
++        (PyThreadState*)_Py_atomic_load_relaxed(&gil->last_holder);
++    if (tstate != previous_holder) {
+         _Py_atomic_store_relaxed(&gil->last_holder, (uintptr_t)tstate);
+         ++gil->switch_number;
++        _PyRetrace_NoteThreadResume(tstate);
+     }
+ 
+ #ifdef FORCE_SWITCHING
+@@ -596,6 +600,7 @@ PyEval_AcquireLock(void)
+     _Py_EnsureTstateNotNULL(tstate);
+ 
+     take_gil(tstate);
++    _PyRetrace_DeliverThreadResumeCallback(tstate);
+ }
+ 
+ void
+@@ -614,6 +619,7 @@ _PyEval_AcquireLock(PyThreadState *tstate)
+ {
+     _Py_EnsureTstateNotNULL(tstate);
+     take_gil(tstate);
++    _PyRetrace_DeliverThreadResumeCallback(tstate);
+ }
+ 
+ void
+@@ -636,6 +642,7 @@ PyEval_AcquireThread(PyThreadState *tstate)
+     if (_PyThreadState_SwapNoGIL(tstate) != NULL) {
+         Py_FatalError("non-NULL old thread state");
+     }
++    _PyRetrace_DeliverThreadResumeCallback(tstate);
+ }
+ 
+ void
+@@ -708,6 +715,7 @@ PyEval_RestoreThread(PyThreadState *tstate)
+     take_gil(tstate);
+ 
+     _PyThreadState_SwapNoGIL(tstate);
++    _PyRetrace_DeliverThreadResumeCallback(tstate);
+ }
+ 
+ 
+@@ -770,6 +778,7 @@ _push_pending_call(struct _pending_calls *pending,
+     return 0;
+ }
+ 
++
+ static int
+ _next_pending_call(struct _pending_calls *pending,
+                    int (**func)(void *), void **arg)
+@@ -1048,6 +1057,7 @@ _Py_HandlePending(PyThreadState *tstate)
+     /* GIL drop request */
+     if (_Py_atomic_load_relaxed_int32(&interp_ceval_state->gil_drop_request)) {
+         /* Give another thread a chance */
++        _PyRetrace_DeliverThreadYieldCallback(tstate);
+         if (_PyThreadState_SwapNoGIL(NULL) != tstate) {
+             Py_FatalError("tstate mix-up");
+         }
+@@ -1060,6 +1070,7 @@ _Py_HandlePending(PyThreadState *tstate)
+         if (_PyThreadState_SwapNoGIL(tstate) != NULL) {
+             Py_FatalError("orphan tstate");
+         }
++        _PyRetrace_DeliverThreadResumeCallback(tstate);
+     }
+ 
+     /* Check for asynchronous exception. */
+@@ -1086,4 +1097,3 @@ _Py_HandlePending(PyThreadState *tstate)
+ 
+     return 0;
+ }
+-
+diff --git a/Python/pystate.c b/Python/pystate.c
+index 6aed9ac..723e1d1 100644
+--- a/Python/pystate.c
++++ b/Python/pystate.c
+@@ -851,6 +851,8 @@ interpreter_clear(PyInterpreterState *interp, PyThreadState *tstate)
+     // XXX Make sure we properly deal with problematic finalizers.
+ 
+     Py_CLEAR(interp->audit_hooks);
++    Py_CLEAR(interp->retrace_thread_yield_callback);
++    Py_CLEAR(interp->retrace_thread_resume_callback);
+ 
+     for (int i = 0; i < _PY_MONITORING_UNGROUPED_EVENTS; i++) {
+         interp->monitors.tools[i] = 0;
+-- 
+2.50.1 (Apple Git-155)

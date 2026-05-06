@@ -2,13 +2,17 @@
 #include "pycore_retrace.h"
 
 void
-_PyRetrace_NoteThreadSwitch(PyThreadState *from_tstate,
-                            PyThreadState *to_tstate)
+_PyRetrace_NoteThreadResume(PyThreadState *tstate)
 {
 }
 
 void
-_PyRetrace_DeliverThreadSwitchCallback(PyThreadState *tstate)
+_PyRetrace_DeliverThreadResumeCallback(PyThreadState *tstate)
+{
+}
+
+void
+_PyRetrace_DeliverThreadYieldCallback(PyThreadState *tstate)
 {
 }
 

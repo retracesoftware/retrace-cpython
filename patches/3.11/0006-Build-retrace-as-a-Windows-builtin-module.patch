@@ -1,20 +1,20 @@
-From e800a8f79b95268bd73fd7707a00e4cd400a2a90 Mon Sep 17 00:00:00 2001
+From b5e4339d5de1d09de7f564545fdcf1d237133060 Mon Sep 17 00:00:00 2001
 From: nathan-retrace <nathan@retracesoftware.com>
 Date: Tue, 5 May 2026 22:29:50 +0100
-Subject: [PATCH] Build retrace as a Windows builtin module
+Subject: [PATCH 6/6] Build retrace as a Windows builtin module
 
 ---
- PC/config.c                        |  2 ++
- PCbuild/_freeze_module.vcxproj     |  1 +
- PCbuild/pythoncore.vcxproj         |  1 +
- PCbuild/pythoncore.vcxproj.filters |  3 +++
+ PC/config.c                        | 2 ++
+ PCbuild/_freeze_module.vcxproj     | 1 +
+ PCbuild/pythoncore.vcxproj         | 1 +
+ PCbuild/pythoncore.vcxproj.filters | 3 +++
+ 4 files changed, 7 insertions(+)
 
 diff --git a/PC/config.c b/PC/config.c
-index 9d900c7..58429bb 100644
+index 9d900c7..4f28916 100644
 --- a/PC/config.c
 +++ b/PC/config.c
-@@ -76,7 +76,8 @@ extern PyObject* PyInit__contextvars(void);
- extern PyObject* PyInit__tokenize(void);
+@@ -77,6 +77,7 @@ extern PyObject* PyInit__tokenize(void);
  
  /* tools/freeze/makeconfig.py marker for additional "extern" */
  /* -- ADDMODULE MARKER 1 -- */
@@ -22,8 +22,7 @@ index 9d900c7..58429bb 100644
  
  extern PyObject* PyMarshal_Init(void);
  extern PyObject* PyInit__imp(void);
-@@ -148,7 +149,8 @@ struct _inittab _PyImport_Inittab[] = {
-     {"_codecs_tw", PyInit__codecs_tw},
+@@ -149,6 +150,7 @@ struct _inittab _PyImport_Inittab[] = {
  
  /* tools/freeze/makeconfig.py marker for additional "_inittab" entries */
  /* -- ADDMODULE MARKER 2 -- */
@@ -69,3 +68,6 @@ index e3fe927..a589e32 100644
      <ClCompile Include="..\Modules\rotatingtree.c">
        <Filter>Modules</Filter>
      </ClCompile>
+-- 
+2.50.1 (Apple Git-155)
+

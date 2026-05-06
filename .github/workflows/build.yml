@@ -233,9 +233,14 @@ jobs:
         run: |
           set -euo pipefail
           source_dir="${GITHUB_WORKSPACE}/build/src/cpython-${{ matrix.python-version }}+retrace"
-          patched_python="${source_dir}/python"
-          if [[ ! -x "${patched_python}" ]]; then
-            patched_python="${source_dir}/python.exe"
+          patched_python="${source_dir}/python.exe"
+          if [[ ! -f "${patched_python}" || ! -x "${patched_python}" ]]; then
+            patched_python="${source_dir}/python"
+          fi
+          if [[ ! -f "${patched_python}" || ! -x "${patched_python}" ]]; then
+            echo "No patched Python executable found in ${source_dir}" >&2
+            find "${source_dir}" -maxdepth 1 -type f -perm -111 -print >&2
+            exit 1
           fi
           scripts/test-against-vanilla \
             "${patched_python}" \

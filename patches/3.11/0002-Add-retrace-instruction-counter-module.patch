@@ -1,16 +1,24 @@
-From 71f1ca55dfc3c7c74aeb024f5d3e4a3f91b185ce Mon Sep 17 00:00:00 2001
+From 7ef2cc6cc02c9a295c976f157f66d34f0fcba624 Mon Sep 17 00:00:00 2001
 From: nathan-retrace <nathan@retracesoftware.com>
 Date: Tue, 5 May 2026 21:55:20 +0100
-Subject: [PATCH 2/5] Add retrace instruction counter module
+Subject: [PATCH 2/6] Add retrace instruction counter module
 
 ---
- Modules/Setup.bootstrap.in |   1 +
+ Modules/Setup.bootstrap.in | 1 +
+ 1 file changed, 1 insertion(+)
 
 diff --git a/Modules/Setup.bootstrap.in b/Modules/Setup.bootstrap.in
 index e3e9b96..f579bee 100644
 --- a/Modules/Setup.bootstrap.in
 +++ b/Modules/Setup.bootstrap.in
-@@ -32,2 +32,3 @@ _stat _stat.c
+@@ -30,6 +30,7 @@ _locale _localemodule.c
+ _operator _operator.c
+ _stat _stat.c
  _symtable symtablemodule.c
 +retrace retracemodule.c
  
+ # for systems without $HOME env, used by site._getuserbase()
+ @MODULE_PWD_TRUE@pwd pwdmodule.c
+-- 
+2.50.1 (Apple Git-155)
+

@@ -1,19 +1,23 @@
-From 60dc7b065970a9d42d0d76450f009c6c004f2cf0 Mon Sep 17 00:00:00 2001
-From: nathan-retrace <nathan@retracesoftware.com>
-Date: Tue, 5 May 2026 18:21:38 +0100
-Subject: [PATCH 4/5] Add retrace replay checkpoint callback
+From 06215d6431830ba5331ed1b49309256c4e93fce7 Mon Sep 17 00:00:00 2001
+From: Retrace CPython Builder <retrace-cpython@retracesoftware.com>
+Date: Wed, 6 May 2026 22:54:02 +0100
+Subject: [PATCH 4/7] Add retrace replay checkpoint callback
 
 ---
- Include/internal/pycore_interp.h  |   9 ++
- Python/ceval.c                    |   1 +
- Python/ceval_macros.h             |  25 +++-
- Python/pystate.c                  |   6 +
+ Include/internal/pycore_interp.h |  9 +++++++++
+ Python/ceval.c                   |  1 +
+ Python/ceval_macros.h            | 25 ++++++++++++++++++++++++-
+ Python/pystate.c                 |  6 ++++++
+ 4 files changed, 40 insertions(+), 1 deletion(-)
 
 diff --git a/Include/internal/pycore_interp.h b/Include/internal/pycore_interp.h
-index 7dfd53e..0f4345f 100644
+index 90949a1..bd05449 100644
 --- a/Include/internal/pycore_interp.h
 +++ b/Include/internal/pycore_interp.h
-@@ -235,2 +235,11 @@ struct _is {
+@@ -184,6 +184,15 @@ struct _is {
+     PyObject *audit_hooks;
+     PyObject *retrace_thread_yield_callback;
+     PyObject *retrace_thread_resume_callback;
  
 +    int retrace_replay_checkpoint_armed;
 +    unsigned long retrace_replay_checkpoint_thread_id;
@@ -24,9 +28,10 @@ index 7dfd53e..0f4345f 100644
 +    PyThreadState *retrace_replay_checkpoint_callback_tstate;
 +    struct _PyInterpreterFrame *retrace_replay_checkpoint_callback_frame;
 +
-    /* the initial PyInterpreterState.threads.head */
+     PyType_WatchCallback type_watchers[TYPE_MAX_WATCHERS];
+     PyCode_WatchCallback code_watchers[CODE_MAX_WATCHERS];
 diff --git a/Python/ceval.c b/Python/ceval.c
-index 9385ba2..e1c9a42 100644
+index 74a7291..d08adcf 100644
 --- a/Python/ceval.c
 +++ b/Python/ceval.c
 @@ -20,2 +20,3 @@
@@ -37,7 +42,9 @@ diff --git a/Python/ceval_macros.h b/Python/ceval_macros.h
 index 7b440d6..ffb7f95 100644
 --- a/Python/ceval_macros.h
 +++ b/Python/ceval_macros.h
-@@ -61,2 +61,20 @@
+@@ -59,6 +59,24 @@
+     #define USE_COMPUTED_GOTOS 0
+ #endif
  
 +#define RETRACE_REPLAY_CHECKPOINT() \
 +    do { \
@@ -58,7 +65,11 @@ index 7b440d6..ffb7f95 100644
 +    } while (0)
 +
  #ifdef Py_STATS
-@@ -68,5 +86,10 @@
+ #define INSTRUCTION_START(op) \
+     do { \
+@@ -66,9 +84,14 @@
+         OPCODE_EXE_INC(op); \
+         if (_py_stats) _py_stats->opcode_stats[lastopcode].pair_count[op]++; \
          lastopcode = op; \
 +        RETRACE_REPLAY_CHECKPOINT(); \
      } while (0)
@@ -70,12 +81,16 @@ index 7b440d6..ffb7f95 100644
 +        RETRACE_REPLAY_CHECKPOINT(); \
 +    } while (0)
  #endif
+ 
+ #if USE_COMPUTED_GOTOS
 diff --git a/Python/pystate.c b/Python/pystate.c
-index 2118eea..843fe60 100644
+index 723e1d1..1bb206e 100644
 --- a/Python/pystate.c
 +++ b/Python/pystate.c
-@@ -857,2 +857,8 @@ interpreter_clear(PyInterpreterState *interp, PyThreadState *tstate)
-     interp->retrace_thread_switch_callback_frame = NULL;
+@@ -853,6 +853,12 @@ interpreter_clear(PyInterpreterState *interp, PyThreadState *tstate)
+     Py_CLEAR(interp->audit_hooks);
+     Py_CLEAR(interp->retrace_thread_yield_callback);
+     Py_CLEAR(interp->retrace_thread_resume_callback);
 +    interp->retrace_replay_checkpoint_armed = 0;
 +    Py_CLEAR(interp->retrace_replay_checkpoint_counters);
 +    Py_CLEAR(interp->retrace_replay_checkpoint_callback);
@@ -83,6 +98,7 @@ index 2118eea..843fe60 100644
 +    interp->retrace_replay_checkpoint_callback_tstate = NULL;
 +    interp->retrace_replay_checkpoint_callback_frame = NULL;
  
+     for (int i = 0; i < _PY_MONITORING_UNGROUPED_EVENTS; i++) {
+         interp->monitors.tools[i] = 0;
 -- 
 2.50.1 (Apple Git-155)
-

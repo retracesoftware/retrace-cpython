@@ -30,10 +30,9 @@ _PyRetrace_FrameInstructionCounter(_PyInterpreterFrame *frame)
     return (uint64_t)coordinate;
 }
 
-PyAPI_FUNC(void) _PyRetrace_NoteThreadSwitch(
-    PyThreadState *from_tstate,
-    PyThreadState *to_tstate);
-PyAPI_FUNC(void) _PyRetrace_DeliverThreadSwitchCallback(PyThreadState *tstate);
+PyAPI_FUNC(void) _PyRetrace_NoteThreadResume(PyThreadState *tstate);
+PyAPI_FUNC(void) _PyRetrace_DeliverThreadResumeCallback(PyThreadState *tstate);
+PyAPI_FUNC(void) _PyRetrace_DeliverThreadYieldCallback(PyThreadState *tstate);
 PyAPI_FUNC(int) _PyRetrace_CheckReplayCheckpoint(
     PyThreadState *tstate,
     _PyInterpreterFrame *frame);

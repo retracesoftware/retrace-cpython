@@ -1,25 +1,34 @@
-From d8e774e083dc7f1b93bfb1c8d24d82e0ca011044 Mon Sep 17 00:00:00 2001
+From e3cb6300057a0b2fb12091ae1ee69e870483482c Mon Sep 17 00:00:00 2001
 From: nathan-retrace <nathan@retracesoftware.com>
 Date: Tue, 5 May 2026 20:49:25 +0100
-Subject: [PATCH 5/5] Update frame size tests for retrace field
+Subject: [PATCH 5/7] Update frame size tests for retrace field
 
 ---
  Lib/test/test_sys.py | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
 
 diff --git a/Lib/test/test_sys.py b/Lib/test/test_sys.py
-index 2f06299..5962572 100644
+index 51afa29..494da6d 100644
 --- a/Lib/test/test_sys.py
 +++ b/Lib/test/test_sys.py
-@@ -1524,3 +1524,3 @@ def func():
+@@ -1535,7 +1535,7 @@ class C(object): pass
+         def func():
+             return sys._getframe()
          x = func()
 -        check(x, size('3Pi3c7P2ic??2P'))
-+        check(x, size('3Pi3c7P2ic??q2P'))
++        check(x, size('3Pi3c7P2ic??qq2P'))
          # function
-@@ -1541,3 +1541,3 @@ def bar(cls):
+         def func(): pass
+         check(func, size('15Pi'))
+@@ -1552,7 +1552,7 @@ def bar(cls):
+             check(bar, size('PP'))
+         # generator
          def get_gen(): yield 1
 -        check(get_gen(), size('PP4P4c7P2ic??2P'))
-+        check(get_gen(), size('PP4P4c7P2ic??q2P'))
++        check(get_gen(), size('PP4P4c7P2ic??qq2P'))
          # iterator
+         check(iter('abc'), size('lP'))
+         # callable-iterator
 -- 
 2.50.1 (Apple Git-155)
 

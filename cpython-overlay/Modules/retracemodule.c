@@ -380,13 +380,13 @@ static _PyInterpreterFrame *
 retrace_thread_state_frame(PyThreadState *current_tstate,
                            PyThreadState *target_tstate)
 {
-    PyInterpreterState *interp = current_tstate->interp;
-    if (interp->retrace_thread_switch_callback_active &&
-        target_tstate == interp->retrace_thread_switch_callback_tstate &&
-        interp->retrace_thread_switch_callback_frame != NULL)
+    if (target_tstate->retrace_thread_callback_active &&
+        target_tstate->retrace_thread_callback_frame != NULL)
     {
-        return interp->retrace_thread_switch_callback_frame;
+        return target_tstate->retrace_thread_callback_frame;
     }
+
+    PyInterpreterState *interp = current_tstate->interp;
     if (interp->retrace_replay_checkpoint_callback_active &&
         target_tstate == interp->retrace_replay_checkpoint_callback_tstate &&
         interp->retrace_replay_checkpoint_callback_frame != NULL)
@@ -424,14 +424,72 @@ retrace_visible_frame_count(_PyInterpreterFrame *frame)
 
 static void
 retrace_fill_instruction_counters(RetraceU64BufferObject *buffer,
-                                  _PyInterpreterFrame *frame)
+                                  _PyInterpreterFrame *frame,
+                                  Py_ssize_t drop)
 {
     Py_ssize_t index = 0;
+    Py_ssize_t visible_index = 0;
     for (_PyInterpreterFrame *scan = frame; scan != NULL; scan = scan->previous) {
         if (retrace_frame_is_visible(scan)) {
+            if (visible_index++ < drop) {
+                continue;
+            }
             buffer->ob_item[index++] = retrace_frame_instruction_counter(scan);
         }
     }
+}
+
+static PyObject *
+retrace_instruction_counters_delta(PyObject *module, PyObject *Py_UNUSED(ignored))
+{
+    PyThreadState *tstate = _PyThreadState_GET();
+    _PyInterpreterFrame *frame = retrace_thread_state_frame(tstate, tstate);
+    while (frame != NULL && !retrace_frame_is_visible(frame)) {
+        frame = frame->previous;
+    }
+
+    Py_ssize_t current_size = 0;
+    Py_ssize_t new_count = 0;
+    int found_common = 0;
+    for (_PyInterpreterFrame *scan = frame; scan != NULL; scan = scan->previous) {
+        if (!retrace_frame_is_visible(scan)) {
+            continue;
+        }
+
+        uint64_t counter = retrace_frame_instruction_counter(scan);
+        if (!found_common && scan->retrace_last_instruction_counter == counter) {
+            found_common = 1;
+            new_count = current_size;
+        }
+        current_size++;
+    }
+    if (!found_common) {
+        new_count = current_size;
+    }
+
+    Py_ssize_t common_count = current_size - new_count;
+    RetraceU64BufferObject *delta = retrace_u64buffer_new(1 + new_count);
+    if (delta == NULL) {
+        return NULL;
+    }
+    delta->ob_item[0] = (uint64_t)common_count;
+
+    Py_ssize_t copied = 0;
+    for (_PyInterpreterFrame *scan = frame;
+         scan != NULL && copied < new_count;
+         scan = scan->previous)
+    {
+        if (!retrace_frame_is_visible(scan)) {
+            continue;
+        }
+
+        uint64_t counter = retrace_frame_instruction_counter(scan);
+        scan->retrace_last_instruction_counter = counter;
+        delta->ob_item[1 + copied] = counter;
+        copied++;
+    }
+
+    return (PyObject *)delta;
 }
 
 typedef struct {
@@ -532,19 +590,43 @@ retrace_replay_checkpoint_matches(PyInterpreterState *interp,
 }
 
 PyDoc_STRVAR(retrace_instruction_counters_doc,
-"instruction_counters($module, thread_id=None, /)\n"
+"instruction_counters($module, thread_id=None, drop=0, /)\n"
 "--\n"
 "\n"
-"Return a thread's visible Python frame instruction counters.");
+"Return a thread's visible Python frame instruction counters.\n"
+"\n"
+"drop omits that many leading counters from the returned sequence.");
+
+PyDoc_STRVAR(retrace_instruction_counters_delta_doc,
+"instruction_counters_delta($module, /)\n"
+"--\n"
+"\n"
+"Return [common_count, *new_counters] for the current thread's visible\n"
+"instruction counters.");
 
 static PyObject *
 retrace_instruction_counters(PyObject *module, PyObject *args)
 {
     PyThreadState *current_tstate = _PyThreadState_GET();
     unsigned long thread_id = current_tstate->thread_id;
+    PyObject *thread_id_arg = Py_None;
+    Py_ssize_t drop = 0;
 
-    if (!PyArg_ParseTuple(args, "|k:instruction_counters", &thread_id)) {
+    if (!PyArg_ParseTuple(args, "|On:instruction_counters",
+                          &thread_id_arg, &drop))
+    {
         return NULL;
+    }
+    if (drop < 0) {
+        PyErr_SetString(PyExc_ValueError,
+                        "instruction_counters drop must be non-negative");
+        return NULL;
+    }
+    if (thread_id_arg != Py_None) {
+        thread_id = PyLong_AsUnsignedLong(thread_id_arg);
+        if (thread_id == (unsigned long)-1 && PyErr_Occurred()) {
+            return NULL;
+        }
     }
 
     _PyRuntimeState *runtime = &_PyRuntime;
@@ -560,7 +642,8 @@ retrace_instruction_counters(PyObject *module, PyObject *args)
     }
     _PyInterpreterFrame *frame =
         retrace_thread_state_frame(current_tstate, target_tstate);
-    Py_ssize_t size = retrace_visible_frame_count(frame);
+    Py_ssize_t visible_count = retrace_visible_frame_count(frame);
+    Py_ssize_t size = visible_count > drop ? visible_count - drop : 0;
     RETRACE_HEAD_UNLOCK(runtime);
 
     buffer = retrace_u64buffer_new(size);
@@ -577,13 +660,13 @@ retrace_instruction_counters(PyObject *module, PyObject *args)
         return NULL;
     }
     frame = retrace_thread_state_frame(current_tstate, target_tstate);
-    if (retrace_visible_frame_count(frame) != size) {
+    if (retrace_visible_frame_count(frame) != visible_count) {
         RETRACE_HEAD_UNLOCK(runtime);
         Py_DECREF(buffer);
         PyErr_SetString(PyExc_RuntimeError, "thread frame stack changed");
         return NULL;
     }
-    retrace_fill_instruction_counters(buffer, frame);
+    retrace_fill_instruction_counters(buffer, frame, drop);
     RETRACE_HEAD_UNLOCK(runtime);
 
     return (PyObject *)buffer;
@@ -634,45 +717,98 @@ retrace_common_counters_prefix_length_method(PyObject *module, PyObject *args)
     return PyLong_FromSsize_t(prefix_length);
 }
 
-PyDoc_STRVAR(retrace_set_thread_switch_callback_doc,
-"set_thread_switch_callback($module, callback, /)\n"
+static int
+retrace_validate_thread_callback(PyObject **callback, const char *name)
+{
+    if (*callback == Py_None) {
+        *callback = NULL;
+        return 0;
+    }
+    if (!PyCallable_Check(*callback)) {
+        PyErr_Format(PyExc_TypeError,
+                     "%s callback must be callable or None",
+                     name);
+        return -1;
+    }
+    return 0;
+}
+
+PyDoc_STRVAR(retrace_set_thread_yield_callback_doc,
+"set_thread_yield_callback($module, callback, /)\n"
 "--\n"
 "\n"
-"Set a Python callback invoked as callback(from_thread_id).");
+"Set a Python callback invoked as callback() before the current thread yields\n"
+"from the eval loop.");
 
 static PyObject *
-retrace_set_thread_switch_callback(PyObject *module, PyObject *callback)
+retrace_set_thread_yield_callback(PyObject *module, PyObject *callback)
 {
     PyThreadState *tstate = _PyThreadState_GET();
     PyInterpreterState *interp = tstate->interp;
 
-    if (callback == Py_None) {
-        callback = NULL;
-    }
-    else if (!PyCallable_Check(callback)) {
-        PyErr_SetString(PyExc_TypeError,
-                        "thread switch callback must be callable or None");
+    if (retrace_validate_thread_callback(&callback, "thread yield") < 0) {
         return NULL;
     }
 
-    PyObject *old_callback = interp->retrace_thread_switch_callback;
-    interp->retrace_thread_switch_callback = Py_XNewRef(callback);
+    PyObject *old_callback = interp->retrace_thread_yield_callback;
+    interp->retrace_thread_yield_callback = Py_XNewRef(callback);
     Py_XDECREF(old_callback);
 
     Py_RETURN_NONE;
 }
 
-PyDoc_STRVAR(retrace_get_thread_switch_callback_doc,
-"get_thread_switch_callback($module, /)\n"
+PyDoc_STRVAR(retrace_get_thread_yield_callback_doc,
+"get_thread_yield_callback($module, /)\n"
 "--\n"
 "\n"
-"Return the active thread switch callback, or None.");
+"Return the active thread yield callback, or None.");
 
 static PyObject *
-retrace_get_thread_switch_callback(PyObject *module, PyObject *Py_UNUSED(ignored))
+retrace_get_thread_yield_callback(PyObject *module, PyObject *Py_UNUSED(ignored))
 {
     PyThreadState *tstate = _PyThreadState_GET();
-    PyObject *callback = tstate->interp->retrace_thread_switch_callback;
+    PyObject *callback = tstate->interp->retrace_thread_yield_callback;
+    if (callback == NULL) {
+        Py_RETURN_NONE;
+    }
+    return Py_NewRef(callback);
+}
+
+PyDoc_STRVAR(retrace_set_thread_resume_callback_doc,
+"set_thread_resume_callback($module, callback, /)\n"
+"--\n"
+"\n"
+"Set a Python callback invoked as callback() before application bytecode runs\n"
+"after the current thread resumes from an eval-loop yield.");
+
+static PyObject *
+retrace_set_thread_resume_callback(PyObject *module, PyObject *callback)
+{
+    PyThreadState *tstate = _PyThreadState_GET();
+    PyInterpreterState *interp = tstate->interp;
+
+    if (retrace_validate_thread_callback(&callback, "thread resume") < 0) {
+        return NULL;
+    }
+
+    PyObject *old_callback = interp->retrace_thread_resume_callback;
+    interp->retrace_thread_resume_callback = Py_XNewRef(callback);
+    Py_XDECREF(old_callback);
+
+    Py_RETURN_NONE;
+}
+
+PyDoc_STRVAR(retrace_get_thread_resume_callback_doc,
+"get_thread_resume_callback($module, /)\n"
+"--\n"
+"\n"
+"Return the active thread resume callback, or None.");
+
+static PyObject *
+retrace_get_thread_resume_callback(PyObject *module, PyObject *Py_UNUSED(ignored))
+{
+    PyThreadState *tstate = _PyThreadState_GET();
+    PyObject *callback = tstate->interp->retrace_thread_resume_callback;
     if (callback == NULL) {
         Py_RETURN_NONE;
     }
@@ -742,43 +878,26 @@ retrace_set_replay_checkpoint(PyObject *module, PyObject *args)
     Py_RETURN_NONE;
 }
 
-void
-_PyRetrace_NoteThreadSwitch(PyThreadState *from_tstate,
-                            PyThreadState *to_tstate)
+static _PyInterpreterFrame *
+retrace_current_thread_frame(PyThreadState *tstate)
 {
-    if (to_tstate == NULL) {
-        return;
-    }
-
-    PyInterpreterState *interp = to_tstate->interp;
-    if (interp->retrace_thread_switch_callback == NULL ||
-        interp->retrace_thread_switch_callback_active)
+    if (tstate->retrace_thread_callback_active &&
+        tstate->retrace_thread_callback_frame != NULL)
     {
-        return;
+        return tstate->retrace_thread_callback_frame;
     }
-
-    to_tstate->retrace_thread_switch_pending = 1;
-    to_tstate->retrace_thread_switch_from_id =
-        from_tstate != NULL ? from_tstate->thread_id : 0;
-    to_tstate->retrace_thread_switch_frame =
-        to_tstate->cframe != NULL ? to_tstate->cframe->current_frame : NULL;
+    if (tstate->cframe == NULL) {
+        return NULL;
+    }
+    return tstate->cframe->current_frame;
 }
 
-void
-_PyRetrace_DeliverThreadSwitchCallback(PyThreadState *tstate)
+static void
+retrace_call_thread_callback(PyThreadState *tstate,
+                             PyObject *callback,
+                             _PyInterpreterFrame *frame)
 {
-    if (tstate == NULL || !tstate->retrace_thread_switch_pending) {
-        return;
-    }
-
-    PyInterpreterState *interp = tstate->interp;
-    unsigned long from_thread_id = tstate->retrace_thread_switch_from_id;
-    _PyInterpreterFrame *frame = tstate->retrace_thread_switch_frame;
-    tstate->retrace_thread_switch_pending = 0;
-    tstate->retrace_thread_switch_frame = NULL;
-
-    PyObject *callback = interp->retrace_thread_switch_callback;
-    if (callback == NULL || interp->retrace_thread_switch_callback_active) {
+    if (callback == NULL || tstate->retrace_thread_callback_active) {
         return;
     }
 
@@ -792,17 +911,10 @@ _PyRetrace_DeliverThreadSwitchCallback(PyThreadState *tstate)
     PyErr_Fetch(&saved_type, &saved_value, &saved_traceback);
 #endif
 
-    interp->retrace_thread_switch_callback_active = 1;
-    interp->retrace_thread_switch_callback_tstate = tstate;
-    interp->retrace_thread_switch_callback_frame = frame;
+    tstate->retrace_thread_callback_active = 1;
+    tstate->retrace_thread_callback_frame = frame;
 
-    PyObject *from_arg = PyLong_FromUnsignedLong(from_thread_id);
-    PyObject *result = NULL;
-    if (from_arg != NULL) {
-        result = PyObject_CallOneArg(callback, from_arg);
-    }
-
-    Py_XDECREF(from_arg);
+    PyObject *result = PyObject_CallNoArgs(callback);
     if (result == NULL) {
         PyErr_WriteUnraisable(callback);
     }
@@ -810,9 +922,8 @@ _PyRetrace_DeliverThreadSwitchCallback(PyThreadState *tstate)
         Py_DECREF(result);
     }
 
-    interp->retrace_thread_switch_callback_frame = NULL;
-    interp->retrace_thread_switch_callback_tstate = NULL;
-    interp->retrace_thread_switch_callback_active = 0;
+    tstate->retrace_thread_callback_frame = NULL;
+    tstate->retrace_thread_callback_active = 0;
 
     Py_DECREF(callback);
 #if PY_VERSION_HEX >= 0x030C0000
@@ -820,6 +931,63 @@ _PyRetrace_DeliverThreadSwitchCallback(PyThreadState *tstate)
 #else
     PyErr_Restore(saved_type, saved_value, saved_traceback);
 #endif
+}
+
+void
+_PyRetrace_NoteThreadResume(PyThreadState *tstate)
+{
+    if (tstate == NULL) {
+        return;
+    }
+
+    PyInterpreterState *interp = tstate->interp;
+    if (interp->retrace_thread_resume_callback == NULL) {
+        return;
+    }
+
+    tstate->retrace_thread_resume_pending = 1;
+    tstate->retrace_thread_resume_frame = retrace_current_thread_frame(tstate);
+}
+
+void
+_PyRetrace_DeliverThreadResumeCallback(PyThreadState *tstate)
+{
+    if (tstate == NULL || !tstate->retrace_thread_resume_pending) {
+        return;
+    }
+    if (tstate->retrace_thread_callback_active) {
+        return;
+    }
+
+    PyInterpreterState *interp = tstate->interp;
+    _PyInterpreterFrame *frame = tstate->retrace_thread_resume_frame;
+
+    PyObject *callback = interp->retrace_thread_resume_callback;
+    if (callback == NULL) {
+        tstate->retrace_thread_resume_pending = 0;
+        tstate->retrace_thread_resume_frame = NULL;
+        return;
+    }
+
+    tstate->retrace_thread_resume_pending = 0;
+    tstate->retrace_thread_resume_frame = NULL;
+    retrace_call_thread_callback(tstate, callback, frame);
+}
+
+void
+_PyRetrace_DeliverThreadYieldCallback(PyThreadState *tstate)
+{
+    if (tstate == NULL || tstate->retrace_thread_callback_active) {
+        return;
+    }
+
+    PyObject *callback = tstate->interp->retrace_thread_yield_callback;
+    if (callback == NULL) {
+        return;
+    }
+
+    retrace_call_thread_callback(
+        tstate, callback, retrace_current_thread_frame(tstate));
 }
 
 int
@@ -876,13 +1044,19 @@ _PyRetrace_CheckReplayCheckpoint(PyThreadState *tstate,
 static PyMethodDef retrace_methods[] = {
     {"instruction_counters", retrace_instruction_counters, METH_VARARGS,
      retrace_instruction_counters_doc},
+    {"instruction_counters_delta", retrace_instruction_counters_delta,
+     METH_NOARGS, retrace_instruction_counters_delta_doc},
     {"common_counters_prefix_length",
      retrace_common_counters_prefix_length_method, METH_VARARGS,
      retrace_common_counters_prefix_length_doc},
-    {"set_thread_switch_callback", retrace_set_thread_switch_callback, METH_O,
-     retrace_set_thread_switch_callback_doc},
-    {"get_thread_switch_callback", retrace_get_thread_switch_callback,
-     METH_NOARGS, retrace_get_thread_switch_callback_doc},
+    {"set_thread_yield_callback", retrace_set_thread_yield_callback, METH_O,
+     retrace_set_thread_yield_callback_doc},
+    {"get_thread_yield_callback", retrace_get_thread_yield_callback,
+     METH_NOARGS, retrace_get_thread_yield_callback_doc},
+    {"set_thread_resume_callback", retrace_set_thread_resume_callback, METH_O,
+     retrace_set_thread_resume_callback_doc},
+    {"get_thread_resume_callback", retrace_get_thread_resume_callback,
+     METH_NOARGS, retrace_get_thread_resume_callback_doc},
     {"set_replay_checkpoint", retrace_set_replay_checkpoint, METH_VARARGS,
      retrace_set_replay_checkpoint_doc},
     {NULL, NULL, 0, NULL},

@@ -28,7 +28,7 @@ verified_regression_tests = [
 patches = [
   "0001-Add-Retrace-instruction-bias-to-interpreter-frames.patch",
   "0002-Add-retrace-instruction-counter-module.patch",
-  "0003-Add-retrace-thread-switch-callback.patch",
+  "0003-Add-retrace-thread-scheduling-callbacks.patch",
   "0004-Add-retrace-replay-checkpoint-callback.patch",
   "0005-Update-frame-size-tests-for-retrace-field.patch",
   "0006-Build-retrace-as-a-Windows-builtin-module.patch",

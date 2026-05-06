@@ -1,18 +1,21 @@
-From 30391b7802bc0c8e4ae25ee8805452829e5a5737 Mon Sep 17 00:00:00 2001
-From: nathan-retrace <nathan@retracesoftware.com>
-Date: Tue, 5 May 2026 21:57:04 +0100
-Subject: [PATCH 4/5] Add retrace replay checkpoint callback
+From 74d1f629d1bcd94f5b0096e40a01da017f081d9e Mon Sep 17 00:00:00 2001
+From: Retrace CPython Builder <retrace-cpython@retracesoftware.com>
+Date: Wed, 6 May 2026 22:55:01 +0100
+Subject: [PATCH 4/6] Add retrace replay checkpoint callback
 
 ---
- Include/internal/pycore_interp.h  |   9 ++
- Python/ceval.c                    |  28 ++++-
- Python/pystate.c                  |   6 +
+ Include/internal/pycore_interp.h |  9 +++++++++
+ Python/ceval.c                   | 28 ++++++++++++++++++++++++++--
+ Python/pystate.c                 |  6 ++++++
+ 3 files changed, 41 insertions(+), 2 deletions(-)
 
 diff --git a/Include/internal/pycore_interp.h b/Include/internal/pycore_interp.h
-index 98614d0..d710889 100644
+index fcc48df..ab259f7 100644
 --- a/Include/internal/pycore_interp.h
 +++ b/Include/internal/pycore_interp.h
-@@ -185,2 +185,11 @@ struct _is {
+@@ -181,6 +181,15 @@ struct _is {
+     PyObject *retrace_thread_yield_callback;
+     PyObject *retrace_thread_resume_callback;
  
 +    int retrace_replay_checkpoint_armed;
 +    unsigned long retrace_replay_checkpoint_thread_id;
@@ -24,16 +27,24 @@ index 98614d0..d710889 100644
 +    struct _PyInterpreterFrame *retrace_replay_checkpoint_callback_frame;
 +
      /* The following fields are here to avoid allocation during init.
+        The data is exposed through PyInterpreterState pointer fields.
+        These fields should not be accessed directly outside of init.
 diff --git a/Python/ceval.c b/Python/ceval.c
-index c7f7e7e..88ac485 100644
+index db869fe..af6e753 100644
 --- a/Python/ceval.c
 +++ b/Python/ceval.c
-@@ -22,3 +22,3 @@
+@@ -20,7 +20,7 @@
+ #include "pycore_pylifecycle.h"   // _PyErr_Print()
+ #include "pycore_pymem.h"         // _PyMem_IsPtrFreed()
  #include "pycore_pystate.h"       // _PyInterpreterState_GET()
--#include "pycore_retrace.h"       // _PyRetrace_NoteThreadSwitch()
-+#include "pycore_retrace.h"       // _PyRetrace_CheckReplayCheckpoint()
+-#include "pycore_retrace.h"       // thread scheduling callbacks
++#include "pycore_retrace.h"       // retrace callbacks
  #include "pycore_sysmodule.h"     // _PySys_Audit()
-@@ -1300,2 +1300,21 @@ eval_frame_handle_pending(PyThreadState *tstate)
+ #include "pycore_tuple.h"         // _PyTuple_ITEMS()
+ #include "pycore_emscripten_signal.h"  // _Py_CHECK_EMSCRIPTEN_SIGNALS
+@@ -1299,6 +1299,25 @@ eval_frame_handle_pending(PyThreadState *tstate)
+     #define USE_COMPUTED_GOTOS 0
+ #endif
  
 +#define RETRACE_REPLAY_CHECKPOINT() \
 +    do { \
@@ -55,7 +66,11 @@ index c7f7e7e..88ac485 100644
 +    } while (0)
 +
  #ifdef Py_STATS
-@@ -1307,5 +1326,10 @@ eval_frame_handle_pending(PyThreadState *tstate)
+ #define INSTRUCTION_START(op) \
+     do { \
+@@ -1306,9 +1325,14 @@ eval_frame_handle_pending(PyThreadState *tstate)
+         OPCODE_EXE_INC(op); \
+         _py_stats.opcode_stats[lastopcode].pair_count[op]++; \
          lastopcode = op; \
 +        RETRACE_REPLAY_CHECKPOINT(); \
      } while (0)
@@ -67,12 +82,16 @@ index c7f7e7e..88ac485 100644
 +        RETRACE_REPLAY_CHECKPOINT(); \
 +    } while (0)
  #endif
+ 
+ #if USE_COMPUTED_GOTOS
 diff --git a/Python/pystate.c b/Python/pystate.c
-index f3bf9fc..a03990d 100644
+index 39d6c87..6132aa9 100644
 --- a/Python/pystate.c
 +++ b/Python/pystate.c
-@@ -417,2 +417,8 @@ interpreter_clear(PyInterpreterState *interp, PyThreadState *tstate)
-     interp->retrace_thread_switch_callback_frame = NULL;
+@@ -403,8 +405,14 @@ interpreter_clear(PyInterpreterState *interp, PyThreadState *tstate)
+     Py_CLEAR(interp->audit_hooks);
+     Py_CLEAR(interp->retrace_thread_yield_callback);
+     Py_CLEAR(interp->retrace_thread_resume_callback);
 +    interp->retrace_replay_checkpoint_armed = 0;
 +    Py_CLEAR(interp->retrace_replay_checkpoint_counters);
 +    Py_CLEAR(interp->retrace_replay_checkpoint_callback);
@@ -80,6 +99,9 @@ index f3bf9fc..a03990d 100644
 +    interp->retrace_replay_checkpoint_callback_tstate = NULL;
 +    interp->retrace_replay_checkpoint_callback_frame = NULL;
  
+     PyConfig_Clear(&interp->config);
+     Py_CLEAR(interp->codec_search_path);
+     Py_CLEAR(interp->codec_search_cache);
+     Py_CLEAR(interp->codec_error_registry);
 -- 
 2.50.1 (Apple Git-155)
-
