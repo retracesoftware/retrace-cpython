@@ -59,7 +59,7 @@ jobs:
       - name: Resolve versions
         id: versions
         env:
-          VERSION_INPUT: ${{ inputs.python_version || 'manifest-latest' }}
+          VERSION_INPUT: ${{ inputs.python_version || 'manifest-all' }}
         run: |
           python3 - <<'PY'
           import json
