@@ -148,6 +148,9 @@ else
   git -C "${dest}" checkout -B "retrace-${version}" "${tag}"
 fi
 
+git -C "${dest}" config user.name "Retrace CPython Builder"
+git -C "${dest}" config user.email "retrace-cpython@retracesoftware.com"
+
 if (( ${#patches[@]} == 0 )); then
   echo "No patches found in ${patch_dir}; checkout remains vanilla ${tag}."
 else
