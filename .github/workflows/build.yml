@@ -110,10 +110,9 @@ jobs:
     env:
       PACKAGE_VERSION: ${{ needs.versions.outputs.package_version }}
     permissions:
-      actions: write
       contents: read
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix:
         python-version: ${{ fromJSON(needs.versions.outputs.versions) }}
         platform:
@@ -268,12 +267,6 @@ jobs:
           path: build/dist/*.tar.gz
           if-no-files-found: error
 
-      - name: Cancel workflow on failure
-        if: failure()
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh run cancel "${{ github.run_id }}" || true
-
   windows:
     name: ${{ matrix.python-version }} ${{ matrix.platform.target }}
     needs: versions
@@ -282,10 +275,9 @@ jobs:
     env:
       PACKAGE_VERSION: ${{ needs.versions.outputs.package_version }}
     permissions:
-      actions: write
       contents: read
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix:
         python-version: ${{ fromJSON(needs.versions.outputs.versions) }}
         platform:
@@ -432,12 +424,6 @@ jobs:
           name: retrace-cpython-${{ matrix.python-version }}-${{ matrix.platform.target }}
           path: build/dist/*.zip
           if-no-files-found: error
-
-      - name: Cancel workflow on failure
-        if: failure()
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh run cancel "${{ github.run_id }}" || true
 
   publish-pypi:
     name: Publish wheels to PyPI
