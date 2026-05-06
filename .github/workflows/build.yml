@@ -18,6 +18,11 @@ on:
         required: true
         default: true
         type: boolean
+      publish_pypi:
+        description: "Publish retracesoftware-cpython wheels to PyPI"
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -29,6 +34,7 @@ concurrency:
 env:
   RELEASE_BUILD: ${{ inputs.release_build || false }}
   UPLOAD_ARTIFACTS: ${{ inputs.upload_artifacts }}
+  PUBLISH_PYPI: ${{ inputs.publish_pypi || false }}
 
 jobs:
   versions:
@@ -75,6 +81,7 @@ jobs:
     name: ${{ matrix.python-version }} ${{ matrix.platform.target }}
     needs: versions
     runs-on: ${{ matrix.platform.os }}
+    timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:
@@ -180,6 +187,12 @@ jobs:
             make -j"${JOBS}"
           )
 
+      - name: Run patched CPython test suite
+        run: |
+          set -euo pipefail
+          source_dir="${GITHUB_WORKSPACE}/build/src/cpython-${{ matrix.python-version }}+retrace"
+          make -C "${source_dir}" buildbottest
+
       - name: Validate patched executable against vanilla install
         run: |
           set -euo pipefail
@@ -201,6 +214,21 @@ jobs:
             "${{ matrix.platform.target }}" \
             "build/src/cpython-${{ matrix.python-version }}+retrace"
 
+      - name: Build PyPI wheel
+        run: |
+          scripts/package-wheel \
+            "${{ matrix.python-version }}" \
+            "${{ matrix.platform.target }}" \
+            "build/package/retrace-cpython-${{ matrix.python-version }}-${{ matrix.platform.target }}"
+
+      - name: Upload wheel artifact
+        if: env.UPLOAD_ARTIFACTS == 'true' || env.PUBLISH_PYPI == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: retracesoftware-cpython-wheel-${{ matrix.python-version }}-${{ matrix.platform.target }}
+          path: build/wheelhouse/*.whl
+          if-no-files-found: error
+
       - name: Upload build archive
         if: env.UPLOAD_ARTIFACTS == 'true'
         uses: actions/upload-artifact@v4
@@ -213,6 +241,7 @@ jobs:
     name: ${{ matrix.python-version }} ${{ matrix.platform.target }}
     needs: versions
     runs-on: ${{ matrix.platform.os }}
+    timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:
@@ -222,14 +251,17 @@ jobs:
             os: windows-2022
             pcbuild-platform: x64
             pcbuild-output: amd64
+            pcbuild-test-platform: -x64
           - target: windows-x86
             os: windows-2022
             pcbuild-platform: Win32
             pcbuild-output: win32
+            pcbuild-test-platform: -win32
           - target: windows-arm64
             os: windows-11-arm
             pcbuild-platform: ARM64
             pcbuild-output: arm64
+            pcbuild-test-platform: -arm64
     steps:
       - name: Check out retrace-cpython
         uses: actions/checkout@v4
@@ -263,6 +295,19 @@ jobs:
           $source = Join-Path $env:GITHUB_WORKSPACE "build/src/cpython-$env:PYTHON_VERSION+retrace"
           Push-Location $source
           .\PCbuild\build.bat -e -p $env:PCBUILD_PLATFORM -c Release
+          if ($LASTEXITCODE -ne 0) {
+              exit $LASTEXITCODE
+          }
+
+      - name: Run patched CPython test suite
+        shell: pwsh
+        env:
+          PYTHON_VERSION: ${{ matrix.python-version }}
+          PCBUILD_TEST_PLATFORM: ${{ matrix.platform.pcbuild-test-platform }}
+        run: |
+          $source = Join-Path $env:GITHUB_WORKSPACE "build/src/cpython-$env:PYTHON_VERSION+retrace"
+          Push-Location $source
+          .\PCbuild\rt.bat -q $env:PCBUILD_TEST_PLATFORM -uall -rwW --slowest --timeout=1200 --fail-env-changed -j1
           if ($LASTEXITCODE -ne 0) {
               exit $LASTEXITCODE
           }
@@ -321,6 +366,26 @@ jobs:
             $env:TARGET `
             $runtime
 
+      - name: Build PyPI wheel
+        shell: pwsh
+        env:
+          PYTHON_VERSION: ${{ matrix.python-version }}
+          TARGET: ${{ matrix.platform.target }}
+        run: |
+          $runtime = Join-Path $env:GITHUB_WORKSPACE "build/package/retrace-cpython-$env:PYTHON_VERSION-$env:TARGET"
+          python "$env:GITHUB_WORKSPACE/scripts/package-wheel" `
+            $env:PYTHON_VERSION `
+            $env:TARGET `
+            $runtime
+
+      - name: Upload wheel artifact
+        if: env.UPLOAD_ARTIFACTS == 'true' || env.PUBLISH_PYPI == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: retracesoftware-cpython-wheel-${{ matrix.python-version }}-${{ matrix.platform.target }}
+          path: build/wheelhouse/*.whl
+          if-no-files-found: error
+
       - name: Upload build archive
         if: env.UPLOAD_ARTIFACTS == 'true'
         uses: actions/upload-artifact@v4
@@ -328,3 +393,31 @@ jobs:
           name: retrace-cpython-${{ matrix.python-version }}-${{ matrix.platform.target }}
           path: build/dist/*.zip
           if-no-files-found: error
+
+  publish-pypi:
+    name: Publish wheels to PyPI
+    if: inputs.publish_pypi == true
+    needs:
+      - posix
+      - windows
+    runs-on: ubuntu-24.04
+    environment: pypi
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    steps:
+      - name: Download wheel artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: retracesoftware-cpython-wheel-*
+          path: dist
+          merge-multiple: true
+
+      - name: List distributions
+        run: ls -lh dist
+
+      - name: Publish package distributions to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist

@@ -34,6 +34,7 @@ scripts/
   build-release
   package
   package-runtime
+  package-wheel
   test-against-vanilla
 docs/
   probe-abi.md
@@ -59,6 +60,17 @@ therefore contain the patched Python executable and any required CPython runtime
 dynamic libraries, not a separate `retrace.so` or `retrace.pyd`. Validation runs
 that patched executable against a vanilla install of the same CPython version by
 setting `PYTHONHOME`.
+
+The GitHub workflow also builds platform wheels for the
+`retracesoftware-cpython` PyPI project. Each wheel contains the minimal runtime
+overlay plus a `retrace-python` launcher. Publishing is opt-in through the
+workflow's `publish_pypi` input and uses PyPI Trusted Publishing. The publish
+job only runs after every platform build has completed the patched CPython test
+suite and uploaded its wheel artifact.
+
+Linux wheels are tagged for the Ubuntu 24.04 runner baseline
+(`manylinux_2_39_*`). Use older manylinux container builds later if broader
+glibc compatibility is needed.
 
 ## Source Policy
 
