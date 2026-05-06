@@ -5,7 +5,6 @@ Subject: [PATCH 5/5] Update frame size tests for retrace field
 
 ---
  Lib/test/test_sys.py | 4 ++--
- 1 file changed, 2 insertions(+), 2 deletions(-)
 
 diff --git a/Lib/test/test_sys.py b/Lib/test/test_sys.py
 index 2f06299..5962572 100644

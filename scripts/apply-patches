@@ -163,9 +163,21 @@ else
   fi
 fi
 
+overlay_dir="${repo_root}/cpython-overlay"
+if [[ -d "${overlay_dir}" ]]; then
+  while IFS= read -r -d '' overlay_file; do
+    rel="${overlay_file#${overlay_dir}/}"
+    mkdir -p "${dest}/$(dirname "${rel}")"
+    cp "${overlay_file}" "${dest}/${rel}"
+  done < <(find "${overlay_dir}" -type f -print0)
+fi
+
 echo "Prepared ${dest}"
 echo "CPython tag: ${tag}"
 echo "Patch dir: ${patch_dir}"
 if [[ -f "${manifest}" ]]; then
   echo "Patch manifest: ${manifest}"
+fi
+if [[ -d "${overlay_dir}" ]]; then
+  echo "Overlay dir: ${overlay_dir}"
 fi

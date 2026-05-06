@@ -45,6 +45,16 @@ def main() -> int:
         assert tuple(counters[0:]) == tuple(counters)
         assert counters == tuple(counters)
         assert len(counters_by_id) == len(counters)
+        assert module.common_counters_prefix_length(()) == 0
+        prefix = module.common_counters_prefix_length(counters)
+        prefix_by_id = module.common_counters_prefix_length(
+            counters, threading.get_ident()
+        )
+        tuple_prefix = module.common_counters_prefix_length(tuple(counters))
+        assert 0 <= prefix <= len(counters)
+        assert 0 <= prefix_by_id <= len(counters)
+        assert 0 <= tuple_prefix <= len(counters)
+        assert module.common_counters_prefix_length([2**64 - 1]) == 0
         assert module.get_thread_switch_callback() is None
 
         def callback(_from_thread_id):
@@ -61,6 +71,7 @@ def main() -> int:
         print(f"instruction_counters_len={len(counters)}")
         print(f"instruction_counters_format={view.format}")
         print(f"instruction_counters_readonly={view.readonly}")
+        print("common_counters_prefix_length=available")
         print("thread_switch_callback=available")
         print("replay_checkpoint=available")
     else:

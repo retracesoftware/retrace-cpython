@@ -7,7 +7,6 @@ Subject: [PATCH 1/5] Add Retrace instruction bias to interpreter frames
  Include/internal/pycore_frame.h | 21 +++++++++++++++++++++
  Python/ceval.c                  |  1 +
  Python/ceval_macros.h           | 16 ++++++++++++++--
- 3 files changed, 36 insertions(+), 2 deletions(-)
 
 diff --git a/Include/internal/pycore_frame.h b/Include/internal/pycore_frame.h
 index 4d355b2..fc97925 100644

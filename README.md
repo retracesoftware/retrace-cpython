@@ -29,6 +29,10 @@ patches/
   3.11/
   3.12/
   3.13/
+cpython-overlay/
+  Include/internal/
+  Modules/
+  Python/
 scripts/
   apply-patches
   build-release
@@ -73,10 +77,11 @@ release exists yet, the bump starts from `0.0.0`. This package version is
 independent from the CPython versions being built. The CPython version remains
 in the wheel's interpreter tag, `Requires-Python`, and wheel build tag so a
 single Retrace release can carry multiple CPython builds without reusing
-filenames. Publishing is opt-in through the workflow's `publish_pypi` input and
-uses PyPI Trusted Publishing. The publish job only runs after every platform
-build has completed the patched CPython test suite and uploaded its wheel
-artifact.
+filenames. The `skip_tests` input skips the CPython test-suite steps for fast
+packaging smoke runs, while leaving patched-against-vanilla validation and
+packaging enabled. Publishing is opt-in through the workflow's `publish_pypi`
+input and uses PyPI Trusted Publishing. The publish job only runs after every
+selected platform build has uploaded its wheel artifact.
 
 Linux wheels are tagged for the Ubuntu 24.04 runner baseline
 (`manylinux_2_39_*`). Use older manylinux container builds later if broader
@@ -88,4 +93,8 @@ Patch directories may be keyed by exact release (`patches/3.12.8/`) or by minor
 series (`patches/3.12/`). `scripts/apply-patches` prefers the exact release
 directory when present, then falls back to the minor-series directory.
 If the selected directory has a `series.toml`, the manifest declares the
-supported version range and patch order.
+supported version range and patch order. New Retrace-owned source files live in
+`cpython-overlay/` using CPython-relative paths; `scripts/apply-patches` copies
+that overlay into the checkout after applying the patch stack. Keep patches for
+changes to upstream CPython files and keep Retrace-owned implementation code in
+the overlay.

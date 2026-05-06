@@ -5,7 +5,6 @@ Subject: [PATCH] Build Windows freeze helper with Win8.1 API target
 
 ---
  PCbuild/_freeze_module.vcxproj | 2 +-
- 1 file changed, 1 insertion(+), 1 deletion(-)
 
 diff --git a/PCbuild/_freeze_module.vcxproj b/PCbuild/_freeze_module.vcxproj
 index c114bfd..0e580c7 100644

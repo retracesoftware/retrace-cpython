@@ -8,9 +8,6 @@ Subject: [PATCH] Build retrace as a Windows builtin module
  PCbuild/_freeze_module.vcxproj     |  1 +
  PCbuild/pythoncore.vcxproj         |  1 +
  PCbuild/pythoncore.vcxproj.filters |  3 +++
- Python/retrace_bootstrap.c         | 20 ++++++++++++++++++++
- 5 files changed, 27 insertions(+)
- create mode 100644 Python/retrace_bootstrap.c
 
 diff --git a/PC/config.c b/PC/config.c
 index 9d900c7..58429bb 100644
@@ -72,29 +69,3 @@ index e3fe927..a589e32 100644
      <ClCompile Include="..\Modules\rotatingtree.c">
        <Filter>Modules</Filter>
      </ClCompile>
-diff --git a/Python/retrace_bootstrap.c b/Python/retrace_bootstrap.c
-new file mode 100644
-index 0000000..3f101f3
---- /dev/null
-+++ b/Python/retrace_bootstrap.c
-@@ -0,0 +1,20 @@
-+#include "Python.h"
-+#include "pycore_retrace.h"
-+
-+void
-+_PyRetrace_NoteThreadSwitch(PyThreadState *from_tstate,
-+                            PyThreadState *to_tstate)
-+{
-+}
-+
-+void
-+_PyRetrace_DeliverThreadSwitchCallback(PyThreadState *tstate)
-+{
-+}
-+
-+int
-+_PyRetrace_CheckReplayCheckpoint(PyThreadState *tstate,
-+                                 _PyInterpreterFrame *frame)
-+{
-+    return 0;
-+}

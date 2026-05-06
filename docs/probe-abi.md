@@ -24,18 +24,25 @@ The initial Python API is:
 
 ```python
 retrace.instruction_counters(thread_id=None)
+retrace.common_counters_prefix_length(counters, thread_id=None)
 retrace.set_thread_switch_callback(callback_or_none)
 retrace.get_thread_switch_callback()
 retrace.set_replay_checkpoint(thread_id, counters, callback)
 retrace.set_replay_checkpoint(None)
 ```
 
-It returns `retrace.U64Buffer`, an immutable tuple-like sequence backed by a
-read-only `uint64_t` buffer (`memoryview(...).format == "Q"`). The values are
-the requested thread's visible Python frame instruction counters, current frame
-first. If `thread_id` is omitted, the current thread is used. When present,
-`thread_id` is the Python thread identifier exposed by `threading.get_ident()`;
-unknown thread ids raise `LookupError`.
+`instruction_counters()` returns `retrace.U64Buffer`, an immutable tuple-like
+sequence backed by a read-only `uint64_t` buffer (`memoryview(...).format ==
+"Q"`). The values are the requested thread's visible Python frame instruction
+counters, current frame first. If `thread_id` is omitted, the current thread is
+used. When present, `thread_id` is the Python thread identifier exposed by
+`threading.get_ident()`; unknown thread ids raise `LookupError`.
+
+`common_counters_prefix_length(counters, thread_id=None)` compares `counters`
+with the requested thread's current visible instruction counters in the same
+current-frame-first order and returns the number of leading elements that
+match. Passing `retrace.U64Buffer` uses the backing `uint64_t` array directly;
+other sequences are normalized before the frame stack is inspected.
 
 `set_thread_switch_callback()` installs a Python callback for telemetry. The
 callback signature is:
