@@ -83,7 +83,7 @@ jobs:
     runs-on: ${{ matrix.platform.os }}
     timeout-minutes: 360
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         python-version: ${{ fromJSON(needs.versions.outputs.versions) }}
         platform:
@@ -243,7 +243,7 @@ jobs:
     runs-on: ${{ matrix.platform.os }}
     timeout-minutes: 360
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         python-version: ${{ fromJSON(needs.versions.outputs.versions) }}
         platform:
