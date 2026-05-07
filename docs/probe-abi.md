@@ -27,6 +27,7 @@ _retrace.coordinates(thread_id=None, drop=0)
 _retrace.coordinates_delta()
 _retrace.common_coordinates_prefix_length(coordinates, thread_id=None)
 _retrace.hash()
+_retrace.thread_id()
 _retrace.disable_for(callable)
 _retrace.enable_for(callable)
 _retrace.set_thread_yield_callback(callback_or_none)
@@ -42,10 +43,11 @@ sequence backed by a read-only `uint64_t` buffer (`memoryview(...).format ==
 "Q"`). The values are the requested thread's visible Python frame execution
 coordinates, current frame first, followed by a synthetic per-thread root
 coordinate as the oldest element. If `thread_id` is omitted, the current thread
-is used. When present, `thread_id` is the Python thread identifier exposed by
-`threading.get_ident()`; unknown thread ids raise `LookupError`. `drop` omits
-that many leading coordinates from the returned buffer, which lets callers reuse
-a known common prefix and fetch only the remaining suffix. Use
+is used. When present, `thread_id` is the deterministic Retrace thread id
+returned by `_retrace.thread_id()`; unknown or disabled thread ids raise
+`LookupError`. `drop` omits that many leading coordinates from the returned
+buffer, which lets callers reuse a known common prefix and fetch only the
+remaining suffix. Use
 `coordinates(None, drop)` to drop coordinates for the current thread.
 
 `common_coordinates_prefix_length(coordinates, thread_id=None)` compares `coordinates`
@@ -81,6 +83,11 @@ root coordinate matches, the function emits the full current stack with
 Python `int`. It uses the same visible-frame rules as `coordinates()` but avoids
 materializing the coordinate vector.
 
+`thread_id()` returns the current thread's deterministic Retrace thread id as a
+small positive integer. Threads created while the parent is coordinate-disabled
+return `0`, are not part of the Retrace-visible thread family, and are not found
+by explicit `thread_id` lookups.
+
 `disable_for(callable)` returns a native callable wrapper for Retrace
 control-plane functions. While the wrapper is calling the wrapped callable, any
 newly-started Python frame is stamped coordinate-disabled. Disabled frames and
@@ -107,17 +114,16 @@ callback()
 The yield callback runs on the current thread just before the eval loop drops
 the GIL in response to a Python-level switch request. The resume callback runs
 on the current thread after it has acquired the GIL and restored its current
-thread state, before application bytecode resumes. The current thread id can be
-read with `threading.get_ident()` or `_thread.get_ident()`. Callback return
-values are ignored.
+thread state, before application bytecode resumes. The current deterministic
+thread id can be read with `_retrace.thread_id()`. Callback return values are
+ignored.
 
 `set_replay_checkpoint(thread_id, coordinates, callback)` arms one replay control
-checkpoint for the current interpreter. `thread_id` uses the same Python
-identifier as `threading.get_ident()`, `coordinates` is the full visible frame
-coordinate tuple returned by `coordinates()`, and `callback` is called
-with no arguments when that thread reaches the exact coordinate. The callback
-runs on the thread that reached the checkpoint; `set_replay_checkpoint(None)`
-clears the armed checkpoint.
+checkpoint for the current interpreter. `thread_id` is a non-zero Retrace thread
+id, `coordinates` is the full visible frame coordinate tuple returned by
+`coordinates()`, and `callback` is called with no arguments when that thread
+reaches the exact coordinate. The callback runs on the thread that reached the
+checkpoint; `set_replay_checkpoint(None)` clears the armed checkpoint.
 
 Native Retrace extensions should eventually discover a native API through a
 capsule, for example:

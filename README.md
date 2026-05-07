@@ -64,6 +64,7 @@ _retrace.coordinates(thread_id=None, drop=0)
 _retrace.coordinates_delta()
 _retrace.common_coordinates_prefix_length(coordinates, thread_id=None)
 _retrace.hash()
+_retrace.thread_id()
 _retrace.disable_for(callable)
 _retrace.enable_for(callable)
 _retrace.set_thread_yield_callback(callback_or_none)
@@ -77,8 +78,9 @@ _retrace.set_replay_checkpoint(None)
 `coordinates()` returns a tuple-like immutable `_retrace.U64Buffer`
 backed by a read-only `uint64_t` array. Coordinates are ordered current frame
 first and end with a synthetic per-thread root coordinate. `thread_id` is the
-Python thread identifier from `threading.get_ident()`; unknown thread ids raise
-`LookupError`. `drop` omits leading coordinates from the returned buffer.
+deterministic Retrace thread id from `_retrace.thread_id()`; unknown or disabled
+thread ids raise `LookupError`. `drop` omits leading coordinates from the
+returned buffer.
 
 `coordinates_delta()` is the fast current-thread path for frequent
 thread scheduling events. It returns:
@@ -99,6 +101,10 @@ stack[:0] = delta[1:]
 
 `hash()` returns the current thread's 64-bit coordinate-location hash as a
 Python `int`.
+
+`thread_id()` returns the current thread's deterministic Retrace thread id as a
+small positive integer. It returns `0` for disabled threads that are not part of
+the Retrace-visible thread family.
 
 `set_thread_yield_callback()` installs a no-argument Python callback called just
 before the eval loop drops the GIL for a Python-level switch request.
@@ -276,6 +282,7 @@ where `_PyRetraceThreadState` is:
 typedef struct {
     int thread_resume_pending;
     int coordinate_mode;
+    uint64_t thread_id;
     uint64_t root_coordinate;
     uint64_t last_root_coordinate;
     uint64_t root_coordinate_hash;
@@ -300,10 +307,11 @@ where `_PyRetraceInterpreterState` is:
 
 ```c
 typedef struct {
+    uint64_t next_thread_id;
     PyObject *thread_yield_callback;
     PyObject *thread_resume_callback;
     int replay_checkpoint_armed;
-    unsigned long replay_checkpoint_thread_id;
+    uint64_t replay_checkpoint_thread_id;
     uint64_t replay_checkpoint_top;
     PyObject *replay_checkpoint_coordinates;
     PyObject *replay_checkpoint_callback;
@@ -313,9 +321,11 @@ typedef struct {
 } _PyRetraceInterpreterState;
 ```
 
-The thread callback pointers are the registered Python callbacks. The replay
-checkpoint fields hold one armed checkpoint, its coordinate target, and the
-temporary active-frame context used while invoking the checkpoint callback.
+`next_thread_id` is the interpreter-local counter used to assign small
+deterministic ids to Retrace-visible threads. The thread callback pointers are
+the registered Python callbacks. The replay checkpoint fields hold one armed
+checkpoint, its coordinate target, and the temporary active-frame context used
+while invoking the checkpoint callback.
 
 No existing public object layout such as `PyObject`, `PyTypeObject`, or
 `PyFrameObject` is extended directly. The `_retrace` module also defines its own
@@ -418,7 +428,7 @@ THREAD_RESUME
 ```
 
 Callbacks receive no thread ids. The callback is running on the thread it is
-describing, so callers can use `threading.get_ident()` or `_thread.get_ident()`.
+describing, so callers can use `_retrace.thread_id()`.
 This avoids bookkeeping in the GIL handoff path and avoids asking CPython to
 predict which thread will run next.
 

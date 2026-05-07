@@ -19,7 +19,7 @@ def check_replay_checkpoint(module) -> None:
         def callback():
             hits.append((tuple(module.coordinates()), target))
 
-        module.set_replay_checkpoint(threading.get_ident(), target, callback)
+        module.set_replay_checkpoint(module.thread_id(), target, callback)
         value = 0
         for index in range(1000):
             value += index
@@ -45,11 +45,11 @@ def check_thread_callbacks(module) -> None:
     stop = False
 
     def yield_callback():
-        yield_hits.append(threading.get_ident())
+        yield_hits.append(module.thread_id())
         callback_deltas.append(tuple(module.coordinates_delta()))
 
     def resume_callback():
-        resume_hits.append(threading.get_ident())
+        resume_hits.append(module.thread_id())
         callback_deltas.append(tuple(module.coordinates_delta()))
 
     def contender():
@@ -129,6 +129,27 @@ def check_coordinate_hash(module) -> None:
     assert len(set(nested_hashes)) == len(nested_hashes)
 
 
+def check_thread_ids(module) -> None:
+    main_id = module.thread_id()
+    assert type(main_id) is int
+    assert main_id > 0
+
+    worker_ids = []
+
+    def worker() -> None:
+        worker_ids.append(module.thread_id())
+
+    workers = [threading.Thread(target=worker) for _ in range(3)]
+    for worker_thread in workers:
+        worker_thread.start()
+    for worker_thread in workers:
+        worker_thread.join()
+
+    assert len(worker_ids) == len(workers)
+    assert len(set(worker_ids)) == len(workers)
+    assert sorted(worker_ids) == list(range(main_id + 1, main_id + 1 + len(workers)))
+
+
 def check_c_driven_callback_coordinates(module) -> None:
     def mapped(value: int) -> int:
         map_coordinates.append(tuple(module.coordinates()))
@@ -200,6 +221,28 @@ def check_disable_for(module) -> None:
     else:
         raise AssertionError("disabled generator did not stop")
     assert all(len(item) == generator_depth for item in generator_coordinates)
+
+    disabled_thread_ids = []
+    disabled_thread_coordinates = []
+
+    def starts_disabled_thread() -> None:
+        def worker() -> None:
+            disabled_thread_ids.append(module.thread_id())
+            disabled_thread_coordinates.append(tuple(module.coordinates()))
+
+        worker_thread = threading.Thread(target=worker)
+        worker_thread.start()
+        worker_thread.join()
+
+    module.disable_for(starts_disabled_thread)()
+    assert disabled_thread_ids == [0]
+    assert len(disabled_thread_coordinates) == 1
+    try:
+        module.coordinates(0)
+    except LookupError:
+        pass
+    else:
+        raise AssertionError("explicit disabled thread id was accepted")
 
 
 def check_enable_for(module) -> None:
@@ -367,8 +410,11 @@ def main() -> int:
         assert PROBE_MODULE in sys.builtin_module_names
         assert "retrace" not in sys.builtin_module_names
         module = __import__(PROBE_MODULE)
+        thread_id = module.thread_id()
+        assert type(thread_id) is int
+        assert thread_id > 0
         coordinates = module.coordinates()
-        coordinates_by_id = module.coordinates(threading.get_ident())
+        coordinates_by_id = module.coordinates(thread_id)
         view = memoryview(coordinates)
         assert len(coordinates) >= 1
         assert view.format == "Q"
@@ -377,7 +423,7 @@ def main() -> int:
         assert coordinates == tuple(coordinates)
         assert len(coordinates_by_id) == len(coordinates)
         dropped = module.coordinates(None, 1)
-        dropped_by_id = module.coordinates(threading.get_ident(), 1)
+        dropped_by_id = module.coordinates(thread_id, 1)
         dropped_all = module.coordinates(None, len(coordinates) + 1)
         assert len(dropped) == max(0, len(coordinates) - 1)
         assert len(dropped_by_id) == max(0, len(coordinates) - 1)
@@ -394,7 +440,7 @@ def main() -> int:
         assert module.common_coordinates_prefix_length(()) == 0
         prefix = module.common_coordinates_prefix_length(coordinates)
         prefix_by_id = module.common_coordinates_prefix_length(
-            coordinates, threading.get_ident()
+            coordinates, thread_id
         )
         tuple_prefix = module.common_coordinates_prefix_length(tuple(coordinates))
         assert 0 <= prefix <= len(coordinates)
@@ -403,6 +449,7 @@ def main() -> int:
         assert module.common_coordinates_prefix_length([2**64 - 1]) == 0
         check_coordinates_delta(module)
         check_coordinate_hash(module)
+        check_thread_ids(module)
         assert module.get_thread_yield_callback() is None
         assert module.get_thread_resume_callback() is None
 
@@ -436,6 +483,7 @@ def main() -> int:
         print("common_coordinates_prefix_length=available")
         print("coordinates_delta=available")
         print("hash=available")
+        print("thread_id=available")
         print("disable_for=available")
         print("enable_for=available")
         print("retrace_coordinates_xoption=available")
