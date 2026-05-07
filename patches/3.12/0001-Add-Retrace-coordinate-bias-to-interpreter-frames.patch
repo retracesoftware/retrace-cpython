@@ -1,94 +1,83 @@
-From f3e5ba49c1b6fef9f3916d45af20d4ea67fc6323 Mon Sep 17 00:00:00 2001
-From: nathan-retrace <nathan@retracesoftware.com>
-Date: Tue, 5 May 2026 17:24:44 +0100
-Subject: [PATCH 1/7] Add Retrace instruction bias to interpreter frames
+From e2db60eb1948758897449ac92832d38336bf8083 Mon Sep 17 00:00:00 2001
+From: Retrace CPython Builder <retrace-cpython@retracesoftware.com>
+Date: Thu, 7 May 2026 09:50:41 +0100
+Subject: [PATCH 1/7] Add Retrace coordinate bias to interpreter frames
 
 ---
- Include/internal/pycore_frame.h | 29 +++++++++++++++++++++++++++++
- Python/ceval.c                  |  3 +++
+ Include/internal/pycore_frame.h |  6 ++++++
+ Python/ceval.c                  |  8 ++++++++
  Python/ceval_macros.h           | 16 ++++++++++++++--
- 3 files changed, 46 insertions(+), 2 deletions(-)
+ 3 files changed, 28 insertions(+), 2 deletions(-)
 
 diff --git a/Include/internal/pycore_frame.h b/Include/internal/pycore_frame.h
-index 4d355b2..5f1dd6a 100644
+index 4d355b2..203693b 100644
 --- a/Include/internal/pycore_frame.h
 +++ b/Include/internal/pycore_frame.h
 @@ -6,6 +6,7 @@ extern "C" {
- 
+
  #include <stdbool.h>
  #include <stddef.h>
-+#include <stdint.h>
++#include "cpython/retrace_state.h" // _PyRetraceFrameState
  #include "pycore_code.h"         // STATS
- 
+
  /* See Objects/frame_layout.md for an explanation of the frame stack
-@@ -70,6 +71,8 @@ typedef struct _PyInterpreterFrame {
+@@ -70,6 +71,7 @@ typedef struct _PyInterpreterFrame {
       * If there is no callee, then it is meaningless. */
      uint16_t return_offset;
      char owner;
-+    int64_t retrace_instr_bias;
-+    uint64_t retrace_last_instruction_counter;
++    _PyRetraceFrameState retrace;
      /* Locals and stack */
      PyObject *localsplus[1];
  } _PyInterpreterFrame;
-@@ -77,6 +80,30 @@ typedef struct _PyInterpreterFrame {
- #define _PyInterpreterFrame_LASTI(IF) \
-     ((int)((IF)->prev_instr - _PyCode_CODE((IF)->f_code)))
- 
-+static inline int64_t
-+_PyFrame_RetraceInstructionCoordinate(_PyInterpreterFrame *frame)
-+{
-+    return frame->retrace_instr_bias + (int64_t)_PyInterpreterFrame_LASTI(frame);
-+}
-+
-+static inline void
-+_PyFrame_RetraceResetLastInstructionCounter(_PyInterpreterFrame *frame)
-+{
-+    frame->retrace_last_instruction_counter = UINT64_MAX;
-+}
-+
-+static inline void
-+_PyFrame_RetraceInstructionJump(
-+    _PyInterpreterFrame *frame,
-+    _Py_CODEUNIT *from,
-+    _Py_CODEUNIT *to)
-+{
-+    PyCodeObject *code = frame->f_code;
-+    int from_offset = (int)(from - _PyCode_CODE(code));
-+    int to_offset = (int)(to - _PyCode_CODE(code));
-+    frame->retrace_instr_bias += (int64_t)from_offset + 1 - to_offset;
-+}
-+
- static inline PyObject **_PyFrame_Stackbase(_PyInterpreterFrame *f) {
-     return f->localsplus + f->f_code->co_nlocalsplus;
- }
-@@ -130,6 +157,8 @@ _PyFrame_Initialize(
+@@ -130,6 +132,10 @@ _PyFrame_Initialize(
      frame->prev_instr = _PyCode_CODE(code) - 1;
      frame->return_offset = 0;
      frame->owner = FRAME_OWNED_BY_THREAD;
-+    frame->retrace_instr_bias = 0;
-+    _PyFrame_RetraceResetLastInstructionCounter(frame);
- 
++    frame->retrace.coordinate_bias = 0;
++    frame->retrace.coordinate_depth = _PyFrame_RETRACE_COORDINATE_DEPTH_UNSET;
++    frame->retrace.last_coordinate = _PyFrame_RETRACE_LAST_COORDINATE_UNSET;
++    frame->retrace.coordinate_hash = _PyFrame_RETRACE_COORDINATE_HASH_UNSET;
+
      for (int i = null_locals_from; i < code->co_nlocalsplus; i++) {
          frame->localsplus[i] = NULL;
 diff --git a/Python/ceval.c b/Python/ceval.c
-index 3985b52..74a7291 100644
+index 3985b52..3ed202c 100644
 --- a/Python/ceval.c
 +++ b/Python/ceval.c
-@@ -701,9 +701,12 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *frame, int
+@@ -701,9 +701,15 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *frame, int
      entry_frame.stacktop = 0;
      entry_frame.owner = FRAME_OWNED_BY_CSTACK;
      entry_frame.return_offset = 0;
-+    entry_frame.retrace_instr_bias = 0;
-+    _PyFrame_RetraceResetLastInstructionCounter(&entry_frame);
++    entry_frame.retrace.coordinate_bias = 0;
++    entry_frame.retrace.coordinate_hash = _PyFrame_RETRACE_COORDINATE_HASH_UNSET;
++    _PyFrame_RetraceResetCoordinateDepth(&entry_frame);
++    _PyFrame_RetraceInitializeLastCoordinate(&entry_frame);
      /* Push frame */
      entry_frame.previous = prev_cframe->current_frame;
      frame->previous = &entry_frame;
-+    _PyFrame_RetraceResetLastInstructionCounter(frame);
++    _PyFrame_RetraceResetCoordinateDepth(frame);
++    _PyFrame_RetraceResetLastCoordinate(frame);
      cframe.current_frame = frame;
- 
+
      tstate->c_recursion_remaining -= (PY_EVAL_C_STACK_UNITS - 1);
+@@ -718,6 +723,7 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *frame, int
+         if (_Py_EnterRecursivePy(tstate)) {
+             goto exit_unwind;
+         }
++        _PyRetrace_ActivateFrame(tstate, frame);
+         /* Because this avoids the RESUME,
+          * we need to update instrumentation */
+         _Py_Instrument(frame->f_code, tstate->interp);
+@@ -743,6 +749,7 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *frame, int
+     if (_Py_EnterRecursivePy(tstate)) {
+         goto exit_unwind;
+     }
++    _PyRetrace_ActivateFrame(tstate, frame);
+
+ resume_frame:
+     SET_LOCALS_FROM_FRAME();
 diff --git a/Python/ceval_macros.h b/Python/ceval_macros.h
-index fccf908..7b440d6 100644
+index fccf908..7987816 100644
 --- a/Python/ceval_macros.h
 +++ b/Python/ceval_macros.h
 @@ -144,8 +144,18 @@ GETITEM(PyObject *v, Py_ssize_t i) {
@@ -100,16 +89,16 @@ index fccf908..7b440d6 100644
 +#define JUMPTO(x) \
 +    do { \
 +        _Py_CODEUNIT *target = _PyCode_CODE(frame->f_code) + (x); \
-+        _PyFrame_RetraceInstructionJump(frame, frame->prev_instr, target); \
++        _PyFrame_RetraceCoordinateJump(frame, frame->prev_instr, target); \
 +        next_instr = target; \
 +    } while (0)
 +#define JUMPBY(x) \
 +    do { \
 +        _Py_CODEUNIT *target = next_instr + (x); \
-+        _PyFrame_RetraceInstructionJump(frame, frame->prev_instr, target); \
++        _PyFrame_RetraceCoordinateJump(frame, frame->prev_instr, target); \
 +        next_instr = target; \
 +    } while (0)
- 
+
  /* OpCode prediction macros
      Some opcodes tend to come in pairs thus making it possible to
 @@ -334,6 +344,7 @@ do { \
@@ -124,8 +113,7 @@ index fccf908..7b440d6 100644
          next_instr = (dest)+1; \
          goto error; \
      } \
-+    _PyFrame_RetraceInstructionJump(frame, retrace_jump_src, next_instr); \
++    _PyFrame_RetraceCoordinateJump(frame, retrace_jump_src, next_instr); \
  } while (0);
--- 
+--
 2.50.1 (Apple Git-155)
-

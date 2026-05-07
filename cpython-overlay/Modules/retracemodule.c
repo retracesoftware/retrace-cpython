@@ -27,6 +27,15 @@ typedef struct {
 
 static PyTypeObject RetraceU64Buffer_Type;
 
+typedef struct {
+    PyObject_HEAD
+    PyObject *callable;
+    vectorcallfunc vectorcall;
+    int coordinate_mode;
+} RetraceCoordinateCallableObject;
+
+static PyTypeObject RetraceCoordinateCallable_Type;
+
 static RetraceU64BufferObject *
 retrace_u64buffer_new(Py_ssize_t size)
 {
@@ -279,7 +288,7 @@ retrace_u64buffer_repr(RetraceU64BufferObject *self)
     if (tuple == NULL) {
         return NULL;
     }
-    PyObject *repr = PyUnicode_FromFormat("retrace.U64Buffer(%R)", tuple);
+    PyObject *repr = PyUnicode_FromFormat("_retrace.U64Buffer(%R)", tuple);
     Py_DECREF(tuple);
     return repr;
 }
@@ -348,7 +357,7 @@ static PyMethodDef retrace_u64buffer_methods[] = {
 
 static PyTypeObject RetraceU64Buffer_Type = {
     PyVarObject_HEAD_INIT(NULL, 0)
-    .tp_name = "retrace.U64Buffer",
+    .tp_name = "_retrace.U64Buffer",
     .tp_basicsize = offsetof(RetraceU64BufferObject, ob_item),
     .tp_itemsize = sizeof(uint64_t),
     .tp_dealloc = (destructor)retrace_u64buffer_dealloc,
@@ -365,33 +374,153 @@ static PyTypeObject RetraceU64Buffer_Type = {
 };
 
 static int
+retrace_coordinate_callable_traverse(RetraceCoordinateCallableObject *self,
+                                     visitproc visit, void *arg)
+{
+    Py_VISIT(self->callable);
+    return 0;
+}
+
+static int
+retrace_coordinate_callable_clear(RetraceCoordinateCallableObject *self)
+{
+    Py_CLEAR(self->callable);
+    return 0;
+}
+
+static void
+retrace_coordinate_callable_dealloc(RetraceCoordinateCallableObject *self)
+{
+    PyObject_GC_UnTrack(self);
+    retrace_coordinate_callable_clear(self);
+    Py_TYPE(self)->tp_free((PyObject *)self);
+}
+
+static PyObject *
+retrace_coordinate_callable_vectorcall(PyObject *self_obj,
+                                       PyObject *const *args,
+                                       size_t nargsf,
+                                       PyObject *kwnames)
+{
+    RetraceCoordinateCallableObject *self =
+        (RetraceCoordinateCallableObject *)self_obj;
+    PyThreadState *tstate = _PyThreadState_GET();
+
+    int previous_mode = tstate->retrace.coordinate_mode;
+    tstate->retrace.coordinate_mode = self->coordinate_mode;
+    PyObject *result = PyObject_Vectorcall(
+        self->callable, args, nargsf, kwnames);
+    tstate->retrace.coordinate_mode = previous_mode;
+    return result;
+}
+
+static PyObject *
+retrace_coordinate_callable_descr_get(PyObject *self, PyObject *obj,
+                                      PyObject *type)
+{
+    if (obj == NULL || obj == Py_None) {
+        return Py_NewRef(self);
+    }
+    return PyMethod_New(self, obj);
+}
+
+static PyObject *
+retrace_coordinate_callable_getattro(PyObject *self_obj, PyObject *name)
+{
+    if (PyUnicode_Check(name) &&
+        PyUnicode_CompareWithASCIIString(name, "__wrapped__") == 0)
+    {
+        RetraceCoordinateCallableObject *self =
+            (RetraceCoordinateCallableObject *)self_obj;
+        return Py_NewRef(self->callable);
+    }
+
+    PyObject *value = PyObject_GenericGetAttr(self_obj, name);
+    if (value != NULL || !PyErr_ExceptionMatches(PyExc_AttributeError)) {
+        return value;
+    }
+    PyErr_Clear();
+
+    RetraceCoordinateCallableObject *self =
+        (RetraceCoordinateCallableObject *)self_obj;
+    return PyObject_GetAttr(self->callable, name);
+}
+
+static PyObject *
+retrace_coordinate_callable_repr(RetraceCoordinateCallableObject *self)
+{
+    const char *name =
+        self->coordinate_mode > 0 ? "enable_for" : "disable_for";
+    return PyUnicode_FromFormat("_retrace.%s(%R)", name, self->callable);
+}
+
+static PyTypeObject RetraceCoordinateCallable_Type = {
+    PyVarObject_HEAD_INIT(NULL, 0)
+    .tp_name = "_retrace.CoordinateCallable",
+    .tp_basicsize = sizeof(RetraceCoordinateCallableObject),
+    .tp_dealloc = (destructor)retrace_coordinate_callable_dealloc,
+    .tp_repr = (reprfunc)retrace_coordinate_callable_repr,
+    .tp_call = PyVectorcall_Call,
+    .tp_getattro = retrace_coordinate_callable_getattro,
+    .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HAVE_GC |
+                Py_TPFLAGS_HAVE_VECTORCALL | Py_TPFLAGS_IMMUTABLETYPE,
+    .tp_traverse = (traverseproc)retrace_coordinate_callable_traverse,
+    .tp_clear = (inquiry)retrace_coordinate_callable_clear,
+    .tp_descr_get = retrace_coordinate_callable_descr_get,
+    .tp_vectorcall_offset = offsetof(RetraceCoordinateCallableObject, vectorcall),
+};
+
+static int
 retrace_frame_is_visible(_PyInterpreterFrame *frame)
 {
     return _PyRetrace_FrameIsVisible(frame);
 }
 
 static uint64_t
-retrace_frame_instruction_counter(_PyInterpreterFrame *frame)
+retrace_frame_coordinate(_PyInterpreterFrame *frame)
 {
-    return _PyRetrace_FrameInstructionCounter(frame);
+    return _PyRetrace_FrameCoordinate(frame);
+}
+
+static Py_ssize_t
+retrace_frame_depth(_PyInterpreterFrame *frame)
+{
+    if (frame->retrace.coordinate_depth !=
+            _PyFrame_RETRACE_COORDINATE_DEPTH_UNSET)
+    {
+        return (Py_ssize_t)frame->retrace.coordinate_depth;
+    }
+
+    Py_ssize_t depth = 0;
+    for (_PyInterpreterFrame *parent = frame->previous;
+         parent != NULL;
+         parent = parent->previous)
+    {
+        if (retrace_frame_is_visible(parent)) {
+            depth = retrace_frame_depth(parent) + 1;
+            break;
+        }
+    }
+    frame->retrace.coordinate_depth = (uint32_t)depth;
+    return depth;
 }
 
 static _PyInterpreterFrame *
 retrace_thread_state_frame(PyThreadState *current_tstate,
                            PyThreadState *target_tstate)
 {
-    if (target_tstate->retrace_thread_callback_active &&
-        target_tstate->retrace_thread_callback_frame != NULL)
+    if (target_tstate->retrace.thread_callback_active &&
+        target_tstate->retrace.thread_callback_frame != NULL)
     {
-        return target_tstate->retrace_thread_callback_frame;
+        return target_tstate->retrace.thread_callback_frame;
     }
 
     PyInterpreterState *interp = current_tstate->interp;
-    if (interp->retrace_replay_checkpoint_callback_active &&
-        target_tstate == interp->retrace_replay_checkpoint_callback_tstate &&
-        interp->retrace_replay_checkpoint_callback_frame != NULL)
+    if (interp->retrace.replay_checkpoint_callback_active &&
+        target_tstate == interp->retrace.replay_checkpoint_callback_tstate &&
+        interp->retrace.replay_checkpoint_callback_frame != NULL)
     {
-        return interp->retrace_replay_checkpoint_callback_frame;
+        return interp->retrace.replay_checkpoint_callback_frame;
     }
     if (target_tstate->cframe == NULL) {
         return NULL;
@@ -400,10 +529,13 @@ retrace_thread_state_frame(PyThreadState *current_tstate,
 }
 
 static PyThreadState *
-retrace_find_thread_state(PyInterpreterState *interp, unsigned long thread_id)
+retrace_find_thread_state(PyInterpreterState *interp, uint64_t thread_id)
 {
+    if (thread_id == 0) {
+        return NULL;
+    }
     for (PyThreadState *scan = interp->threads.head; scan != NULL; scan = scan->next) {
-        if (scan->thread_id == thread_id) {
+        if (scan->retrace.thread_id == thread_id) {
             return scan;
         }
     }
@@ -411,21 +543,22 @@ retrace_find_thread_state(PyInterpreterState *interp, unsigned long thread_id)
 }
 
 static Py_ssize_t
-retrace_visible_frame_count(_PyInterpreterFrame *frame)
+retrace_coordinate_count(_PyInterpreterFrame *frame)
 {
-    Py_ssize_t size = 0;
-    for (_PyInterpreterFrame *scan = frame; scan != NULL; scan = scan->previous) {
-        if (retrace_frame_is_visible(scan)) {
-            size++;
-        }
+    while (frame != NULL && !retrace_frame_is_visible(frame)) {
+        frame = frame->previous;
     }
-    return size;
+    if (frame == NULL) {
+        return 1;
+    }
+    return retrace_frame_depth(frame) + 2;
 }
 
 static void
-retrace_fill_instruction_counters(RetraceU64BufferObject *buffer,
-                                  _PyInterpreterFrame *frame,
-                                  Py_ssize_t drop)
+retrace_fill_coordinates(RetraceU64BufferObject *buffer,
+                         _PyInterpreterFrame *frame,
+                         uint64_t root_coordinate,
+                         Py_ssize_t drop)
 {
     Py_ssize_t index = 0;
     Py_ssize_t visible_index = 0;
@@ -434,13 +567,17 @@ retrace_fill_instruction_counters(RetraceU64BufferObject *buffer,
             if (visible_index++ < drop) {
                 continue;
             }
-            buffer->ob_item[index++] = retrace_frame_instruction_counter(scan);
+            buffer->ob_item[index++] = retrace_frame_coordinate(scan);
         }
     }
+    if (visible_index++ >= drop) {
+        buffer->ob_item[index++] = root_coordinate;
+    }
+    assert(index == Py_SIZE(buffer));
 }
 
 static PyObject *
-retrace_instruction_counters_delta(PyObject *module, PyObject *Py_UNUSED(ignored))
+retrace_coordinates_delta(PyObject *module, PyObject *Py_UNUSED(ignored))
 {
     PyThreadState *tstate = _PyThreadState_GET();
     _PyInterpreterFrame *frame = retrace_thread_state_frame(tstate, tstate);
@@ -456,13 +593,20 @@ retrace_instruction_counters_delta(PyObject *module, PyObject *Py_UNUSED(ignored
             continue;
         }
 
-        uint64_t counter = retrace_frame_instruction_counter(scan);
-        if (!found_common && scan->retrace_last_instruction_counter == counter) {
+        uint64_t coordinate = retrace_frame_coordinate(scan);
+        if (!found_common && scan->retrace.last_coordinate == coordinate) {
             found_common = 1;
             new_count = current_size;
         }
         current_size++;
     }
+    if (!found_common &&
+        tstate->retrace.last_root_coordinate == tstate->retrace.root_coordinate)
+    {
+        found_common = 1;
+        new_count = current_size;
+    }
+    current_size++;
     if (!found_common) {
         new_count = current_size;
     }
@@ -483,11 +627,17 @@ retrace_instruction_counters_delta(PyObject *module, PyObject *Py_UNUSED(ignored
             continue;
         }
 
-        uint64_t counter = retrace_frame_instruction_counter(scan);
-        scan->retrace_last_instruction_counter = counter;
-        delta->ob_item[1 + copied] = counter;
+        uint64_t coordinate = retrace_frame_coordinate(scan);
+        scan->retrace.last_coordinate = coordinate;
+        delta->ob_item[1 + copied] = coordinate;
         copied++;
     }
+    if (copied < new_count) {
+        tstate->retrace.last_root_coordinate = tstate->retrace.root_coordinate;
+        delta->ob_item[1 + copied] = tstate->retrace.root_coordinate;
+        copied++;
+    }
+    assert(copied == new_count);
 
     return (PyObject *)delta;
 }
@@ -495,10 +645,10 @@ retrace_instruction_counters_delta(PyObject *module, PyObject *Py_UNUSED(ignored
 typedef struct {
     RetraceU64BufferObject *buffer;
     PyObject *owned;
-} RetraceCounterSequence;
+} RetraceCoordinateSequence;
 
 static int
-retrace_counter_sequence_init(RetraceCounterSequence *sequence, PyObject *value)
+retrace_coordinate_sequence_init(RetraceCoordinateSequence *sequence, PyObject *value)
 {
     sequence->buffer = NULL;
     sequence->owned = NULL;
@@ -509,7 +659,7 @@ retrace_counter_sequence_init(RetraceCounterSequence *sequence, PyObject *value)
     }
 
     sequence->owned = (PyObject *)retrace_u64buffer_from_sequence(
-        value, "counters must be a sequence");
+        value, "coordinates must be a sequence");
     if (sequence->owned == NULL) {
         return -1;
     }
@@ -518,56 +668,65 @@ retrace_counter_sequence_init(RetraceCounterSequence *sequence, PyObject *value)
 }
 
 static void
-retrace_counter_sequence_clear(RetraceCounterSequence *sequence)
+retrace_coordinate_sequence_clear(RetraceCoordinateSequence *sequence)
 {
     Py_XDECREF(sequence->owned);
 }
 
 static uint64_t
-retrace_counter_sequence_get(RetraceCounterSequence *sequence,
+retrace_coordinate_sequence_get(RetraceCoordinateSequence *sequence,
                              Py_ssize_t index)
 {
     return sequence->buffer->ob_item[index];
 }
 
 static Py_ssize_t
-retrace_common_counters_prefix_length(_PyInterpreterFrame *frame,
-                                      RetraceCounterSequence *counters)
+retrace_common_coordinates_prefix_length(_PyInterpreterFrame *frame,
+                                         uint64_t root_coordinate,
+                                         RetraceCoordinateSequence *coordinates)
 {
     Py_ssize_t index = 0;
     for (_PyInterpreterFrame *scan = frame; scan != NULL; scan = scan->previous) {
         if (!retrace_frame_is_visible(scan)) {
             continue;
         }
-        if (index >= Py_SIZE(counters->buffer)) {
+        if (index >= Py_SIZE(coordinates->buffer)) {
             return index;
         }
 
-        uint64_t counter = retrace_counter_sequence_get(counters, index);
-        if (counter != retrace_frame_instruction_counter(scan)) {
+        uint64_t coordinate =
+            retrace_coordinate_sequence_get(coordinates, index);
+        if (coordinate != retrace_frame_coordinate(scan)) {
             return index;
         }
         index++;
     }
+    if (index >= Py_SIZE(coordinates->buffer)) {
+        return index;
+    }
+    if (retrace_coordinate_sequence_get(coordinates, index) != root_coordinate) {
+        return index;
+    }
+    index++;
     return index;
 }
 
 static void
 retrace_clear_replay_checkpoint(PyInterpreterState *interp)
 {
-    interp->retrace_replay_checkpoint_armed = 0;
-    interp->retrace_replay_checkpoint_thread_id = 0;
-    interp->retrace_replay_checkpoint_top = 0;
-    Py_CLEAR(interp->retrace_replay_checkpoint_counters);
-    Py_CLEAR(interp->retrace_replay_checkpoint_callback);
+    interp->retrace.replay_checkpoint_armed = 0;
+    interp->retrace.replay_checkpoint_thread_id = 0;
+    interp->retrace.replay_checkpoint_top = 0;
+    Py_CLEAR(interp->retrace.replay_checkpoint_coordinates);
+    Py_CLEAR(interp->retrace.replay_checkpoint_callback);
 }
 
 static int
-retrace_replay_checkpoint_matches(PyInterpreterState *interp,
+retrace_replay_checkpoint_matches(PyThreadState *tstate,
                                   _PyInterpreterFrame *frame)
 {
     RetraceU64BufferObject *target =
-        (RetraceU64BufferObject *)interp->retrace_replay_checkpoint_counters;
+        (RetraceU64BufferObject *)tstate->interp->retrace.replay_checkpoint_coordinates;
     if (target == NULL) {
         return 0;
     }
@@ -581,52 +740,146 @@ retrace_replay_checkpoint_matches(PyInterpreterState *interp,
         if (index >= target_size) {
             return 0;
         }
-        if (target->ob_item[index] != retrace_frame_instruction_counter(scan)) {
+        if (target->ob_item[index] != retrace_frame_coordinate(scan)) {
             return 0;
         }
         index++;
     }
+    if (index >= target_size) {
+        return 0;
+    }
+    if (target->ob_item[index] != tstate->retrace.root_coordinate) {
+        return 0;
+    }
+    index++;
     return index == target_size;
 }
 
-PyDoc_STRVAR(retrace_instruction_counters_doc,
-"instruction_counters($module, thread_id=None, drop=0, /)\n"
+PyDoc_STRVAR(retrace_coordinates_doc,
+"coordinates($module, thread_id=None, drop=0, /)\n"
 "--\n"
 "\n"
-"Return a thread's visible Python frame instruction counters.\n"
+"Return a thread's visible Python frame coordinates.\n"
 "\n"
-"drop omits that many leading counters from the returned sequence.");
+"drop omits that many leading coordinates from the returned sequence.");
 
-PyDoc_STRVAR(retrace_instruction_counters_delta_doc,
-"instruction_counters_delta($module, /)\n"
+PyDoc_STRVAR(retrace_coordinates_delta_doc,
+"coordinates_delta($module, /)\n"
 "--\n"
 "\n"
-"Return [common_count, *new_counters] for the current thread's visible\n"
-"instruction counters.");
+"Return [common_count, *new_coordinates] for the current thread's visible\n"
+"coordinates.");
+
+PyDoc_STRVAR(retrace_hash_doc,
+"hash($module, /)\n"
+"--\n"
+"\n"
+"Return the current thread's 64-bit coordinate-location hash.");
+
+PyDoc_STRVAR(retrace_thread_id_doc,
+"thread_id($module, /)\n"
+"--\n"
+"\n"
+"Return the current thread's deterministic Retrace thread id.\n"
+"\n"
+"A return value of 0 means the thread is disabled and not part of the\n"
+"Retrace-visible thread family.");
 
 static PyObject *
-retrace_instruction_counters(PyObject *module, PyObject *args)
+retrace_hash(PyObject *module, PyObject *Py_UNUSED(ignored))
+{
+    PyThreadState *tstate = _PyThreadState_GET();
+    uint64_t hash = _PyRetrace_CurrentCoordinateHash(tstate);
+    return PyLong_FromUnsignedLongLong((unsigned long long)hash);
+}
+
+static PyObject *
+retrace_thread_id(PyObject *module, PyObject *Py_UNUSED(ignored))
+{
+    PyThreadState *tstate = _PyThreadState_GET();
+    uint64_t thread_id = tstate == NULL ? 0 : tstate->retrace.thread_id;
+    return PyLong_FromUnsignedLongLong((unsigned long long)thread_id);
+}
+
+PyDoc_STRVAR(retrace_disable_for_doc,
+"disable_for($module, callable, /)\n"
+"--\n"
+"\n"
+"Return a callable wrapper whose Python frames are hidden from coordinates.");
+
+static PyObject *
+retrace_coordinate_wrapper_for(PyObject *callable, int coordinate_mode,
+                               const char *name)
+{
+    if (PyObject_TypeCheck(callable, &RetraceCoordinateCallable_Type)) {
+        RetraceCoordinateCallableObject *wrapper =
+            (RetraceCoordinateCallableObject *)callable;
+        if (wrapper->coordinate_mode == coordinate_mode) {
+            return Py_NewRef(callable);
+        }
+    }
+    if (!PyCallable_Check(callable)) {
+        PyErr_Format(PyExc_TypeError, "%s expects a callable", name);
+        return NULL;
+    }
+
+    RetraceCoordinateCallableObject *wrapper =
+        PyObject_GC_New(RetraceCoordinateCallableObject,
+                        &RetraceCoordinateCallable_Type);
+    if (wrapper == NULL) {
+        return NULL;
+    }
+    wrapper->callable = Py_NewRef(callable);
+    wrapper->vectorcall = retrace_coordinate_callable_vectorcall;
+    wrapper->coordinate_mode = coordinate_mode;
+    PyObject_GC_Track(wrapper);
+    return (PyObject *)wrapper;
+}
+
+static PyObject *
+retrace_disable_for(PyObject *module, PyObject *callable)
+{
+    return retrace_coordinate_wrapper_for(callable, -1, "disable_for");
+}
+
+PyDoc_STRVAR(retrace_enable_for_doc,
+"enable_for($module, callable, /)\n"
+"--\n"
+"\n"
+"Return a callable wrapper whose Python frames are visible in coordinates.");
+
+static PyObject *
+retrace_enable_for(PyObject *module, PyObject *callable)
+{
+    return retrace_coordinate_wrapper_for(callable, 1, "enable_for");
+}
+
+static PyObject *
+retrace_coordinates(PyObject *module, PyObject *args)
 {
     PyThreadState *current_tstate = _PyThreadState_GET();
-    unsigned long thread_id = current_tstate->thread_id;
+    uint64_t thread_id = 0;
     PyObject *thread_id_arg = Py_None;
     Py_ssize_t drop = 0;
+    int explicit_thread_id = 0;
 
-    if (!PyArg_ParseTuple(args, "|On:instruction_counters",
+    if (!PyArg_ParseTuple(args, "|On:coordinates",
                           &thread_id_arg, &drop))
     {
         return NULL;
     }
     if (drop < 0) {
         PyErr_SetString(PyExc_ValueError,
-                        "instruction_counters drop must be non-negative");
+                        "coordinates drop must be non-negative");
         return NULL;
     }
     if (thread_id_arg != Py_None) {
-        thread_id = PyLong_AsUnsignedLong(thread_id_arg);
-        if (thread_id == (unsigned long)-1 && PyErr_Occurred()) {
+        unsigned long long value = PyLong_AsUnsignedLongLong(thread_id_arg);
+        if (value == (unsigned long long)-1 && PyErr_Occurred()) {
             return NULL;
         }
+        thread_id = (uint64_t)value;
+        explicit_thread_id = 1;
     }
 
     _PyRuntimeState *runtime = &_PyRuntime;
@@ -634,16 +887,19 @@ retrace_instruction_counters(PyObject *module, PyObject *args)
     RetraceU64BufferObject *buffer = NULL;
 
     RETRACE_HEAD_LOCK(runtime);
-    PyThreadState *target_tstate = retrace_find_thread_state(interp, thread_id);
+    PyThreadState *target_tstate = explicit_thread_id ?
+        retrace_find_thread_state(interp, thread_id) : current_tstate;
     if (target_tstate == NULL) {
         RETRACE_HEAD_UNLOCK(runtime);
-        PyErr_Format(PyExc_LookupError, "unknown thread id: %lu", thread_id);
+        PyErr_Format(PyExc_LookupError, "unknown thread id: %llu",
+                     (unsigned long long)thread_id);
         return NULL;
     }
     _PyInterpreterFrame *frame =
         retrace_thread_state_frame(current_tstate, target_tstate);
-    Py_ssize_t visible_count = retrace_visible_frame_count(frame);
-    Py_ssize_t size = visible_count > drop ? visible_count - drop : 0;
+    Py_ssize_t coordinate_count = retrace_coordinate_count(frame);
+    uint64_t root_coordinate = target_tstate->retrace.root_coordinate;
+    Py_ssize_t size = coordinate_count > drop ? coordinate_count - drop : 0;
     RETRACE_HEAD_UNLOCK(runtime);
 
     buffer = retrace_u64buffer_new(size);
@@ -652,47 +908,65 @@ retrace_instruction_counters(PyObject *module, PyObject *args)
     }
 
     RETRACE_HEAD_LOCK(runtime);
-    target_tstate = retrace_find_thread_state(interp, thread_id);
+    target_tstate = explicit_thread_id ?
+        retrace_find_thread_state(interp, thread_id) : current_tstate;
     if (target_tstate == NULL) {
         RETRACE_HEAD_UNLOCK(runtime);
         Py_DECREF(buffer);
-        PyErr_Format(PyExc_LookupError, "unknown thread id: %lu", thread_id);
+        PyErr_Format(PyExc_LookupError, "unknown thread id: %llu",
+                     (unsigned long long)thread_id);
         return NULL;
     }
     frame = retrace_thread_state_frame(current_tstate, target_tstate);
-    if (retrace_visible_frame_count(frame) != visible_count) {
+    if (retrace_coordinate_count(frame) != coordinate_count) {
         RETRACE_HEAD_UNLOCK(runtime);
         Py_DECREF(buffer);
         PyErr_SetString(PyExc_RuntimeError, "thread frame stack changed");
         return NULL;
     }
-    retrace_fill_instruction_counters(buffer, frame, drop);
+    if (target_tstate->retrace.root_coordinate != root_coordinate) {
+        RETRACE_HEAD_UNLOCK(runtime);
+        Py_DECREF(buffer);
+        PyErr_SetString(PyExc_RuntimeError, "thread root coordinate changed");
+        return NULL;
+    }
+    retrace_fill_coordinates(buffer, frame, root_coordinate, drop);
     RETRACE_HEAD_UNLOCK(runtime);
 
     return (PyObject *)buffer;
 }
 
-PyDoc_STRVAR(retrace_common_counters_prefix_length_doc,
-"common_counters_prefix_length($module, counters, thread_id=None, /)\n"
+PyDoc_STRVAR(retrace_common_coordinates_prefix_length_doc,
+"common_coordinates_prefix_length($module, coordinates, thread_id=None, /)\n"
 "--\n"
 "\n"
-"Return the common prefix length for counters and a thread's counters.");
+"Return the common prefix length for coordinates and a thread's coordinates.");
 
 static PyObject *
-retrace_common_counters_prefix_length_method(PyObject *module, PyObject *args)
+retrace_common_coordinates_prefix_length_method(PyObject *module, PyObject *args)
 {
     PyThreadState *current_tstate = _PyThreadState_GET();
-    PyObject *counters_arg;
-    unsigned long thread_id = current_tstate->thread_id;
+    PyObject *coordinates_arg;
+    PyObject *thread_id_arg = Py_None;
+    uint64_t thread_id = 0;
+    int explicit_thread_id = 0;
 
-    if (!PyArg_ParseTuple(args, "O|k:common_counters_prefix_length",
-                          &counters_arg, &thread_id))
+    if (!PyArg_ParseTuple(args, "O|O:common_coordinates_prefix_length",
+                          &coordinates_arg, &thread_id_arg))
     {
         return NULL;
     }
+    if (thread_id_arg != Py_None) {
+        unsigned long long value = PyLong_AsUnsignedLongLong(thread_id_arg);
+        if (value == (unsigned long long)-1 && PyErr_Occurred()) {
+            return NULL;
+        }
+        thread_id = (uint64_t)value;
+        explicit_thread_id = 1;
+    }
 
-    RetraceCounterSequence counters;
-    if (retrace_counter_sequence_init(&counters, counters_arg) < 0) {
+    RetraceCoordinateSequence coordinates;
+    if (retrace_coordinate_sequence_init(&coordinates, coordinates_arg) < 0) {
         return NULL;
     }
 
@@ -701,19 +975,23 @@ retrace_common_counters_prefix_length_method(PyObject *module, PyObject *args)
     Py_ssize_t prefix_length;
 
     RETRACE_HEAD_LOCK(runtime);
-    PyThreadState *target_tstate = retrace_find_thread_state(interp, thread_id);
+    PyThreadState *target_tstate = explicit_thread_id ?
+        retrace_find_thread_state(interp, thread_id) : current_tstate;
     if (target_tstate == NULL) {
         RETRACE_HEAD_UNLOCK(runtime);
-        retrace_counter_sequence_clear(&counters);
-        PyErr_Format(PyExc_LookupError, "unknown thread id: %lu", thread_id);
+        retrace_coordinate_sequence_clear(&coordinates);
+        PyErr_Format(PyExc_LookupError, "unknown thread id: %llu",
+                     (unsigned long long)thread_id);
         return NULL;
     }
     _PyInterpreterFrame *frame =
         retrace_thread_state_frame(current_tstate, target_tstate);
-    prefix_length = retrace_common_counters_prefix_length(frame, &counters);
+    prefix_length =
+        retrace_common_coordinates_prefix_length(
+            frame, target_tstate->retrace.root_coordinate, &coordinates);
     RETRACE_HEAD_UNLOCK(runtime);
 
-    retrace_counter_sequence_clear(&counters);
+    retrace_coordinate_sequence_clear(&coordinates);
     return PyLong_FromSsize_t(prefix_length);
 }
 
@@ -750,8 +1028,8 @@ retrace_set_thread_yield_callback(PyObject *module, PyObject *callback)
         return NULL;
     }
 
-    PyObject *old_callback = interp->retrace_thread_yield_callback;
-    interp->retrace_thread_yield_callback = Py_XNewRef(callback);
+    PyObject *old_callback = interp->retrace.thread_yield_callback;
+    interp->retrace.thread_yield_callback = Py_XNewRef(callback);
     Py_XDECREF(old_callback);
 
     Py_RETURN_NONE;
@@ -767,7 +1045,7 @@ static PyObject *
 retrace_get_thread_yield_callback(PyObject *module, PyObject *Py_UNUSED(ignored))
 {
     PyThreadState *tstate = _PyThreadState_GET();
-    PyObject *callback = tstate->interp->retrace_thread_yield_callback;
+    PyObject *callback = tstate->interp->retrace.thread_yield_callback;
     if (callback == NULL) {
         Py_RETURN_NONE;
     }
@@ -791,8 +1069,8 @@ retrace_set_thread_resume_callback(PyObject *module, PyObject *callback)
         return NULL;
     }
 
-    PyObject *old_callback = interp->retrace_thread_resume_callback;
-    interp->retrace_thread_resume_callback = Py_XNewRef(callback);
+    PyObject *old_callback = interp->retrace.thread_resume_callback;
+    interp->retrace.thread_resume_callback = Py_XNewRef(callback);
     Py_XDECREF(old_callback);
 
     Py_RETURN_NONE;
@@ -808,7 +1086,7 @@ static PyObject *
 retrace_get_thread_resume_callback(PyObject *module, PyObject *Py_UNUSED(ignored))
 {
     PyThreadState *tstate = _PyThreadState_GET();
-    PyObject *callback = tstate->interp->retrace_thread_resume_callback;
+    PyObject *callback = tstate->interp->retrace.thread_resume_callback;
     if (callback == NULL) {
         Py_RETURN_NONE;
     }
@@ -816,10 +1094,10 @@ retrace_get_thread_resume_callback(PyObject *module, PyObject *Py_UNUSED(ignored
 }
 
 PyDoc_STRVAR(retrace_set_replay_checkpoint_doc,
-"set_replay_checkpoint($module, thread_id, counters, callback, /)\n"
+"set_replay_checkpoint($module, thread_id, coordinates, callback, /)\n"
 "--\n"
 "\n"
-"Invoke callback() when thread_id reaches the given instruction counters.\n"
+"Invoke callback() when thread_id reaches the given coordinates.\n"
 "\n"
 "Pass None as the only argument to clear the active checkpoint.");
 
@@ -837,12 +1115,19 @@ retrace_set_replay_checkpoint(PyObject *module, PyObject *args)
     if (argc != 3) {
         PyErr_SetString(PyExc_TypeError,
                         "set_replay_checkpoint expects None or "
-                        "(thread_id, counters, callback)");
+                        "(thread_id, coordinates, callback)");
         return NULL;
     }
 
-    unsigned long thread_id = PyLong_AsUnsignedLong(PyTuple_GET_ITEM(args, 0));
-    if (thread_id == (unsigned long)-1 && PyErr_Occurred()) {
+    unsigned long long thread_id_value =
+        PyLong_AsUnsignedLongLong(PyTuple_GET_ITEM(args, 0));
+    if (thread_id_value == (unsigned long long)-1 && PyErr_Occurred()) {
+        return NULL;
+    }
+    uint64_t thread_id = (uint64_t)thread_id_value;
+    if (thread_id == 0) {
+        PyErr_SetString(PyExc_ValueError,
+                        "replay checkpoint thread id must be non-zero");
         return NULL;
     }
 
@@ -853,27 +1138,27 @@ retrace_set_replay_checkpoint(PyObject *module, PyObject *args)
         return NULL;
     }
 
-    RetraceU64BufferObject *counters =
+    RetraceU64BufferObject *coordinates =
         retrace_u64buffer_from_sequence(
             PyTuple_GET_ITEM(args, 1),
-            "checkpoint counters must be a sequence");
-    if (counters == NULL) {
+            "checkpoint coordinates must be a sequence");
+    if (coordinates == NULL) {
         return NULL;
     }
-    if (Py_SIZE(counters) == 0) {
-        Py_DECREF(counters);
+    if (Py_SIZE(coordinates) == 0) {
+        Py_DECREF(coordinates);
         PyErr_SetString(PyExc_ValueError,
-                        "checkpoint counters must not be empty");
+                        "checkpoint coordinates must not be empty");
         return NULL;
     }
 
     PyObject *callback_ref = Py_NewRef(callback);
     retrace_clear_replay_checkpoint(interp);
-    interp->retrace_replay_checkpoint_thread_id = thread_id;
-    interp->retrace_replay_checkpoint_top = counters->ob_item[0];
-    interp->retrace_replay_checkpoint_counters = (PyObject *)counters;
-    interp->retrace_replay_checkpoint_callback = callback_ref;
-    interp->retrace_replay_checkpoint_armed = 1;
+    interp->retrace.replay_checkpoint_thread_id = thread_id;
+    interp->retrace.replay_checkpoint_top = coordinates->ob_item[0];
+    interp->retrace.replay_checkpoint_coordinates = (PyObject *)coordinates;
+    interp->retrace.replay_checkpoint_callback = callback_ref;
+    interp->retrace.replay_checkpoint_armed = 1;
 
     Py_RETURN_NONE;
 }
@@ -881,10 +1166,10 @@ retrace_set_replay_checkpoint(PyObject *module, PyObject *args)
 static _PyInterpreterFrame *
 retrace_current_thread_frame(PyThreadState *tstate)
 {
-    if (tstate->retrace_thread_callback_active &&
-        tstate->retrace_thread_callback_frame != NULL)
+    if (tstate->retrace.thread_callback_active &&
+        tstate->retrace.thread_callback_frame != NULL)
     {
-        return tstate->retrace_thread_callback_frame;
+        return tstate->retrace.thread_callback_frame;
     }
     if (tstate->cframe == NULL) {
         return NULL;
@@ -897,7 +1182,7 @@ retrace_call_thread_callback(PyThreadState *tstate,
                              PyObject *callback,
                              _PyInterpreterFrame *frame)
 {
-    if (callback == NULL || tstate->retrace_thread_callback_active) {
+    if (callback == NULL || tstate->retrace.thread_callback_active) {
         return;
     }
 
@@ -911,8 +1196,8 @@ retrace_call_thread_callback(PyThreadState *tstate,
     PyErr_Fetch(&saved_type, &saved_value, &saved_traceback);
 #endif
 
-    tstate->retrace_thread_callback_active = 1;
-    tstate->retrace_thread_callback_frame = frame;
+    tstate->retrace.thread_callback_active = 1;
+    tstate->retrace.thread_callback_frame = frame;
 
     PyObject *result = PyObject_CallNoArgs(callback);
     if (result == NULL) {
@@ -922,8 +1207,8 @@ retrace_call_thread_callback(PyThreadState *tstate,
         Py_DECREF(result);
     }
 
-    tstate->retrace_thread_callback_frame = NULL;
-    tstate->retrace_thread_callback_active = 0;
+    tstate->retrace.thread_callback_frame = NULL;
+    tstate->retrace.thread_callback_active = 0;
 
     Py_DECREF(callback);
 #if PY_VERSION_HEX >= 0x030C0000
@@ -941,47 +1226,47 @@ _PyRetrace_NoteThreadResume(PyThreadState *tstate)
     }
 
     PyInterpreterState *interp = tstate->interp;
-    if (interp->retrace_thread_resume_callback == NULL) {
+    if (interp->retrace.thread_resume_callback == NULL) {
         return;
     }
 
-    tstate->retrace_thread_resume_pending = 1;
-    tstate->retrace_thread_resume_frame = retrace_current_thread_frame(tstate);
+    tstate->retrace.thread_resume_pending = 1;
+    tstate->retrace.thread_resume_frame = retrace_current_thread_frame(tstate);
 }
 
 void
 _PyRetrace_DeliverThreadResumeCallback(PyThreadState *tstate)
 {
-    if (tstate == NULL || !tstate->retrace_thread_resume_pending) {
+    if (tstate == NULL || !tstate->retrace.thread_resume_pending) {
         return;
     }
-    if (tstate->retrace_thread_callback_active) {
+    if (tstate->retrace.thread_callback_active) {
         return;
     }
 
     PyInterpreterState *interp = tstate->interp;
-    _PyInterpreterFrame *frame = tstate->retrace_thread_resume_frame;
+    _PyInterpreterFrame *frame = tstate->retrace.thread_resume_frame;
 
-    PyObject *callback = interp->retrace_thread_resume_callback;
+    PyObject *callback = interp->retrace.thread_resume_callback;
     if (callback == NULL) {
-        tstate->retrace_thread_resume_pending = 0;
-        tstate->retrace_thread_resume_frame = NULL;
+        tstate->retrace.thread_resume_pending = 0;
+        tstate->retrace.thread_resume_frame = NULL;
         return;
     }
 
-    tstate->retrace_thread_resume_pending = 0;
-    tstate->retrace_thread_resume_frame = NULL;
+    tstate->retrace.thread_resume_pending = 0;
+    tstate->retrace.thread_resume_frame = NULL;
     retrace_call_thread_callback(tstate, callback, frame);
 }
 
 void
 _PyRetrace_DeliverThreadYieldCallback(PyThreadState *tstate)
 {
-    if (tstate == NULL || tstate->retrace_thread_callback_active) {
+    if (tstate == NULL || tstate->retrace.thread_callback_active) {
         return;
     }
 
-    PyObject *callback = tstate->interp->retrace_thread_yield_callback;
+    PyObject *callback = tstate->interp->retrace.thread_yield_callback;
     if (callback == NULL) {
         return;
     }
@@ -999,22 +1284,22 @@ _PyRetrace_CheckReplayCheckpoint(PyThreadState *tstate,
     }
 
     PyInterpreterState *interp = tstate->interp;
-    if (!interp->retrace_replay_checkpoint_armed ||
-        interp->retrace_replay_checkpoint_callback_active ||
-        interp->retrace_replay_checkpoint_thread_id != tstate->thread_id)
+    if (!interp->retrace.replay_checkpoint_armed ||
+        interp->retrace.replay_checkpoint_callback_active ||
+        interp->retrace.replay_checkpoint_thread_id != tstate->retrace.thread_id)
     {
         return 0;
     }
-    if (interp->retrace_replay_checkpoint_top !=
-            retrace_frame_instruction_counter(frame))
+    if (interp->retrace.replay_checkpoint_top !=
+            retrace_frame_coordinate(frame))
     {
         return 0;
     }
-    if (!retrace_replay_checkpoint_matches(interp, frame)) {
+    if (!retrace_replay_checkpoint_matches(tstate, frame)) {
         return 0;
     }
 
-    PyObject *callback = interp->retrace_replay_checkpoint_callback;
+    PyObject *callback = interp->retrace.replay_checkpoint_callback;
     if (callback == NULL) {
         retrace_clear_replay_checkpoint(interp);
         return 0;
@@ -1022,15 +1307,15 @@ _PyRetrace_CheckReplayCheckpoint(PyThreadState *tstate,
     callback = Py_NewRef(callback);
     retrace_clear_replay_checkpoint(interp);
 
-    interp->retrace_replay_checkpoint_callback_active = 1;
-    interp->retrace_replay_checkpoint_callback_tstate = tstate;
-    interp->retrace_replay_checkpoint_callback_frame = frame;
+    interp->retrace.replay_checkpoint_callback_active = 1;
+    interp->retrace.replay_checkpoint_callback_tstate = tstate;
+    interp->retrace.replay_checkpoint_callback_frame = frame;
 
     PyObject *result = PyObject_CallNoArgs(callback);
 
-    interp->retrace_replay_checkpoint_callback_frame = NULL;
-    interp->retrace_replay_checkpoint_callback_tstate = NULL;
-    interp->retrace_replay_checkpoint_callback_active = 0;
+    interp->retrace.replay_checkpoint_callback_frame = NULL;
+    interp->retrace.replay_checkpoint_callback_tstate = NULL;
+    interp->retrace.replay_checkpoint_callback_active = 0;
 
     Py_DECREF(callback);
     if (result == NULL) {
@@ -1042,13 +1327,17 @@ _PyRetrace_CheckReplayCheckpoint(PyThreadState *tstate,
 
 
 static PyMethodDef retrace_methods[] = {
-    {"instruction_counters", retrace_instruction_counters, METH_VARARGS,
-     retrace_instruction_counters_doc},
-    {"instruction_counters_delta", retrace_instruction_counters_delta,
-     METH_NOARGS, retrace_instruction_counters_delta_doc},
-    {"common_counters_prefix_length",
-     retrace_common_counters_prefix_length_method, METH_VARARGS,
-     retrace_common_counters_prefix_length_doc},
+    {"disable_for", retrace_disable_for, METH_O, retrace_disable_for_doc},
+    {"enable_for", retrace_enable_for, METH_O, retrace_enable_for_doc},
+    {"coordinates", retrace_coordinates, METH_VARARGS,
+     retrace_coordinates_doc},
+    {"coordinates_delta", retrace_coordinates_delta,
+     METH_NOARGS, retrace_coordinates_delta_doc},
+    {"hash", retrace_hash, METH_NOARGS, retrace_hash_doc},
+    {"thread_id", retrace_thread_id, METH_NOARGS, retrace_thread_id_doc},
+    {"common_coordinates_prefix_length",
+     retrace_common_coordinates_prefix_length_method, METH_VARARGS,
+     retrace_common_coordinates_prefix_length_doc},
     {"set_thread_yield_callback", retrace_set_thread_yield_callback, METH_O,
      retrace_set_thread_yield_callback_doc},
     {"get_thread_yield_callback", retrace_get_thread_yield_callback,
@@ -1068,6 +1357,9 @@ retrace_exec(PyObject *module)
     if (PyModule_AddType(module, &RetraceU64Buffer_Type) < 0) {
         return -1;
     }
+    if (PyModule_AddType(module, &RetraceCoordinateCallable_Type) < 0) {
+        return -1;
+    }
     return 0;
 }
 
@@ -1081,7 +1373,7 @@ static PyModuleDef_Slot retrace_slots[] = {
 
 static struct PyModuleDef retracemodule = {
     PyModuleDef_HEAD_INIT,
-    .m_name = "retrace",
+    .m_name = "_retrace",
     .m_doc = "Retrace CPython probe support.",
     .m_size = 0,
     .m_methods = retrace_methods,
@@ -1089,7 +1381,7 @@ static struct PyModuleDef retracemodule = {
 };
 
 PyMODINIT_FUNC
-PyInit_retrace(void)
+PyInit__retrace(void)
 {
     return PyModuleDef_Init(&retracemodule);
 }

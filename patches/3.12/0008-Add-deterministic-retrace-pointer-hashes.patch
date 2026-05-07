@@ -1,0 +1,66 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Retrace CPython Builder <retrace-cpython@retracesoftware.com>
+Date: Thu, 7 May 2026 17:30:00 +0100
+Subject: [PATCH 8/8] Add deterministic retrace pointer hashes
+
+---
+ Objects/object.c | 2 ++
+ Python/pyhash.c  | 9 +++------
+ 2 files changed, 5 insertions(+), 6 deletions(-)
+
+diff --git a/Objects/object.c b/Objects/object.c
+index d914cf4..ba8fed4 100644
+--- a/Objects/object.c
++++ b/Objects/object.c
+@@ -12,7 +12,8 @@
+ #include "pycore_object.h"        // _PyType_CheckConsistency(), _Py_FatalRefcountError()
+ #include "pycore_pyerrors.h"      // _PyErr_Occurred()
+ #include "pycore_pymem.h"         // _PyMem_IsPtrFreed()
+ #include "pycore_pystate.h"       // _PyThreadState_GET()
++#include "pycore_retrace.h"       // _PyRetrace_DeleteObjectIdentityHash()
+ #include "pycore_symtable.h"      // PySTEntry_Type
+ #include "pycore_typevarobject.h" // _PyTypeAlias_Type, _Py_initialize_generic
+ #include "pycore_typeobject.h"    // _PyBufferWrapper_Type
+@@ -2640,5 +2641,6 @@ _Py_Dealloc(PyObject *op)
+ #endif
+     (*dealloc)(op);
++    _PyRetrace_DeleteObjectIdentityHash(op);
+
+ #ifdef Py_DEBUG
+     // gh-89373: The tp_dealloc function must leave the current exception
+diff --git a/Python/pyhash.c b/Python/pyhash.c
+index 2ed7771..2e45837 100644
+--- a/Python/pyhash.c
++++ b/Python/pyhash.c
+@@ -4,6 +4,7 @@
+    All the utility functions (_Py_Hash*()) return "-1" to signify an error.
+ */
+ #include "Python.h"
++#include "pycore_retrace.h"       // _PyRetrace_HashPointer()
+
+ #ifdef __APPLE__
+ #  include <libkern/OSByteOrder.h>
+@@ -147,11 +148,7 @@ _Py_HashPointerRaw(const void *p)
+ Py_hash_t
+ _Py_HashPointer(const void *p)
+ {
+-    Py_hash_t x = _Py_HashPointerRaw(p);
+-    if (x == -1) {
+-        x = -2;
+-    }
+-    return x;
++    return _PyRetrace_HashPointer(p);
+ }
+
+ Py_hash_t
+@@ -472,7 +469,7 @@ siphash13(uint64_t k0, uint64_t k1, const void *src, Py_ssize_t src_sz) {
+ #endif
+
+ uint64_t
+-_Py_KeyedHash(uint64_t key, const void *src, Py_ssize_t src_sz)
++_Py_KeyedHash(uint64_t key, const char *src, Py_ssize_t src_sz)
+ {
+     return siphash13(key, 0, src, src_sz);
+ }
+--
+2.50.1 (Apple Git-155)

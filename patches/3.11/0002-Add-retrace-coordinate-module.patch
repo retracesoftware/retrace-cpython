@@ -1,7 +1,7 @@
-From 7ef2cc6cc02c9a295c976f157f66d34f0fcba624 Mon Sep 17 00:00:00 2001
-From: nathan-retrace <nathan@retracesoftware.com>
-Date: Tue, 5 May 2026 21:55:20 +0100
-Subject: [PATCH 2/6] Add retrace instruction counter module
+From 2de46c6e5743ca226e7e70399e379074b375fe49 Mon Sep 17 00:00:00 2001
+From: Retrace CPython Builder <retrace-cpython@retracesoftware.com>
+Date: Thu, 7 May 2026 09:50:59 +0100
+Subject: [PATCH 2/6] Add _retrace coordinate module
 
 ---
  Modules/Setup.bootstrap.in | 1 +
@@ -15,10 +15,9 @@ index e3e9b96..f579bee 100644
  _operator _operator.c
  _stat _stat.c
  _symtable symtablemodule.c
-+retrace retracemodule.c
- 
++_retrace retracemodule.c
+
  # for systems without $HOME env, used by site._getuserbase()
  @MODULE_PWD_TRUE@pwd pwdmodule.c
--- 
+--
 2.50.1 (Apple Git-155)
-

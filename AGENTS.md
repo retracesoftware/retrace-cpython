@@ -8,9 +8,11 @@ probes for Retrace.
 - Do not vendor a full CPython source tree into this repository.
 - Build from exact upstream CPython release tags, then apply the patch stack in
   `patches/`.
-- Keep patch files small, reviewable, and release-specific. Prefer adding new
-  CPython compilation units plus minimal injection points into existing CPython
-  hot paths.
+- Keep patch files as small as possible. They should contain only
+  release-specific CPython injection points and build-system edits. Do not add
+  new functions to patch files; put new functions in a generic header or shared
+  overlay file instead. Likewise, keep logic, declarations, macros, and reusable
+  scaffolding out of patch hunks whenever they can live in the overlay.
 - Treat the probe ABI as private to a specific `CPython version +
   retrace_probe_abi` pairing. Do not assume compatibility with vanilla CPython
   internals.
@@ -30,4 +32,3 @@ probes for Retrace.
   `scripts/package 3.12.8`
 - Run smoke checks against an interpreter:
   `<prefix>/bin/python3 tests/smoke/probe_capability.py`
-

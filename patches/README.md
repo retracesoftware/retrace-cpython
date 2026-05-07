@@ -11,7 +11,7 @@ When a patch directory contains `series.toml`, that manifest owns the supported
 Python version range and the patch application order. Without a manifest,
 patches are applied by filename order.
 
-`retrace_module = "builtin"` records that the patch stack registers `retrace`
+`retrace_module = "builtin"` records that the patch stack registers `_retrace`
 in CPython's built-in module table rather than shipping a separate extension
 module.
 

@@ -1,0 +1,57 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Retrace CPython Builder <retrace-cpython@retracesoftware.com>
+Date: Thu, 7 May 2026 17:30:00 +0100
+Subject: [PATCH 7/7] Add deterministic retrace pointer hashes
+
+---
+ Objects/object.c | 2 ++
+ Python/pyhash.c  | 7 +++----
+ 2 files changed, 5 insertions(+), 4 deletions(-)
+
+diff --git a/Objects/object.c b/Objects/object.c
+index 724f8dd..fcf43a7 100644
+--- a/Objects/object.c
++++ b/Objects/object.c
+@@ -11,7 +11,8 @@
+ #include "pycore_object.h"        // _PyType_CheckConsistency(), _Py_FatalRefcountError()
+ #include "pycore_pyerrors.h"      // _PyErr_Occurred()
+ #include "pycore_pymem.h"         // _PyMem_IsPtrFreed()
+ #include "pycore_pystate.h"       // _PyThreadState_GET()
++#include "pycore_retrace.h"       // _PyRetrace_DeleteObjectIdentityHash()
+ #include "pycore_symtable.h"      // PySTEntry_Type
+ #include "pycore_typeobject.h"    // _PyTypes_InitSlotDefs()
+ #include "pycore_unionobject.h"   // _PyUnion_Type
+@@ -2390,5 +2391,6 @@ _Py_Dealloc(PyObject *op)
+ #endif
+     (*dealloc)(op);
++    _PyRetrace_DeleteObjectIdentityHash(op);
+
+ #ifdef Py_DEBUG
+     // gh-89373: The tp_dealloc function must leave the current exception
+diff --git a/Python/pyhash.c b/Python/pyhash.c
+index 2ed7771..7fa2d7e 100644
+--- a/Python/pyhash.c
++++ b/Python/pyhash.c
+@@ -4,6 +4,7 @@
+    All the utility functions (_Py_Hash*()) return "-1" to signify an error.
+ */
+ #include "Python.h"
++#include "pycore_retrace.h"       // _PyRetrace_HashPointer()
+
+ #ifdef __APPLE__
+ #  include <libkern/OSByteOrder.h>
+@@ -147,11 +148,7 @@ _Py_HashPointerRaw(const void *p)
+ Py_hash_t
+ _Py_HashPointer(const void *p)
+ {
+-    Py_hash_t x = _Py_HashPointerRaw(p);
+-    if (x == -1) {
+-        x = -2;
+-    }
+-    return x;
++    return _PyRetrace_HashPointer(p);
+ }
+
+ Py_hash_t
+--
+2.50.1 (Apple Git-155)

@@ -1,48 +1,61 @@
-From abbb27224f976917043edf927e669129311029d5 Mon Sep 17 00:00:00 2001
+From 4905b98640c53c71636431a023e150fb6d0df228 Mon Sep 17 00:00:00 2001
 From: Retrace CPython Builder <retrace-cpython@retracesoftware.com>
-Date: Wed, 6 May 2026 22:54:45 +0100
+Date: Thu, 7 May 2026 09:50:59 +0100
 Subject: [PATCH 3/6] Add retrace thread scheduling callbacks
 
 ---
- Include/cpython/pystate.h        | 5 +++++
+ Include/cpython/pystate.h        | 4 ++++
  Include/internal/pycore_interp.h | 3 +++
  Python/ceval.c                   | 6 ++++++
  Python/ceval_gil.h               | 5 ++++-
- Python/pystate.c                 | 2 ++
- 5 files changed, 20 insertions(+), 1 deletion(-)
+ Python/pystate.c                 | 10 ++++++++++
+ 5 files changed, 27 insertions(+), 1 deletion(-)
 
 diff --git a/Include/cpython/pystate.h b/Include/cpython/pystate.h
-index 2bd4606..b0793d0 100644
+index 2bd4606..27f32ad 100644
 --- a/Include/cpython/pystate.h
 +++ b/Include/cpython/pystate.h
-@@ -200,6 +200,11 @@ struct _ts {
- 
+@@ -2,6 +2,8 @@
+ #  error "this header file must not be included directly"
+ #endif
+
++#include "cpython/retrace_state.h" // _PyRetraceThreadState
++
+
+ PyAPI_FUNC(int) _PyInterpreterState_RequiresIDRef(PyInterpreterState *);
+ PyAPI_FUNC(void) _PyInterpreterState_RequireIDRef(PyInterpreterState *, int);
+@@ -200,6 +202,8 @@ struct _ts {
+
      /* The bottom-most frame on the stack. */
      _PyCFrame root_cframe;
 +
-+    int retrace_thread_resume_pending;
-+    struct _PyInterpreterFrame *retrace_thread_resume_frame;
-+    int retrace_thread_callback_active;
-+    struct _PyInterpreterFrame *retrace_thread_callback_frame;
++    _PyRetraceThreadState retrace;
  };
- 
- 
+
+
 diff --git a/Include/internal/pycore_interp.h b/Include/internal/pycore_interp.h
-index 02d25d6..fcc48df 100644
+index 02d25d6..ce4b15f 100644
 --- a/Include/internal/pycore_interp.h
 +++ b/Include/internal/pycore_interp.h
-@@ -178,6 +178,9 @@ struct _is {
- 
+@@ -25,6 +25,7 @@ extern "C" {
+ #include "pycore_typeobject.h"    // struct type_cache
+ #include "pycore_unicodeobject.h" // struct _Py_unicode_state
+ #include "pycore_warnings.h"      // struct _warnings_runtime_state
++#include "cpython/retrace_state.h" // _PyRetraceInterpreterState
+
+ struct _pending_calls {
+     PyThread_type_lock lock;
+@@ -178,6 +179,8 @@ struct _is {
+
      int int_max_str_digits;
- 
-+    PyObject *retrace_thread_yield_callback;
-+    PyObject *retrace_thread_resume_callback;
+
++    _PyRetraceInterpreterState retrace;
 +
      /* The following fields are here to avoid allocation during init.
         The data is exposed through PyInterpreterState pointer fields.
         These fields should not be accessed directly outside of init.
 diff --git a/Python/ceval.c b/Python/ceval.c
-index 86f0ad9..db869fe 100644
+index f1d1fed..3816a42 100644
 --- a/Python/ceval.c
 +++ b/Python/ceval.c
 @@ -20,6 +20,7 @@
@@ -55,11 +68,11 @@ index 86f0ad9..db869fe 100644
  #include "pycore_emscripten_signal.h"  // _Py_CHECK_EMSCRIPTEN_SIGNALS
 @@ -411,6 +412,7 @@ PyEval_AcquireLock(void)
      _Py_EnsureTstateNotNULL(tstate);
- 
+
      take_gil(tstate);
 +    _PyRetrace_DeliverThreadResumeCallback(tstate);
  }
- 
+
  void
 @@ -445,6 +447,7 @@ PyEval_AcquireThread(PyThreadState *tstate)
      if (_PyThreadState_Swap(gilstate, tstate) != NULL) {
@@ -67,16 +80,16 @@ index 86f0ad9..db869fe 100644
      }
 +    _PyRetrace_DeliverThreadResumeCallback(tstate);
  }
- 
+
  void
 @@ -522,6 +525,7 @@ PyEval_RestoreThread(PyThreadState *tstate)
- 
+
      struct _gilstate_runtime_state *gilstate = &tstate->interp->runtime->gilstate;
      _PyThreadState_Swap(gilstate, tstate);
 +    _PyRetrace_DeliverThreadResumeCallback(tstate);
  }
- 
- 
+
+
 @@ -1195,6 +1199,7 @@ eval_frame_handle_pending(PyThreadState *tstate)
      /* GIL drop request */
      if (_Py_atomic_load_relaxed_int32(&ceval2->gil_drop_request)) {
@@ -91,7 +104,7 @@ index 86f0ad9..db869fe 100644
          }
 +        _PyRetrace_DeliverThreadResumeCallback(tstate);
      }
- 
+
      /* Check for asynchronous exception. */
 diff --git a/Python/ceval_gil.h b/Python/ceval_gil.h
 index 94e2df0..bc5ddb1 100644
@@ -100,7 +113,7 @@ index 94e2df0..bc5ddb1 100644
 @@ -266,9 +266,12 @@ take_gil(PyThreadState *tstate)
      _Py_atomic_store_relaxed(&gil->locked, 1);
      _Py_ANNOTATE_RWLOCK_ACQUIRED(&gil->locked, /*is_write=*/1);
- 
+
 -    if (tstate != (PyThreadState*)_Py_atomic_load_relaxed(&gil->last_holder)) {
 +    PyThreadState *previous_holder =
 +        (PyThreadState*)_Py_atomic_load_relaxed(&gil->last_holder);
@@ -109,20 +122,50 @@ index 94e2df0..bc5ddb1 100644
          ++gil->switch_number;
 +        _PyRetrace_NoteThreadResume(tstate);
      }
- 
+
  #ifdef FORCE_SWITCHING
 diff --git a/Python/pystate.c b/Python/pystate.c
-index a451166..39d6c87 100644
+index a451166..1c93702 100644
 --- a/Python/pystate.c
 +++ b/Python/pystate.c
-@@ -401,6 +401,8 @@ interpreter_clear(PyInterpreterState *interp, PyThreadState *tstate)
+@@ -7,7 +7,8 @@
+ #include "pycore_object.h"        // _PyType_InitCache()
+ #include "pycore_pyerrors.h"
+ #include "pycore_pylifecycle.h"
+ #include "pycore_pymem.h"         // _PyMem_SetDefaultAllocator()
++#include "pycore_retrace.h"       // _PyRetrace_InitialCoordinateMode()
+ #include "pycore_pystate.h"       // _PyThreadState_GET()
+ #include "pycore_runtime_init.h"  // _PyRuntimeState_INIT
+ #include "pycore_sysmodule.h"
+@@ -411,6 +411,8 @@ interpreter_clear(PyInterpreterState *interp, PyThreadState *tstate)
+     }
+
      Py_CLEAR(interp->audit_hooks);
-+    Py_CLEAR(interp->retrace_thread_yield_callback);
-+    Py_CLEAR(interp->retrace_thread_resume_callback);
- 
++    Py_CLEAR(interp->retrace.thread_yield_callback);
++    Py_CLEAR(interp->retrace.thread_resume_callback);
+
      PyConfig_Clear(&interp->config);
      Py_CLEAR(interp->codec_search_path);
-     Py_CLEAR(interp->codec_search_cache);
-     Py_CLEAR(interp->codec_error_registry);
--- 
+@@ -796,6 +798,9 @@ init_threadstate(PyThreadState *tstate,
+
+     tstate->cframe = &tstate->root_cframe;
+     tstate->datastack_chunk = NULL;
++    tstate->retrace.coordinate_mode = _PyRetrace_InitialCoordinateMode(interp);
++    tstate->retrace.last_root_coordinate = (uint64_t)-1;
++    tstate->retrace.root_coordinate_hash = _PyRetrace_InitialRootCoordinateHash();
+     tstate->datastack_top = NULL;
+     tstate->datastack_limit = NULL;
+
+@@ -856,6 +861,10 @@ new_threadstate(PyInterpreterState *interp)
+     interp->threads.head = tstate;
+
+     init_threadstate(tstate, interp, id, old_head);
++    if (id > 1) {
++        _PyRetrace_SeedChildThreadState(
++            _PyRuntimeGILState_GetThreadState(&runtime->gilstate), tstate);
++    }
+
+     HEAD_UNLOCK(runtime);
+     if (!used_newtstate) {
+--
 2.50.1 (Apple Git-155)

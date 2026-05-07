@@ -1,36 +1,15 @@
-From 74d1f629d1bcd94f5b0096e40a01da017f081d9e Mon Sep 17 00:00:00 2001
+From cb5f6e7827836cc5cca6f537402a66fabcabb2ec Mon Sep 17 00:00:00 2001
 From: Retrace CPython Builder <retrace-cpython@retracesoftware.com>
-Date: Wed, 6 May 2026 22:55:01 +0100
+Date: Thu, 7 May 2026 09:50:59 +0100
 Subject: [PATCH 4/6] Add retrace replay checkpoint callback
 
 ---
- Include/internal/pycore_interp.h |  9 +++++++++
- Python/ceval.c                   | 28 ++++++++++++++++++++++++++--
- Python/pystate.c                 |  6 ++++++
- 3 files changed, 41 insertions(+), 2 deletions(-)
+ Python/ceval.c   | 28 ++++++++++++++++++++++++++--
+ Python/pystate.c |  7 +++++++
+ 2 files changed, 33 insertions(+), 2 deletions(-)
 
-diff --git a/Include/internal/pycore_interp.h b/Include/internal/pycore_interp.h
-index fcc48df..ab259f7 100644
---- a/Include/internal/pycore_interp.h
-+++ b/Include/internal/pycore_interp.h
-@@ -181,6 +181,15 @@ struct _is {
-     PyObject *retrace_thread_yield_callback;
-     PyObject *retrace_thread_resume_callback;
- 
-+    int retrace_replay_checkpoint_armed;
-+    unsigned long retrace_replay_checkpoint_thread_id;
-+    uint64_t retrace_replay_checkpoint_top;
-+    PyObject *retrace_replay_checkpoint_counters;
-+    PyObject *retrace_replay_checkpoint_callback;
-+    int retrace_replay_checkpoint_callback_active;
-+    PyThreadState *retrace_replay_checkpoint_callback_tstate;
-+    struct _PyInterpreterFrame *retrace_replay_checkpoint_callback_frame;
-+
-     /* The following fields are here to avoid allocation during init.
-        The data is exposed through PyInterpreterState pointer fields.
-        These fields should not be accessed directly outside of init.
 diff --git a/Python/ceval.c b/Python/ceval.c
-index db869fe..af6e753 100644
+index 3816a42..d90457d 100644
 --- a/Python/ceval.c
 +++ b/Python/ceval.c
 @@ -20,7 +20,7 @@
@@ -45,15 +24,15 @@ index db869fe..af6e753 100644
 @@ -1299,6 +1299,25 @@ eval_frame_handle_pending(PyThreadState *tstate)
      #define USE_COMPUTED_GOTOS 0
  #endif
- 
+
 +#define RETRACE_REPLAY_CHECKPOINT() \
 +    do { \
 +        PyInterpreterState *retrace_interp = tstate->interp; \
-+        if (retrace_interp->retrace_replay_checkpoint_armed && \
-+            retrace_interp->retrace_replay_checkpoint_thread_id == tstate->thread_id && \
++        if (retrace_interp->retrace.replay_checkpoint_armed && \
++            retrace_interp->retrace.replay_checkpoint_thread_id == tstate->thread_id && \
 +            _PyRetrace_FrameIsVisible(frame) && \
-+            retrace_interp->retrace_replay_checkpoint_top == \
-+                _PyRetrace_FrameInstructionCounter(frame)) \
++            retrace_interp->retrace.replay_checkpoint_top == \
++                _PyRetrace_FrameCoordinate(frame)) \
 +        { \
 +            _PyFrame_SetStackPointer(frame, stack_pointer); \
 +            int retrace_err = _PyRetrace_CheckReplayCheckpoint(tstate, frame); \
@@ -82,26 +61,25 @@ index db869fe..af6e753 100644
 +        RETRACE_REPLAY_CHECKPOINT(); \
 +    } while (0)
  #endif
- 
+
  #if USE_COMPUTED_GOTOS
 diff --git a/Python/pystate.c b/Python/pystate.c
-index 39d6c87..6132aa9 100644
+index 1c93702..77f4084 100644
 --- a/Python/pystate.c
 +++ b/Python/pystate.c
-@@ -403,8 +405,14 @@ interpreter_clear(PyInterpreterState *interp, PyThreadState *tstate)
+@@ -413,6 +413,13 @@ interpreter_clear(PyInterpreterState *interp, PyThreadState *tstate)
      Py_CLEAR(interp->audit_hooks);
-     Py_CLEAR(interp->retrace_thread_yield_callback);
-     Py_CLEAR(interp->retrace_thread_resume_callback);
-+    interp->retrace_replay_checkpoint_armed = 0;
-+    Py_CLEAR(interp->retrace_replay_checkpoint_counters);
-+    Py_CLEAR(interp->retrace_replay_checkpoint_callback);
-+    interp->retrace_replay_checkpoint_callback_active = 0;
-+    interp->retrace_replay_checkpoint_callback_tstate = NULL;
-+    interp->retrace_replay_checkpoint_callback_frame = NULL;
- 
+     Py_CLEAR(interp->retrace.thread_yield_callback);
+     Py_CLEAR(interp->retrace.thread_resume_callback);
++    _PyRetrace_ClearIdentityHashTable(interp);
++    interp->retrace.replay_checkpoint_armed = 0;
++    Py_CLEAR(interp->retrace.replay_checkpoint_coordinates);
++    Py_CLEAR(interp->retrace.replay_checkpoint_callback);
++    interp->retrace.replay_checkpoint_callback_active = 0;
++    interp->retrace.replay_checkpoint_callback_tstate = NULL;
++    interp->retrace.replay_checkpoint_callback_frame = NULL;
+
      PyConfig_Clear(&interp->config);
      Py_CLEAR(interp->codec_search_path);
-     Py_CLEAR(interp->codec_search_cache);
-     Py_CLEAR(interp->codec_error_registry);
--- 
+--
 2.50.1 (Apple Git-155)
