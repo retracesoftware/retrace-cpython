@@ -29,7 +29,7 @@ index 3816a42..d90457d 100644
 +    do { \
 +        PyInterpreterState *retrace_interp = tstate->interp; \
 +        if (retrace_interp->retrace.replay_checkpoint_armed && \
-+            retrace_interp->retrace.replay_checkpoint_thread_id == tstate->thread_id && \
++            retrace_interp->retrace.replay_checkpoint_thread_id == tstate->retrace.thread_id && \
 +            _PyRetrace_FrameIsVisible(frame) && \
 +            retrace_interp->retrace.replay_checkpoint_top == \
 +                _PyRetrace_FrameCoordinate(frame)) \

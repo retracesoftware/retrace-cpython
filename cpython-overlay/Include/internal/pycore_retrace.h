@@ -378,6 +378,9 @@ _PyRetrace_UseCoordinatePointerHash(PyThreadState *tstate)
     if (tstate == NULL || _PyRetrace_SuppressCoordinateBump(tstate)) {
         return 0;
     }
+    if (tstate->retrace.thread_id == 0) {
+        return 0;
+    }
     return _PyRetrace_FrameIsVisible(_PyRetrace_CurrentThreadFrame(tstate));
 }
 

@@ -1221,7 +1221,7 @@ retrace_call_thread_callback(PyThreadState *tstate,
 void
 _PyRetrace_NoteThreadResume(PyThreadState *tstate)
 {
-    if (tstate == NULL) {
+    if (tstate == NULL || tstate->retrace.thread_id == 0) {
         return;
     }
 
@@ -1237,7 +1237,9 @@ _PyRetrace_NoteThreadResume(PyThreadState *tstate)
 void
 _PyRetrace_DeliverThreadResumeCallback(PyThreadState *tstate)
 {
-    if (tstate == NULL || !tstate->retrace.thread_resume_pending) {
+    if (tstate == NULL || tstate->retrace.thread_id == 0 ||
+        !tstate->retrace.thread_resume_pending)
+    {
         return;
     }
     if (tstate->retrace.thread_callback_active) {
@@ -1262,7 +1264,9 @@ _PyRetrace_DeliverThreadResumeCallback(PyThreadState *tstate)
 void
 _PyRetrace_DeliverThreadYieldCallback(PyThreadState *tstate)
 {
-    if (tstate == NULL || tstate->retrace.thread_callback_active) {
+    if (tstate == NULL || tstate->retrace.thread_id == 0 ||
+        tstate->retrace.thread_callback_active)
+    {
         return;
     }
 
@@ -1279,7 +1283,9 @@ int
 _PyRetrace_CheckReplayCheckpoint(PyThreadState *tstate,
                                  _PyInterpreterFrame *frame)
 {
-    if (tstate == NULL || frame == NULL) {
+    if (tstate == NULL || tstate->retrace.thread_id == 0 ||
+        frame == NULL)
+    {
         return 0;
     }
 

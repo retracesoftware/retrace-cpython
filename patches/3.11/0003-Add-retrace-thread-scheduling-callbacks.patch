@@ -133,7 +133,7 @@ index a451166..1c93702 100644
  #include "pycore_pyerrors.h"
  #include "pycore_pylifecycle.h"
  #include "pycore_pymem.h"         // _PyMem_SetDefaultAllocator()
-+#include "pycore_retrace.h"       // _PyRetrace_InitialCoordinateMode()
++#include "pycore_retrace.h"       // _PyRetrace_InitializeThreadState()
  #include "pycore_pystate.h"       // _PyThreadState_GET()
  #include "pycore_runtime_init.h"  // _PyRuntimeState_INIT
  #include "pycore_sysmodule.h"
@@ -146,24 +146,20 @@ index a451166..1c93702 100644
 
      PyConfig_Clear(&interp->config);
      Py_CLEAR(interp->codec_search_path);
-@@ -796,6 +798,9 @@ init_threadstate(PyThreadState *tstate,
+@@ -796,6 +798,7 @@ init_threadstate(PyThreadState *tstate,
 
      tstate->cframe = &tstate->root_cframe;
      tstate->datastack_chunk = NULL;
-+    tstate->retrace.coordinate_mode = _PyRetrace_InitialCoordinateMode(interp);
-+    tstate->retrace.last_root_coordinate = (uint64_t)-1;
-+    tstate->retrace.root_coordinate_hash = _PyRetrace_InitialRootCoordinateHash();
++    _PyRetrace_InitializeThreadState(interp, tstate);
      tstate->datastack_top = NULL;
      tstate->datastack_limit = NULL;
 
-@@ -856,6 +861,10 @@ new_threadstate(PyInterpreterState *interp)
+@@ -856,6 +861,8 @@ new_threadstate(PyInterpreterState *interp)
      interp->threads.head = tstate;
 
      init_threadstate(tstate, interp, id, old_head);
-+    if (id > 1) {
-+        _PyRetrace_SeedChildThreadState(
-+            _PyRuntimeGILState_GetThreadState(&runtime->gilstate), tstate);
-+    }
++    _PyRetrace_SeedThreadState(
++        _PyRuntimeGILState_GetThreadState(&runtime->gilstate), tstate);
 
      HEAD_UNLOCK(runtime);
      if (!used_newtstate) {

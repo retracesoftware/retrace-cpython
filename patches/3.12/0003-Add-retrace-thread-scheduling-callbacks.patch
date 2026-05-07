@@ -148,7 +148,7 @@ index 6aed9ac..c8823e8 100644
  #include "pycore_pyerrors.h"
  #include "pycore_pylifecycle.h"
  #include "pycore_pymem.h"         // _PyMem_SetDefaultAllocator()
-+#include "pycore_retrace.h"       // _PyRetrace_InitialCoordinateMode()
++#include "pycore_retrace.h"       // _PyRetrace_InitializeThreadState()
  #include "pycore_pystate.h"
  #include "pycore_runtime_init.h"  // _PyRuntimeState_INIT
  #include "pycore_sysmodule.h"
@@ -161,23 +161,19 @@ index 6aed9ac..c8823e8 100644
 
      for (int i = 0; i < _PY_MONITORING_UNGROUPED_EVENTS; i++) {
          interp->monitors.tools[i] = 0;
-@@ -1363,6 +1365,9 @@ init_threadstate(PyThreadState *tstate,
+@@ -1363,6 +1365,7 @@ init_threadstate(PyThreadState *tstate,
      tstate->datastack_top = NULL;
      tstate->datastack_limit = NULL;
      tstate->what_event = -1;
-+    tstate->retrace.coordinate_mode = _PyRetrace_InitialCoordinateMode(interp);
-+    tstate->retrace.last_root_coordinate = (uint64_t)-1;
-+    tstate->retrace.root_coordinate_hash = _PyRetrace_InitialRootCoordinateHash();
++    _PyRetrace_InitializeThreadState(interp, tstate);
 
      tstate->_status.initialized = 1;
  }
-@@ -1433,6 +1438,9 @@ new_threadstate(PyInterpreterState *interp)
+@@ -1433,6 +1438,7 @@ new_threadstate(PyInterpreterState *interp)
 
      init_threadstate(tstate, interp, id);
      add_threadstate(interp, tstate, old_head);
-+    if (id > 1) {
-+        _PyRetrace_SeedChildThreadState(current_fast_get(runtime), tstate);
-+    }
++    _PyRetrace_SeedThreadState(current_fast_get(runtime), tstate);
 
      HEAD_UNLOCK(runtime);
      if (!used_newtstate) {
