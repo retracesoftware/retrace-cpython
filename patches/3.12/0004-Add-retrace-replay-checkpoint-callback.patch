@@ -70,7 +70,7 @@ diff --git a/Python/pystate.c b/Python/pystate.c
 index c8823e8..648b6c3 100644
 --- a/Python/pystate.c
 +++ b/Python/pystate.c
-@@ -853,6 +853,13 @@ interpreter_clear(PyInterpreterState *interp, PyThreadState *tstate)
+@@ -853,6 +853,11 @@ interpreter_clear(PyInterpreterState *interp, PyThreadState *tstate)
      Py_CLEAR(interp->audit_hooks);
      Py_CLEAR(interp->retrace.thread_yield_callback);
      Py_CLEAR(interp->retrace.thread_resume_callback);
@@ -79,8 +79,6 @@ index c8823e8..648b6c3 100644
 +    Py_CLEAR(interp->retrace.replay_checkpoint_coordinates);
 +    Py_CLEAR(interp->retrace.replay_checkpoint_callback);
 +    interp->retrace.replay_checkpoint_callback_active = 0;
-+    interp->retrace.replay_checkpoint_callback_tstate = NULL;
-+    interp->retrace.replay_checkpoint_callback_frame = NULL;
 
      for (int i = 0; i < _PY_MONITORING_UNGROUPED_EVENTS; i++) {
          interp->monitors.tools[i] = 0;

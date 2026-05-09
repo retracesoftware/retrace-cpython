@@ -67,7 +67,7 @@ diff --git a/Python/pystate.c b/Python/pystate.c
 index 1c93702..77f4084 100644
 --- a/Python/pystate.c
 +++ b/Python/pystate.c
-@@ -413,6 +413,13 @@ interpreter_clear(PyInterpreterState *interp, PyThreadState *tstate)
+@@ -413,6 +413,11 @@ interpreter_clear(PyInterpreterState *interp, PyThreadState *tstate)
      Py_CLEAR(interp->audit_hooks);
      Py_CLEAR(interp->retrace.thread_yield_callback);
      Py_CLEAR(interp->retrace.thread_resume_callback);
@@ -76,8 +76,6 @@ index 1c93702..77f4084 100644
 +    Py_CLEAR(interp->retrace.replay_checkpoint_coordinates);
 +    Py_CLEAR(interp->retrace.replay_checkpoint_callback);
 +    interp->retrace.replay_checkpoint_callback_active = 0;
-+    interp->retrace.replay_checkpoint_callback_tstate = NULL;
-+    interp->retrace.replay_checkpoint_callback_frame = NULL;
 
      PyConfig_Clear(&interp->config);
      Py_CLEAR(interp->codec_search_path);

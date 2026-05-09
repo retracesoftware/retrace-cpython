@@ -3,10 +3,10 @@
 
 #include <stdint.h>
 
-#define _PyFrame_RETRACE_COORDINATE_DISABLED UINT64_MAX
-#define _PyFrame_RETRACE_LAST_COORDINATE_UNSET (UINT64_MAX - 1)
+#define _PyFrame_RETRACE_LAST_COORDINATE_UNSET UINT64_MAX
 #define _PyFrame_RETRACE_COORDINATE_DEPTH_UNSET UINT32_MAX
 #define _PyFrame_RETRACE_COORDINATE_HASH_UNSET UINT64_MAX
+#define _PY_RETRACE_THREAD_COORDINATE_WORDS 1
 
 typedef struct _object PyObject;
 typedef struct _ts PyThreadState;
@@ -22,18 +22,16 @@ typedef struct {
 
 typedef struct {
     int thread_resume_pending;
-    int coordinate_mode;
     uint64_t thread_id;
+    unsigned long cpython_thread_ident;
+    uint64_t thread_coordinate[_PY_RETRACE_THREAD_COORDINATE_WORDS];
     uint64_t root_coordinate;
     uint64_t last_root_coordinate;
     uint64_t root_coordinate_hash;
-    struct _PyInterpreterFrame *thread_resume_frame;
     int thread_callback_active;
-    struct _PyInterpreterFrame *thread_callback_frame;
 } _PyRetraceThreadState;
 
 typedef struct {
-    uint64_t next_thread_id;
     _PyRetraceIdentityHashTable *identity_hashes;
     PyObject *thread_yield_callback;
     PyObject *thread_resume_callback;
@@ -43,8 +41,6 @@ typedef struct {
     PyObject *replay_checkpoint_coordinates;
     PyObject *replay_checkpoint_callback;
     int replay_checkpoint_callback_active;
-    PyThreadState *replay_checkpoint_callback_tstate;
-    struct _PyInterpreterFrame *replay_checkpoint_callback_frame;
 } _PyRetraceInterpreterState;
 
 #endif /* !Py_CPYTHON_RETRACE_STATE_H */

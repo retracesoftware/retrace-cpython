@@ -1,12 +1,18 @@
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import threading
 import time
+import _thread
 
 
 PROBE_MODULE = "_retrace"
+
+
+def is_u64(value) -> bool:
+    return type(value) is int and 0 < value < 2**64
 
 
 def check_replay_checkpoint(module) -> None:
@@ -14,12 +20,12 @@ def check_replay_checkpoint(module) -> None:
 
     def attempt(delta: int) -> None:
         base = tuple(module.coordinates())
-        target = (base[0] + delta, *base[1:])
+        target = (*base[:-1], base[-1] + delta)
 
         def callback():
-            hits.append((tuple(module.coordinates()), target))
+            hits.append(target)
 
-        module.set_replay_checkpoint(module.thread_id(), target, callback)
+        module.set_replay_checkpoint(_thread.get_ident(), target, callback)
         value = 0
         for index in range(1000):
             value += index
@@ -32,7 +38,6 @@ def check_replay_checkpoint(module) -> None:
         if hits:
             break
     assert hits
-    assert hits[0][0] == hits[0][1]
 
 
 def check_thread_callbacks(module) -> None:
@@ -45,12 +50,12 @@ def check_thread_callbacks(module) -> None:
     stop = False
 
     def yield_callback():
-        yield_hits.append(module.thread_id())
-        callback_deltas.append(tuple(module.coordinates_delta()))
+        yield_hits.append(_thread.get_ident())
+        callback_deltas.append(tuple(module.thread_delta()))
 
     def resume_callback():
-        resume_hits.append(module.thread_id())
-        callback_deltas.append(tuple(module.coordinates_delta()))
+        resume_hits.append(_thread.get_ident())
+        callback_deltas.append(tuple(module.thread_delta()))
 
     def contender():
         value = 0
@@ -88,23 +93,22 @@ def check_thread_callbacks(module) -> None:
 
 def apply_coordinate_delta(stack: list[int], delta) -> None:
     common_count = delta[0]
-    drop_count = len(stack) - common_count
-    del stack[:drop_count]
-    stack[:0] = delta[1:]
+    del stack[common_count:]
+    stack.extend(delta[1:])
 
 
-def check_coordinates_delta(module) -> None:
+def check_thread_delta(module) -> None:
     stack = []
 
     def sync() -> None:
-        delta = module.coordinates_delta()
+        delta = module.thread_delta()
         assert isinstance(delta, module.U64Buffer)
         assert len(delta) >= 1
         assert 0 <= delta[0] <= len(stack)
         apply_coordinate_delta(stack, delta)
         live = tuple(module.coordinates())
         assert len(stack) == len(live)
-        assert tuple(stack[1:]) == live[1:]
+        assert tuple(stack[:-1]) == live[:-1]
 
     sync()
 
@@ -130,14 +134,15 @@ def check_coordinate_hash(module) -> None:
 
 
 def check_thread_ids(module) -> None:
-    main_id = module.thread_id()
-    assert type(main_id) is int
-    assert main_id > 0
+    main_id = _thread.get_ident()
+    assert is_u64(main_id)
+    assert main_id == _thread.get_ident()
+    assert main_id == module.coordinates()[0]
 
     worker_ids = []
 
     def worker() -> None:
-        worker_ids.append(module.thread_id())
+        worker_ids.append(_thread.get_ident())
 
     workers = [threading.Thread(target=worker) for _ in range(3)]
     for worker_thread in workers:
@@ -146,8 +151,84 @@ def check_thread_ids(module) -> None:
         worker_thread.join()
 
     assert len(worker_ids) == len(workers)
+    assert all(is_u64(item) for item in worker_ids)
     assert len(set(worker_ids)) == len(workers)
-    assert sorted(worker_ids) == list(range(main_id + 1, main_id + 1 + len(workers)))
+    assert main_id not in set(worker_ids)
+
+
+def check_ctypes_async_exc_bridge(module) -> None:
+    import ctypes
+
+    class RetraceStop(Exception):
+        pass
+
+    ready = threading.Event()
+    done = threading.Event()
+    child = {}
+    stop = False
+
+    def worker() -> None:
+        nonlocal stop
+        child["ident"] = _thread.get_ident()
+        ready.set()
+        try:
+            while not stop:
+                time.sleep(0.01)
+        except RetraceStop:
+            child["stopped"] = True
+        finally:
+            done.set()
+
+    _thread.start_new_thread(worker, ())
+    try:
+        assert ready.wait(5)
+        set_async_exc = ctypes.pythonapi.PyThreadState_SetAsyncExc
+        set_async_exc.argtypes = (ctypes.c_ulong, ctypes.py_object)
+        set_async_exc.restype = ctypes.c_int
+        result = set_async_exc(
+            ctypes.c_ulong(child["ident"]),
+            ctypes.py_object(RetraceStop),
+        )
+        assert result == 1
+        assert done.wait(5)
+        assert child.get("stopped") is True
+    finally:
+        stop = True
+        done.wait(5)
+
+
+def thread_id_with_root_seed(seed: str | None) -> int:
+    env = os.environ.copy()
+    if seed is None:
+        env.pop("RETRACE_ROOT_SEED", None)
+    else:
+        env["RETRACE_ROOT_SEED"] = seed
+
+    script = "import json, _thread; print(json.dumps(_thread.get_ident()))"
+    output = subprocess.run(
+        [sys.executable, "-c", script],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    ).stdout
+    return json.loads(output)
+
+
+def check_root_seed_environment(module) -> None:
+    default_id = thread_id_with_root_seed(None)
+    explicit_default_id = thread_id_with_root_seed("retrace")
+    seed_a_id = thread_id_with_root_seed("retrace-smoke-a")
+    seed_a_repeat_id = thread_id_with_root_seed("retrace-smoke-a")
+    seed_b_id = thread_id_with_root_seed("retrace-smoke-b")
+
+    assert default_id == explicit_default_id
+    assert seed_a_id == seed_a_repeat_id
+    assert all(is_u64(item) for item in (
+        default_id, seed_a_id, seed_b_id
+    ))
+    assert seed_a_id != seed_b_id
+    assert seed_a_id != default_id
 
 
 def check_c_driven_callback_coordinates(module) -> None:
@@ -168,190 +249,26 @@ def check_c_driven_callback_coordinates(module) -> None:
     assert len(set(key_coordinates)) == len(key_coordinates)
 
 
-def check_disable_for(module) -> None:
-    def hidden(value: int) -> int:
-        hidden_coordinates.append(tuple(module.coordinates()))
+def check_no_disable_api(module) -> None:
+    assert not hasattr(module, "disable_for")
+    assert not hasattr(module, "run_disabled")
+    assert not hasattr(module, "enable_for")
+    assert not hasattr(module, "thread_id")
+    assert not hasattr(module, "thread_id_from_ident")
+    assert not hasattr(module, "common_coordinates_prefix_length")
 
-        def child() -> None:
-            child_coordinates.append(tuple(module.coordinates()))
-
-        child()
-        return value
-
-    wrapped = module.disable_for(hidden)
-    assert wrapped is module.disable_for(wrapped)
-    assert wrapped.__wrapped__ is hidden
-    assert wrapped.__name__ == hidden.__name__
-
-    hidden_coordinates = []
-    child_coordinates = []
-    list(map(wrapped, range(3)))
-    assert len(set(hidden_coordinates)) == 1
-    assert len(set(child_coordinates)) == 1
-    assert hidden_coordinates == child_coordinates
-
-    class Holder:
-        def __init__(self) -> None:
-            self.calls = 0
-
-        @module.disable_for
-        def method(self) -> int:
-            self.calls += 1
-            return len(module.coordinates())
-
-    holder = Holder()
-    visible_depth = len(module.coordinates())
-    assert holder.method() == visible_depth
-    assert holder.calls == 1
-
-    generator_coordinates = []
-
-    def generator():
-        generator_coordinates.append(tuple(module.coordinates()))
-        yield 1
-        generator_coordinates.append(tuple(module.coordinates()))
-
-    disabled_generator = module.disable_for(generator)()
-    generator_depth = len(module.coordinates())
-    assert next(disabled_generator) == 1
     try:
-        next(disabled_generator)
-    except StopIteration:
+        module.coordinates((0,))
+    except LookupError:
         pass
     else:
-        raise AssertionError("disabled generator did not stop")
-    assert all(len(item) == generator_depth for item in generator_coordinates)
-
-    disabled_thread_ids = []
-    disabled_thread_coordinates = []
-
-    def starts_disabled_thread() -> None:
-        def worker() -> None:
-            disabled_thread_ids.append(module.thread_id())
-            disabled_thread_coordinates.append(tuple(module.coordinates()))
-
-        worker_thread = threading.Thread(target=worker)
-        worker_thread.start()
-        worker_thread.join()
-
-    module.disable_for(starts_disabled_thread)()
-    assert disabled_thread_ids == [0]
-    assert len(disabled_thread_coordinates) == 1
+        raise AssertionError("explicit zero thread id was accepted")
     try:
         module.coordinates(0)
     except LookupError:
         pass
     else:
-        raise AssertionError("explicit disabled thread id was accepted")
-
-
-def check_enable_for(module) -> None:
-    collapsed_coordinates = []
-
-    def collapsed(value: int) -> int:
-        collapsed_coordinates.append(tuple(module.coordinates()))
-        return value
-
-    list(map(module.disable_for(collapsed), range(3)))
-    assert len(set(collapsed_coordinates)) == 1
-
-    def hidden(value: int) -> int:
-        hidden_coordinates.append(tuple(module.coordinates()))
-
-        def visible() -> None:
-            enabled_coordinates.append(tuple(module.coordinates()))
-
-            def hidden_again() -> None:
-                hidden_again_coordinates.append(tuple(module.coordinates()))
-
-            module.disable_for(hidden_again)()
-
-        module.enable_for(visible)()
-        return value
-
-    wrapped_hidden = module.disable_for(hidden)
-    assert wrapped_hidden is module.disable_for(wrapped_hidden)
-
-    def plain(value: int) -> int:
-        return value
-
-    wrapped_enabled = module.enable_for(plain)
-    assert wrapped_enabled is module.enable_for(wrapped_enabled)
-    assert wrapped_enabled.__wrapped__ is plain
-    assert wrapped_enabled.__name__ == plain.__name__
-
-    hidden_coordinates = []
-    enabled_coordinates = []
-    hidden_again_coordinates = []
-    list(map(wrapped_hidden, range(3)))
-
-    assert len(set(enabled_coordinates)) == len(enabled_coordinates)
-    assert all(
-        len(enabled) == len(hidden) + 1
-        for hidden, enabled in zip(hidden_coordinates, enabled_coordinates)
-    )
-    assert len(hidden_again_coordinates) == len(enabled_coordinates)
-    assert all(
-        len(hidden_again) == len(enabled)
-        for hidden_again, enabled in zip(hidden_again_coordinates, enabled_coordinates)
-    )
-    assert all(
-        hidden_again[1:] == enabled[1:]
-        for hidden_again, enabled in zip(hidden_again_coordinates, enabled_coordinates)
-    )
-
-
-def check_retrace_coordinates_xoption() -> None:
-    script = r"""
-import json
-import sys
-import _retrace as retrace
-
-visible_depths = []
-
-def visible():
-    visible_depths.append(len(retrace.coordinates()))
-
-    def child():
-        visible_depths.append(len(retrace.coordinates()))
-
-    child()
-
-baseline = len(retrace.coordinates())
-retrace.enable_for(visible)()
-after = len(retrace.coordinates())
-print(json.dumps({
-    "xoption": sys._xoptions.get("retrace_coordinates"),
-    "baseline": baseline,
-    "visible_depths": visible_depths,
-    "after": after,
-}))
-"""
-
-    def run(*args: str) -> dict:
-        result = subprocess.run(
-            [sys.executable, *args, "-c", script],
-            check=True,
-            text=True,
-            capture_output=True,
-        )
-        return json.loads(result.stdout)
-
-    default = run()
-    assert default["xoption"] is None
-    assert default["baseline"] >= 2
-    assert default["after"] >= 2
-
-    enabled = run("-X", "retrace_coordinates=enabled")
-    assert enabled["xoption"] == "enabled"
-    assert enabled["baseline"] >= 2
-    assert enabled["after"] >= 2
-
-    disabled = run("-X", "retrace_coordinates=disabled")
-    assert disabled["xoption"] == "disabled"
-    assert disabled["baseline"] == 1
-    assert disabled["after"] == 1
-    assert disabled["visible_depths"] == [2, 3]
+        raise AssertionError("integer thread id was accepted")
 
 
 def check_deterministic_identity_hashes() -> None:
@@ -410,26 +327,27 @@ def main() -> int:
         assert PROBE_MODULE in sys.builtin_module_names
         assert "retrace" not in sys.builtin_module_names
         module = __import__(PROBE_MODULE)
-        thread_id = module.thread_id()
-        assert type(thread_id) is int
-        assert thread_id > 0
+        thread_id = _thread.get_ident()
+        assert is_u64(thread_id)
+        assert thread_id == _thread.get_ident()
         coordinates = module.coordinates()
         coordinates_by_id = module.coordinates(thread_id)
+        coordinates_by_tuple_id = module.coordinates((thread_id,))
         view = memoryview(coordinates)
         assert len(coordinates) >= 1
+        assert coordinates[0] == thread_id
         assert view.format == "Q"
         assert view.readonly
         assert tuple(coordinates[0:]) == tuple(coordinates)
         assert coordinates == tuple(coordinates)
         assert len(coordinates_by_id) == len(coordinates)
+        assert len(coordinates_by_tuple_id) == len(coordinates)
         dropped = module.coordinates(None, 1)
         dropped_by_id = module.coordinates(thread_id, 1)
         dropped_all = module.coordinates(None, len(coordinates) + 1)
         assert len(dropped) == max(0, len(coordinates) - 1)
         assert len(dropped_by_id) == max(0, len(coordinates) - 1)
-        assert tuple(module.coordinates(None, len(coordinates) - 1)) == (
-            coordinates[-1],
-        )
+        assert len(module.coordinates(None, len(coordinates) - 1)) == 1
         assert tuple(dropped_all) == ()
         try:
             module.coordinates(None, -1)
@@ -437,19 +355,11 @@ def main() -> int:
             pass
         else:
             raise AssertionError("negative coordinates drop accepted")
-        assert module.common_coordinates_prefix_length(()) == 0
-        prefix = module.common_coordinates_prefix_length(coordinates)
-        prefix_by_id = module.common_coordinates_prefix_length(
-            coordinates, thread_id
-        )
-        tuple_prefix = module.common_coordinates_prefix_length(tuple(coordinates))
-        assert 0 <= prefix <= len(coordinates)
-        assert 0 <= prefix_by_id <= len(coordinates)
-        assert 0 <= tuple_prefix <= len(coordinates)
-        assert module.common_coordinates_prefix_length([2**64 - 1]) == 0
-        check_coordinates_delta(module)
+        check_thread_delta(module)
         check_coordinate_hash(module)
         check_thread_ids(module)
+        check_ctypes_async_exc_bridge(module)
+        check_root_seed_environment(module)
         assert module.get_thread_yield_callback() is None
         assert module.get_thread_resume_callback() is None
 
@@ -470,9 +380,7 @@ def main() -> int:
         check_thread_callbacks(module)
         check_replay_checkpoint(module)
         check_c_driven_callback_coordinates(module)
-        check_disable_for(module)
-        check_enable_for(module)
-        check_retrace_coordinates_xoption()
+        check_no_disable_api(module)
         check_deterministic_identity_hashes()
 
         print("_retrace_module=builtin")
@@ -480,13 +388,11 @@ def main() -> int:
         print(f"coordinates_len={len(coordinates)}")
         print(f"coordinates_format={view.format}")
         print(f"coordinates_readonly={view.readonly}")
-        print("common_coordinates_prefix_length=available")
-        print("coordinates_delta=available")
+        print("thread_delta=available")
         print("hash=available")
-        print("thread_id=available")
-        print("disable_for=available")
-        print("enable_for=available")
-        print("retrace_coordinates_xoption=available")
+        print("ctypes_async_exc_bridge=available")
+        print("root_seed_environment=available")
+        print("disable_api=unavailable")
         print("deterministic_identity_hashes=available")
         print("thread_yield_callback=available")
         print("thread_resume_callback=available")

@@ -7,5 +7,5 @@ Example:
 
 ```bash
 build/install/3.12.8+retrace/bin/python3 tests/smoke/probe_capability.py
+build/install/3.12.8+retrace/bin/python3 tests/smoke/ctypes_thread_ident.py
 ```
-

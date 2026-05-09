@@ -46,14 +46,9 @@ if importlib.util.find_spec("_retrace") is None:
     ...
 ```
 
-Coordinates are enabled by default. To start an interpreter with new Python
-frames hidden until Retrace explicitly enables application code, pass:
-
-```bash
-retrace-python -X retrace_coordinates=disabled ...
-```
-
-`-X retrace_coordinates=enabled` is accepted as the explicit default.
+Coordinates are always enabled in the native layer. Higher-level Retrace cursor
+code is responsible for deciding which coordinates belong to application code
+and which belong to control-plane code.
 
 ## Python API
 
@@ -61,12 +56,8 @@ Patched interpreters expose:
 
 ```python
 _retrace.coordinates(thread_id=None, drop=0)
-_retrace.coordinates_delta()
-_retrace.common_coordinates_prefix_length(coordinates, thread_id=None)
+_retrace.thread_delta()
 _retrace.hash()
-_retrace.thread_id()
-_retrace.disable_for(callable)
-_retrace.enable_for(callable)
 _retrace.set_thread_yield_callback(callback_or_none)
 _retrace.get_thread_yield_callback()
 _retrace.set_thread_resume_callback(callback_or_none)
@@ -76,35 +67,34 @@ _retrace.set_replay_checkpoint(None)
 ```
 
 `coordinates()` returns a tuple-like immutable `_retrace.U64Buffer`
-backed by a read-only `uint64_t` array. Coordinates are ordered current frame
-first and end with a synthetic per-thread root coordinate. `thread_id` is the
-deterministic Retrace thread id from `_retrace.thread_id()`; unknown or disabled
-thread ids raise `LookupError`. `drop` omits leading coordinates from the
-returned buffer.
+backed by a read-only `uint64_t` array. The first word is the thread's
+64-bit Retrace id. The remaining words are visible Python frame
+coordinates ordered from oldest frame to current frame. `thread_id` is the
+integer returned by `_thread.get_ident()`; unknown thread ids raise
+`LookupError`. `drop` omits leading coordinates from the returned buffer.
 
-`coordinates_delta()` is the fast current-thread path for frequent
-thread scheduling events. It returns:
+`thread_delta()` is the fast current-thread path for frequent thread scheduling
+events. It returns:
 
 ```python
-[common_count, *new_coordinates]
+[common_prefix_count, *new_suffix]
 ```
 
 Consumers update their materialized stack like this:
 
 ```python
-delta = _retrace.coordinates_delta()
+delta = _retrace.thread_delta()
 common_count = delta[0]
-drop_count = len(stack) - common_count
-del stack[:drop_count]
-stack[:0] = delta[1:]
+del stack[common_count:]
+stack.extend(delta[1:])
 ```
 
 `hash()` returns the current thread's 64-bit coordinate-location hash as a
 Python `int`.
 
-`thread_id()` returns the current thread's deterministic Retrace thread id as a
-small positive integer. It returns `0` for disabled threads that are not part of
-the Retrace-visible thread family.
+`RETRACE_ROOT_SEED` can be set to any stable string before interpreter startup
+to seed the main thread coordinate. If it is unset, Retrace uses the literal
+seed string `retrace`.
 
 `set_thread_yield_callback()` installs a no-argument Python callback called just
 before the eval loop drops the GIL for a Python-level switch request.
@@ -114,19 +104,9 @@ after a thread has acquired the GIL and restored its thread state, before
 application bytecode resumes.
 
 `set_replay_checkpoint(thread_id, coordinates, callback)` arms one coordinate
-checkpoint per interpreter. When the thread reaches the exact coordinate tuple,
+checkpoint per interpreter. `thread_id` is the integer id from
+`_thread.get_ident()`. When the thread reaches the exact coordinate tuple,
 CPython clears the checkpoint and calls `callback()` on that thread.
-
-`disable_for(callable)` returns a callable wrapper for control-plane code.
-Frames started while the wrapper is active are stamped as coordinate-disabled,
-so that frame and its child frames are invisible to `coordinates()` and
-`coordinates_delta()`. The wrapper exposes `__wrapped__` and delegates ordinary
-attribute reads to the wrapped callable.
-
-`enable_for(callable)` returns the matching wrapper for application callbacks
-that must become visible again when called from disabled control-plane code.
-Visible frames started below disabled frames reattach to the next older visible
-frame, or the thread root if there is none.
 
 ## Build Locally
 
@@ -266,9 +246,8 @@ typedef struct {
 
 `coordinate_depth` is a lazy visible-frame depth cache. `coordinate_bias` is
 the running adjustment that makes `bias + f_lasti` a logical coordinate.
-`last_coordinate` is used by coordinate deltas and also carries the
-coordinate-disabled sentinel. `coordinate_hash` caches the parent-coordinate
-hash prefix for the frame's current activation.
+`last_coordinate` is used by coordinate deltas. `coordinate_hash` caches the
+parent-coordinate hash prefix for the frame's current activation.
 
 `PyThreadState` gets:
 
@@ -281,21 +260,27 @@ where `_PyRetraceThreadState` is:
 ```c
 typedef struct {
     int thread_resume_pending;
-    int coordinate_mode;
     uint64_t thread_id;
+    unsigned long cpython_thread_ident;
+    uint64_t thread_coordinate[_PY_RETRACE_THREAD_COORDINATE_WORDS];
     uint64_t root_coordinate;
     uint64_t last_root_coordinate;
     uint64_t root_coordinate_hash;
-    struct _PyInterpreterFrame *thread_resume_frame;
     int thread_callback_active;
-    struct _PyInterpreterFrame *thread_callback_frame;
 } _PyRetraceThreadState;
 ```
 
-The root fields model a synthetic oldest coordinate for a thread, including the
-thread's hash seed. The mode field is the saved/restored `disable_for` /
-`enable_for` state. The callback fields remember the frame to report while
-delivering yield/resume callbacks and prevent recursive callback delivery.
+`thread_id` is the deterministic 64-bit Retrace identity exposed through
+Python's thread-ident APIs. `thread_coordinate` carries the same value as the
+coordinate prefix, and `cpython_thread_ident` records CPython's native
+`_thread.start_new_thread()` ident for bridge lookups. The main thread
+coordinate is derived from `RETRACE_ROOT_SEED`, defaulting to the literal string
+`retrace`. New child thread ids are mixed from the creator's thread id plus
+parent cursor, then checked against active Retrace thread ids and remixed on the
+vanishingly unlikely collision path. The root fields track
+C-originated frame activations and delta initialization. The callback fields
+track pending/resident callback delivery and prevent recursive callback
+delivery.
 
 `PyInterpreterState` gets:
 
@@ -307,7 +292,7 @@ where `_PyRetraceInterpreterState` is:
 
 ```c
 typedef struct {
-    uint64_t next_thread_id;
+    _PyRetraceIdentityHashTable *identity_hashes;
     PyObject *thread_yield_callback;
     PyObject *thread_resume_callback;
     int replay_checkpoint_armed;
@@ -316,21 +301,18 @@ typedef struct {
     PyObject *replay_checkpoint_coordinates;
     PyObject *replay_checkpoint_callback;
     int replay_checkpoint_callback_active;
-    PyThreadState *replay_checkpoint_callback_tstate;
-    struct _PyInterpreterFrame *replay_checkpoint_callback_frame;
 } _PyRetraceInterpreterState;
 ```
 
-`next_thread_id` is the interpreter-local counter used to assign small
-deterministic ids to Retrace-visible threads. The thread callback pointers are
-the registered Python callbacks. The replay checkpoint fields hold one armed
-checkpoint, its coordinate target, and the temporary active-frame context used
-while invoking the checkpoint callback.
+The identity hash table stores coordinate-derived synthetic object hashes. The
+thread callback pointers are the registered Python callbacks. The replay
+checkpoint fields hold one armed checkpoint, its coordinate target, and a guard
+that prevents recursive checkpoint delivery.
 
 No existing public object layout such as `PyObject`, `PyTypeObject`, or
 `PyFrameObject` is extended directly. The `_retrace` module also defines its own
-native objects (`U64Buffer` and the coordinate callable wrapper), but those are
-Retrace-owned types rather than changes to core CPython types.
+native `U64Buffer` object, but that is a Retrace-owned type rather than a
+change to core CPython types.
 
 ### Frame Coordinates
 
@@ -348,23 +330,15 @@ That gives repeated C-driven callbacks, such as `map(callback, values)` or
 their Python caller is parked at one bytecode offset. Inline caches remain
 invisible and a tight loop does not pay a per-opcode increment cost.
 
-Frames can also be stamped coordinate-disabled. Disabled frames are skipped by
-coordinate walks, and child frames started below a disabled frame are stamped
-disabled as well. `_retrace.disable_for(callable)` uses this as the escape hatch
-for scheduler/debugger/control-plane machinery that must not perturb
-application coordinates. The disabled sentinel lives in
-`frame->retrace.last_coordinate`, so the jump path does not check disabled
-state before updating `frame->retrace.coordinate_bias`.
+The native layer does not hide Python frames. Scheduler, debugger, and recorder
+code still receives normal coordinates; higher-level cursor logic decides how
+to classify or strip control-plane paths.
 
-`_retrace.enable_for(callable)` temporarily forces new frames visible again while
-running inside disabled code. Activation skips disabled parents and bumps the
-next older visible parent coordinate, or the thread root. The per-thread mode is
-saved and restored by each wrapper, so nested wrappers behave like normal stack
-scopes: the innermost `disable_for` or `enable_for` wins.
-
-Each thread has a synthetic root coordinate on `PyThreadState`. When a visible
-frame starts without a visible parent, the activation bumps the root coordinate
-instead of doing any stack-depth bookkeeping.
+Each thread has an internal root activation counter on `PyThreadState`. When a
+visible frame starts without a visible parent, activation bumps that counter and
+folds it into the new frame's coordinate bias. The exported coordinate vector
+therefore stays as `[thread_id, *frames]` without a separate synthetic root
+word.
 
 `frame->retrace.coordinate_depth` is a lazy cache. Coordinate snapshot code
 computes a visible frame's depth from its parent only when needed, then stores
@@ -372,14 +346,13 @@ the result in the frame. Frame activation resets the cache, so normal execution
 does not pay for depth maintenance.
 
 `frame->retrace.last_coordinate` holds either the delta stream's remembered
-coordinate, an unset sentinel, or the coordinate-disabled sentinel. Normal frame
-initialization stores the unset sentinel. Linking a frame into the active chain
-refreshes the unset state but preserves the disabled sentinel, which keeps
-disabled generator frames hidden across resume.
+coordinate or an unset sentinel. Normal frame initialization stores the unset
+sentinel, and linking a frame into the active chain refreshes it.
 
 `frame->retrace.coordinate_hash` stores the hash prefix inherited from the
-nearest visible parent, or from the thread root. The current location hash is
-computed as `mix(frame->retrace.coordinate_hash, frame_coordinate)`, exposed as
+nearest visible parent, or from the thread id prefix.
+The current location hash is computed as
+`mix(frame->retrace.coordinate_hash, frame_coordinate)`, exposed as
 `_retrace.hash()`, so fallthrough and jumps do not have to invalidate the cached
 prefix.
 
@@ -398,7 +371,7 @@ application path.
 
 Frame coordinates intentionally localize that damage. A leaf frame can have a
 different internal coordinate without automatically changing the coordinates of
-older visible frames or the synthetic thread root. Parent coordinates move when
+older visible frames or the thread coordinate prefix. Parent coordinates move when
 visible control crosses a frame boundary or when that parent executes its own
 jumps, not because arbitrary child bytecode happened to run. This gives replay a
 coordinate space that can resynchronize at non-local boundaries instead of
@@ -412,11 +385,11 @@ unrelated checkpoint, scheduling, or stack-position failures.
 ### Coordinate Deltas
 
 The native side stores no previous vector and no previous stack size. Each
-visible frame has one remembered coordinate, and the thread stores one remembered
-root coordinate. A delta call walks the current frame chain until it finds a
-frame whose remembered coordinate still matches the frame's current coordinate.
-That proves the older suffix is unchanged, so only the new leading coordinates
-are emitted and updated.
+visible frame has one remembered coordinate, and the thread records whether its
+thread prefix has been emitted to the delta stream. A delta call compares the
+current root-first coordinate path with remembered frame coordinates. It returns
+the common prefix length plus the changed suffix, so callers replace everything
+after that prefix.
 
 ### Thread Scheduling
 
@@ -428,7 +401,7 @@ THREAD_RESUME
 ```
 
 Callbacks receive no thread ids. The callback is running on the thread it is
-describing, so callers can use `_retrace.thread_id()`.
+describing, so callers can use `_thread.get_ident()`.
 This avoids bookkeeping in the GIL handoff path and avoids asking CPython to
 predict which thread will run next.
 
@@ -439,12 +412,9 @@ is already inside a callback.
 
 ### Replay Checkpoints
 
-The eval loop checks a cheap armed flag, then thread id, then the top-frame
-coordinate. Only after those match does it compare the full visible frame coordinate
-tuple.
-
-While the checkpoint callback is active, coordinate APIs report the interrupted
-application frame rather than the callback's own frames.
+The eval loop checks a cheap armed flag, then the folded thread id, then the
+top-frame coordinate. Only after those match does it compare the full root-first
+coordinate tuple, including the thread id prefix.
 
 ## Design Rules
 

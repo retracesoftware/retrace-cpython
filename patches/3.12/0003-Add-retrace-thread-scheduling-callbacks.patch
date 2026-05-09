@@ -6,9 +6,11 @@ Subject: [PATCH 3/7] Add retrace thread scheduling callbacks
 ---
  Include/cpython/pystate.h        |  4 ++++
  Include/internal/pycore_interp.h |  3 +++
+ Modules/_threadmodule.c          | 19 +++++++++++++++----
+ Modules/signalmodule.c           |  3 +++
  Python/ceval_gil.c               | 14 ++++++++++++--
- Python/pystate.c                 |  9 +++++++++
- 4 files changed, 28 insertions(+), 2 deletions(-)
+ Python/pystate.c                 | 12 +++++++++---
+ 6 files changed, 52 insertions(+), 10 deletions(-)
 
 diff --git a/Include/cpython/pystate.h b/Include/cpython/pystate.h
 index 95fad89..cdb861b 100644
@@ -53,6 +55,81 @@ index 37cc88e..2cd432e 100644
      PyType_WatchCallback type_watchers[TYPE_MAX_WATCHERS];
      PyCode_WatchCallback code_watchers[CODE_MAX_WATCHERS];
      // One bit is set for each non-NULL entry in code_watchers
+diff --git a/Modules/_threadmodule.c b/Modules/_threadmodule.c
+index 38107f0..e2ce6fa 100644
+--- a/Modules/_threadmodule.c
++++ b/Modules/_threadmodule.c
+@@ -6,4 +6,5 @@
+ #include "pycore_moduleobject.h"  // _PyModule_GetState()
+ #include "pycore_pylifecycle.h"
+ #include "pycore_pystate.h"       // _PyThreadState_SetCurrent()
++#include "pycore_retrace.h"       // retrace thread helpers
+ #include "pycore_sysmodule.h"     // _PySys_GetOptionalAttr()
+@@ -1225,5 +1226,6 @@ thread_PyThread_start_new_thread(PyObject *self, PyObject *fargs)
+         thread_bootstate_free(boot, 1);
+         return NULL;
+     }
++    _PyRetrace_RegisterThreadIdent(boot->tstate, ident);
+-    return PyLong_FromUnsignedLong(ident);
++    return _PyRetrace_ThreadIdentObject(boot->tstate);
+ }
+@@ -1299,8 +1301,3 @@ thread_get_ident(PyObject *self, PyObject *Py_UNUSED(ignored))
+ {
+-    unsigned long ident = PyThread_get_thread_ident();
+-    if (ident == PYTHREAD_INVALID_THREAD_ID) {
+-        PyErr_SetString(ThreadError, "no current thread ident");
+-        return NULL;
+-    }
+-    return PyLong_FromUnsignedLong(ident);
++    return _PyRetrace_ThreadIdentObject(_PyThreadState_GET());
+ }
+@@ -1485,19 +1482,21 @@ thread_excepthook_file(PyObject *file, PyObject *exc_type, PyObject *exc_value,
+         Py_DECREF(name);
+     }
+     else {
+-        unsigned long ident = PyThread_get_thread_ident();
+-        PyObject *str = PyUnicode_FromFormat("%lu", ident);
++        PyObject *ident = _PyRetrace_ThreadIdentObject(_PyThreadState_GET());
++        if (ident == NULL) {
++            PyErr_Clear();
++        }
++        PyObject *str = ident == NULL ? NULL : PyObject_Str(ident);
++        Py_XDECREF(ident);
+         if (str != NULL) {
+             if (PyFile_WriteObject(str, file, Py_PRINT_RAW) < 0) {
+                 Py_DECREF(str);
+                 return -1;
+             }
+             Py_DECREF(str);
+         }
+         else {
+-            PyErr_Clear();
+-
+             if (PyFile_WriteString("<failed to get thread name>", file) < 0) {
+                 return -1;
+             }
+         }
+     }
+diff --git a/Modules/signalmodule.c b/Modules/signalmodule.c
+index 60d3a54..1fbc84c 100644
+--- a/Modules/signalmodule.c
++++ b/Modules/signalmodule.c
+@@ -13,4 +13,5 @@
+ #include "pycore_moduleobject.h"  // _PyModule_GetState()
+ #include "pycore_pyerrors.h"      // _PyErr_SetString()
+ #include "pycore_pystate.h"       // _PyThreadState_GET()
++#include "pycore_retrace.h"       // retrace thread helpers
+ #include "pycore_signal.h"        // Py_NSIG
+@@ -1282,6 +1283,8 @@ signal_pthread_kill_impl(PyObject *module, unsigned long thread_id,
+         return NULL;
+     }
+-
++
++    thread_id = _PyRetrace_CPythonThreadIdentFromPublicIdent(
++        _PyInterpreterState_GET(), thread_id);
+     err = pthread_kill((pthread_t)thread_id, signalnum);
+     if (err != 0) {
+         errno = err;
 diff --git a/Python/ceval_gil.c b/Python/ceval_gil.c
 index c1ab588..6bd4ec4 100644
 --- a/Python/ceval_gil.c
@@ -148,7 +225,7 @@ index 6aed9ac..c8823e8 100644
  #include "pycore_pyerrors.h"
  #include "pycore_pylifecycle.h"
  #include "pycore_pymem.h"         // _PyMem_SetDefaultAllocator()
-+#include "pycore_retrace.h"       // _PyRetrace_InitializeThreadState()
++#include "pycore_retrace.h"       // thread-state helpers
  #include "pycore_pystate.h"
  #include "pycore_runtime_init.h"  // _PyRuntimeState_INIT
  #include "pycore_sysmodule.h"
@@ -169,6 +246,14 @@ index 6aed9ac..c8823e8 100644
 
      tstate->_status.initialized = 1;
  }
+@@ -1558,5 +1561,6 @@ PyThreadState_Clear(PyThreadState *tstate)
+     Py_CLEAR(tstate->context);
+-
++    _PyRetrace_ClearThreadState(tstate);
++
+     if (tstate->on_delete != NULL) {
+         tstate->on_delete(tstate->on_delete_data);
+     }
 @@ -1433,6 +1438,7 @@ new_threadstate(PyInterpreterState *interp)
 
      init_threadstate(tstate, interp, id);
@@ -177,5 +262,31 @@ index 6aed9ac..c8823e8 100644
 
      HEAD_UNLOCK(runtime);
      if (!used_newtstate) {
+@@ -1819,6 +1825,6 @@ PyThreadState_SetAsyncExc(unsigned long id, PyObject *exc)
+      */
+     HEAD_LOCK(runtime);
+     for (PyThreadState *tstate = interp->threads.head; tstate != NULL; tstate = tstate->next) {
+-        if (tstate->thread_id != id) {
++        if (!_PyRetrace_ThreadMatchesAsyncExcId(interp, tstate, id)) {
+             continue;
+         }
+@@ -2023,7 +2029,7 @@ _PyThread_CurrentFrames(void)
+             if (frame == NULL) {
+                 continue;
+             }
+-            PyObject *id = PyLong_FromUnsignedLong(t->thread_id);
++            PyObject *id = _PyRetrace_ThreadIdentObject(t);
+             if (id == NULL) {
+                 goto fail;
+             }
+@@ -2086,7 +2092,7 @@ _PyThread_CurrentExceptions(void)
+             if (err_info == NULL) {
+                 continue;
+             }
+-            PyObject *id = PyLong_FromUnsignedLong(t->thread_id);
++            PyObject *id = _PyRetrace_ThreadIdentObject(t);
+             if (id == NULL) {
+                 goto fail;
+             }
 --
 2.50.1 (Apple Git-155)
