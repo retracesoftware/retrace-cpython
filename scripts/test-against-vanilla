@@ -55,10 +55,10 @@ def under_home(path):
     except ValueError:
         return False
 
-if importlib.util.find_spec("retrace") is None:
-    raise SystemExit("retrace module is not importable")
-if "retrace" not in sys.builtin_module_names:
-    raise SystemExit("retrace module is not built in")
+if importlib.util.find_spec("_retrace") is None:
+    raise SystemExit("_retrace module is not importable")
+if "_retrace" not in sys.builtin_module_names:
+    raise SystemExit("_retrace module is not built in")
 
 import encodings
 import json
@@ -73,7 +73,7 @@ for module in (encodings, json):
 print(f"vanilla_home={expected_home}")
 print(f"sys_prefix={sys.prefix}")
 print(f"stdlib_json={json.__file__}")
-print("retrace_module=builtin")
+print("_retrace_module=builtin")
 """
 
     run([str(patched_python), "-c", check], env)
