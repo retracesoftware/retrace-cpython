@@ -154,6 +154,11 @@ def build_stage(cpython_version, package_version, target, runtime_root, stage):
         (
             f'__version__ = "{package_version}"\n'
             f'__cpython_version__ = "{cpython_version}"\n'
+            "\n"
+            "\n"
+            "def executable() -> str:\n"
+            "    from .launcher import _find_executable\n"
+            "    return str(_find_executable())\n"
         ),
     )
     write_text(package_root / "launcher.py", LAUNCHER)
