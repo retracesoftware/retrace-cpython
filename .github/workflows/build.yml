@@ -8,6 +8,24 @@ on:
         required: true
         default: "manifest-all"
         type: string
+      target:
+        description: "Platform target to build"
+        required: true
+        default: "all"
+        type: choice
+        options:
+          - all
+          - linux-x64
+          - linux-arm64
+          - macos-intel
+          - macos-arm64
+          - windows-x64
+          - windows-x86
+          - windows-arm64
+      package_version:
+        description: "Exact Retrace package version; overrides package_bump when set"
+        required: false
+        type: string
       package_bump:
         description: "Retrace package version component to bump from the latest PyPI release"
         required: true
@@ -42,7 +60,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.python_version || 'manifest-all' }}-${{ inputs.publish_pypi || false }}
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.python_version || 'manifest-all' }}-${{ inputs.target || 'all' }}-${{ inputs.publish_pypi || false }}
   cancel-in-progress: true
 
 env:
@@ -58,6 +76,10 @@ jobs:
     outputs:
       package_version: ${{ steps.package_version.outputs.package_version }}
       versions: ${{ steps.versions.outputs.versions }}
+      posix_platforms: ${{ steps.versions.outputs.posix_platforms }}
+      windows_platforms: ${{ steps.versions.outputs.windows_platforms }}
+      has_posix: ${{ steps.versions.outputs.has_posix }}
+      has_windows: ${{ steps.versions.outputs.has_windows }}
     steps:
       - name: Check out retrace-cpython
         uses: actions/checkout@v4
@@ -66,6 +88,7 @@ jobs:
         id: versions
         env:
           VERSION_INPUT: ${{ inputs.python_version || 'manifest-all' }}
+          TARGET_INPUT: ${{ inputs.target || 'all' }}
         run: |
           python3 - <<'PY'
           import json
@@ -91,26 +114,81 @@ jobs:
               raise SystemExit("No CPython versions selected")
 
           versions = list(dict.fromkeys(versions))
+          target = (os.environ["TARGET_INPUT"].strip() or "all")
+          posix_platforms = [
+              {"target": "linux-x64", "os": "ubuntu-24.04"},
+              {"target": "linux-arm64", "os": "ubuntu-24.04-arm"},
+              {"target": "macos-intel", "os": "macos-15-intel"},
+              {"target": "macos-arm64", "os": "macos-15"},
+          ]
+          windows_platforms = [
+              {
+                  "target": "windows-x64",
+                  "os": "windows-2022",
+                  "pcbuild-platform": "x64",
+                  "pcbuild-output": "amd64",
+                  "pcbuild-test-platform": "-x64",
+              },
+              {
+                  "target": "windows-x86",
+                  "os": "windows-2022",
+                  "pcbuild-platform": "Win32",
+                  "pcbuild-output": "win32",
+                  "pcbuild-test-platform": "-win32",
+              },
+              {
+                  "target": "windows-arm64",
+                  "os": "windows-11-arm",
+                  "pcbuild-platform": "ARM64",
+                  "pcbuild-output": "arm64",
+                  "pcbuild-test-platform": "-arm64",
+              },
+          ]
+
+          all_targets = {item["target"] for item in posix_platforms + windows_platforms}
+          if target != "all" and target not in all_targets:
+              raise SystemExit(f"Unsupported target: {target}")
+          if target != "all":
+              posix_platforms = [
+                  item for item in posix_platforms if item["target"] == target
+              ]
+              windows_platforms = [
+                  item for item in windows_platforms if item["target"] == target
+              ]
 
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
               print(f"versions={json.dumps(versions)}", file=output)
+              print(f"posix_platforms={json.dumps(posix_platforms)}", file=output)
+              print(f"windows_platforms={json.dumps(windows_platforms)}", file=output)
+              print(f"has_posix={str(bool(posix_platforms)).lower()}", file=output)
+              print(f"has_windows={str(bool(windows_platforms)).lower()}", file=output)
 
           print("Selected CPython versions:", ", ".join(versions))
+          print(
+              "Selected platform targets:",
+              ", ".join(item["target"] for item in posix_platforms + windows_platforms),
+          )
           PY
 
       - name: Resolve package version
         id: package_version
         env:
+          PACKAGE_VERSION_INPUT: ${{ inputs.package_version || '' }}
           PACKAGE_BUMP: ${{ inputs.package_bump || 'point' }}
         run: |
           set -euo pipefail
-          package_version="$(scripts/resolve-package-version "${PACKAGE_BUMP}")"
+          if [[ -n "${PACKAGE_VERSION_INPUT}" ]]; then
+            package_version="${PACKAGE_VERSION_INPUT#v}"
+          else
+            package_version="$(scripts/resolve-package-version "${PACKAGE_BUMP}")"
+          fi
           echo "package_version=${package_version}" >> "${GITHUB_OUTPUT}"
           echo "Selected package version: ${package_version}"
 
   posix:
     name: ${{ matrix.python-version }} ${{ matrix.platform.target }}
     needs: versions
+    if: needs.versions.outputs.has_posix == 'true'
     runs-on: ${{ matrix.platform.os }}
     timeout-minutes: 360
     env:
@@ -121,15 +199,7 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ${{ fromJSON(needs.versions.outputs.versions) }}
-        platform:
-          - target: linux-x64
-            os: ubuntu-24.04
-          - target: linux-arm64
-            os: ubuntu-24.04-arm
-          - target: macos-intel
-            os: macos-15-intel
-          - target: macos-arm64
-            os: macos-15
+        platform: ${{ fromJSON(needs.versions.outputs.posix_platforms) }}
     steps:
       - name: Check out retrace-cpython
         uses: actions/checkout@v4
@@ -282,6 +352,7 @@ jobs:
   windows:
     name: ${{ matrix.python-version }} ${{ matrix.platform.target }}
     needs: versions
+    if: needs.versions.outputs.has_windows == 'true'
     runs-on: ${{ matrix.platform.os }}
     timeout-minutes: 360
     env:
@@ -292,22 +363,7 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ${{ fromJSON(needs.versions.outputs.versions) }}
-        platform:
-          - target: windows-x64
-            os: windows-2022
-            pcbuild-platform: x64
-            pcbuild-output: amd64
-            pcbuild-test-platform: -x64
-          - target: windows-x86
-            os: windows-2022
-            pcbuild-platform: Win32
-            pcbuild-output: win32
-            pcbuild-test-platform: -win32
-          - target: windows-arm64
-            os: windows-11-arm
-            pcbuild-platform: ARM64
-            pcbuild-output: arm64
-            pcbuild-test-platform: -arm64
+        platform: ${{ fromJSON(needs.versions.outputs.windows_platforms) }}
     steps:
       - name: Check out retrace-cpython
         uses: actions/checkout@v4
@@ -445,7 +501,12 @@ jobs:
 
   publish-pypi:
     name: Publish wheels to PyPI
-    if: inputs.publish_pypi == true
+    if: |
+      inputs.publish_pypi == true &&
+      always() &&
+      (needs.posix.result == 'success' || needs.posix.result == 'skipped') &&
+      (needs.windows.result == 'success' || needs.windows.result == 'skipped') &&
+      (needs.posix.result == 'success' || needs.windows.result == 'success')
     needs:
       - posix
       - windows

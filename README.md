@@ -167,6 +167,10 @@ Workflow inputs:
   manifests.
 - `python_version=manifest-latest` builds the latest listed release per series.
 - `python_version=3.12.13` builds one exact CPython release.
+- `target=all` builds every supported platform; `target=macos-arm64` builds
+  only that platform.
+- `package_version=0.4.1` pins an exact Retrace package version and overrides
+  `package_bump`.
 - `package_bump` selects the Retrace package version bump.
 - `skip_tests` skips CPython test-suite runs for faster smoke publishing.
 - `publish_pypi` opts into PyPI Trusted Publishing.
