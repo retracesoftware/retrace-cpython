@@ -48,9 +48,10 @@ def main() -> int:
         assert child["ident"] == start_ident
 
         if retrace is not None:
-            assert retrace.coordinates(start_ident)[0] == start_ident
+            assert type(retrace.coordinates(start_ident)) is tuple
             assert not hasattr(retrace, "thread_id")
             assert not hasattr(retrace, "thread_id_from_ident")
+            assert not hasattr(retrace, "U64Buffer")
 
         set_async_exc = ctypes.pythonapi.PyThreadState_SetAsyncExc
         set_async_exc.argtypes = (ctypes.c_ulong, ctypes.py_object)

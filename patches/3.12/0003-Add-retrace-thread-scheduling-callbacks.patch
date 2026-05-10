@@ -59,12 +59,12 @@ diff --git a/Modules/_threadmodule.c b/Modules/_threadmodule.c
 index 38107f0..e2ce6fa 100644
 --- a/Modules/_threadmodule.c
 +++ b/Modules/_threadmodule.c
-@@ -6,4 +6,5 @@
+@@ -5,4 +5,5 @@
+ #include "Python.h"
++#include "pycore_retrace.h"       // retrace thread helpers
+ #include "pycore_interp.h"        // _PyInterpreterState.threads.count
  #include "pycore_moduleobject.h"  // _PyModule_GetState()
  #include "pycore_pylifecycle.h"
- #include "pycore_pystate.h"       // _PyThreadState_SetCurrent()
-+#include "pycore_retrace.h"       // retrace thread helpers
- #include "pycore_sysmodule.h"     // _PySys_GetOptionalAttr()
 @@ -1225,5 +1226,6 @@ thread_PyThread_start_new_thread(PyObject *self, PyObject *fargs)
          thread_bootstate_free(boot, 1);
          return NULL;

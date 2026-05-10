@@ -34,22 +34,18 @@ _retrace.set_replay_checkpoint(thread_id, coordinates, callback)
 _retrace.set_replay_checkpoint(None)
 ```
 
-`coordinates()` returns `_retrace.U64Buffer`, an immutable tuple-like
-sequence backed by a read-only `uint64_t` buffer (`memoryview(...).format ==
-"Q"`). The first value is the requested thread's 64-bit Retrace id. The
-remaining values are visible Python frame execution coordinates,
-oldest frame first and current frame last. If `thread_id` is omitted, the
-current thread is used. When present, `thread_id` is the integer Retrace
-thread id returned by `_thread.get_ident()`; unknown thread ids raise
-`LookupError`.
-`drop` omits that many leading coordinates from the returned buffer, which lets
+`coordinates()` returns a tuple of Python `int` values. Values are visible
+Python frame execution coordinates, oldest frame first and current frame last.
+If `thread_id` is omitted, the current thread is used. When present, `thread_id`
+is the integer Retrace thread id returned by `_thread.get_ident()`; unknown
+thread ids raise `LookupError`.
+`drop` omits that many leading coordinates from the returned tuple, which lets
 callers reuse a known common prefix and fetch only the remaining suffix. Use
 `coordinates(None, drop)` to drop coordinates for the current thread.
 
-`thread_delta()` returns one `_retrace.U64Buffer` for efficient current-thread
-deltas. The first item is the number of leading coordinates still
-common with the caller's previous materialized stack, followed by the changed
-suffix to append:
+`thread_delta()` returns a tuple for efficient current-thread deltas. The first
+item is the number of leading coordinates still common with the caller's
+previous materialized stack, followed by the changed suffix to append:
 
 ```python
 delta = _retrace.thread_delta()
@@ -60,18 +56,17 @@ stack.extend(delta[1:])
 
 The native side stores no previous coordinate vector and no previous stack size.
 Each visible frame carries one remembered coordinate for the single Retrace delta
-stream, and `PyThreadState` records whether the thread prefix has been emitted
-to that stream. On a call, the module compares remembered frame coordinates with
-the current root-first path. It emits `[common_count, *new_suffix]` and updates
-the remembered coordinate only on emitted frames. On the first call, it emits the
-full current coordinate vector with `common_count == 0`.
+stream. On a call, the module compares remembered frame coordinates with the
+current root-first frame path. It emits `[common_count, *new_suffix]` and
+updates the remembered coordinate only on emitted frames. On the first call, it
+emits the full current frame coordinate vector with `common_count == 0`.
 
 `hash()` returns the current thread's 64-bit coordinate-location hash as a
 Python `int`. It uses the same visible-frame rules as `coordinates()` but avoids
 materializing the coordinate vector.
 
 `RETRACE_ROOT_SEED` can be set to any stable string before interpreter startup
-to seed the main thread coordinate. If it is unset, Retrace uses the literal
+to seed the main thread id. If it is unset, Retrace uses the literal
 seed string `retrace`.
 
 `set_thread_yield_callback()` and `set_thread_resume_callback()` install
@@ -174,7 +169,7 @@ caller is suspended at one bytecode offset.
 
 `PyThreadState` stores a 64-bit Retrace thread id and records CPython's native
 `_thread.start_new_thread()` ident for bridge lookups.
-The main thread coordinate is derived from `RETRACE_ROOT_SEED`, defaulting to
+The main thread id is derived from `RETRACE_ROOT_SEED`, defaulting to
 the literal string `retrace`. New child thread ids are mixed from the creator's
 thread id plus parent cursor, then checked against active Retrace thread ids
 and remixed on the vanishingly unlikely collision path.
@@ -266,9 +261,9 @@ _retrace.set_replay_checkpoint(thread_id, coordinates, callback)
 ```
 
 Only one checkpoint is armed per interpreter. The eval loop first checks a
-cheap armed flag, then the current folded thread id, then the current top-frame
-coordinate. It only compares the full root-first coordinate tuple, including the
-thread id prefix, after those checks match.
+cheap armed flag, then the current thread id, then the current top-frame
+coordinate. It only compares the full root-first frame coordinate tuple after
+those checks match.
 
 When the checkpoint is reached, CPython clears it before invoking
 `callback()`. The callback runs on the thread that reached the checkpoint.

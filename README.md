@@ -66,12 +66,11 @@ _retrace.set_replay_checkpoint(thread_id, coordinates, callback)
 _retrace.set_replay_checkpoint(None)
 ```
 
-`coordinates()` returns a tuple-like immutable `_retrace.U64Buffer`
-backed by a read-only `uint64_t` array. The first word is the thread's
-64-bit Retrace id. The remaining words are visible Python frame
-coordinates ordered from oldest frame to current frame. `thread_id` is the
-integer returned by `_thread.get_ident()`; unknown thread ids raise
-`LookupError`. `drop` omits leading coordinates from the returned buffer.
+`coordinates()` returns a tuple of Python `int` values. Values are visible
+Python frame coordinates ordered from oldest frame to current frame. `thread_id`
+is the integer returned by `_thread.get_ident()` and selects which thread to
+inspect; unknown thread ids raise `LookupError`. `drop` omits leading frame
+coordinates from the returned tuple.
 
 `thread_delta()` is the fast current-thread path for frequent thread scheduling
 events. It returns:
@@ -93,7 +92,7 @@ stack.extend(delta[1:])
 Python `int`.
 
 `RETRACE_ROOT_SEED` can be set to any stable string before interpreter startup
-to seed the main thread coordinate. If it is unset, Retrace uses the literal
+to seed the main thread id. If it is unset, Retrace uses the literal
 seed string `retrace`.
 
 `set_thread_yield_callback()` installs a no-argument Python callback called just
@@ -262,7 +261,6 @@ typedef struct {
     int thread_resume_pending;
     uint64_t thread_id;
     unsigned long cpython_thread_ident;
-    uint64_t thread_coordinate[_PY_RETRACE_THREAD_COORDINATE_WORDS];
     uint64_t root_coordinate;
     uint64_t last_root_coordinate;
     uint64_t root_coordinate_hash;
@@ -271,15 +269,14 @@ typedef struct {
 ```
 
 `thread_id` is the deterministic 64-bit Retrace identity exposed through
-Python's thread-ident APIs. `thread_coordinate` carries the same value as the
-coordinate prefix, and `cpython_thread_ident` records CPython's native
-`_thread.start_new_thread()` ident for bridge lookups. The main thread
-coordinate is derived from `RETRACE_ROOT_SEED`, defaulting to the literal string
-`retrace`. New child thread ids are mixed from the creator's thread id plus
-parent cursor, then checked against active Retrace thread ids and remixed on the
-vanishingly unlikely collision path. The root fields track
-C-originated frame activations and delta initialization. The callback fields
-track pending/resident callback delivery and prevent recursive callback
+Python's thread-ident APIs, and `cpython_thread_ident` records CPython's native
+`_thread.start_new_thread()` ident for bridge lookups. The main thread id is
+derived from `RETRACE_ROOT_SEED`, defaulting to the literal string `retrace`.
+New child thread ids are mixed from the creator's thread id plus parent cursor,
+then checked against active Retrace thread ids and remixed on the vanishingly
+unlikely collision path. The root fields track C-originated frame activations
+and delta initialization. The callback fields track pending/resident callback
+delivery and prevent recursive callback
 delivery.
 
 `PyInterpreterState` gets:
@@ -310,9 +307,7 @@ checkpoint fields hold one armed checkpoint, its coordinate target, and a guard
 that prevents recursive checkpoint delivery.
 
 No existing public object layout such as `PyObject`, `PyTypeObject`, or
-`PyFrameObject` is extended directly. The `_retrace` module also defines its own
-native `U64Buffer` object, but that is a Retrace-owned type rather than a
-change to core CPython types.
+`PyFrameObject` is extended directly.
 
 ### Frame Coordinates
 
@@ -337,8 +332,8 @@ to classify or strip control-plane paths.
 Each thread has an internal root activation counter on `PyThreadState`. When a
 visible frame starts without a visible parent, activation bumps that counter and
 folds it into the new frame's coordinate bias. The exported coordinate vector
-therefore stays as `[thread_id, *frames]` without a separate synthetic root
-word.
+therefore stays as the visible frame path without a separate synthetic root
+word or thread-id prefix.
 
 `frame->retrace.coordinate_depth` is a lazy cache. Coordinate snapshot code
 computes a visible frame's depth from its parent only when needed, then stores
@@ -350,7 +345,7 @@ coordinate or an unset sentinel. Normal frame initialization stores the unset
 sentinel, and linking a frame into the active chain refreshes it.
 
 `frame->retrace.coordinate_hash` stores the hash prefix inherited from the
-nearest visible parent, or from the thread id prefix.
+nearest visible parent, or from the thread id root hash.
 The current location hash is computed as
 `mix(frame->retrace.coordinate_hash, frame_coordinate)`, exposed as
 `_retrace.hash()`, so fallthrough and jumps do not have to invalidate the cached
@@ -371,7 +366,7 @@ application path.
 
 Frame coordinates intentionally localize that damage. A leaf frame can have a
 different internal coordinate without automatically changing the coordinates of
-older visible frames or the thread coordinate prefix. Parent coordinates move when
+older visible frames. Parent coordinates move when
 visible control crosses a frame boundary or when that parent executes its own
 jumps, not because arbitrary child bytecode happened to run. This gives replay a
 coordinate space that can resynchronize at non-local boundaries instead of
@@ -385,9 +380,8 @@ unrelated checkpoint, scheduling, or stack-position failures.
 ### Coordinate Deltas
 
 The native side stores no previous vector and no previous stack size. Each
-visible frame has one remembered coordinate, and the thread records whether its
-thread prefix has been emitted to the delta stream. A delta call compares the
-current root-first coordinate path with remembered frame coordinates. It returns
+visible frame has one remembered coordinate. A delta call compares the current
+root-first frame coordinate path with remembered frame coordinates. It returns
 the common prefix length plus the changed suffix, so callers replace everything
 after that prefix.
 
@@ -412,9 +406,9 @@ is already inside a callback.
 
 ### Replay Checkpoints
 
-The eval loop checks a cheap armed flag, then the folded thread id, then the
-top-frame coordinate. Only after those match does it compare the full root-first
-coordinate tuple, including the thread id prefix.
+The eval loop checks a cheap armed flag, then the thread id, then the top-frame
+coordinate. Only after those match does it compare the full root-first frame
+coordinate tuple.
 
 ## Design Rules
 

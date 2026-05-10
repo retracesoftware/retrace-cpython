@@ -102,7 +102,7 @@ def check_thread_delta(module) -> None:
 
     def sync() -> None:
         delta = module.thread_delta()
-        assert isinstance(delta, module.U64Buffer)
+        assert type(delta) is tuple
         assert len(delta) >= 1
         assert 0 <= delta[0] <= len(stack)
         apply_coordinate_delta(stack, delta)
@@ -137,7 +137,6 @@ def check_thread_ids(module) -> None:
     main_id = _thread.get_ident()
     assert is_u64(main_id)
     assert main_id == _thread.get_ident()
-    assert main_id == module.coordinates()[0]
 
     worker_ids = []
 
@@ -256,13 +255,14 @@ def check_no_disable_api(module) -> None:
     assert not hasattr(module, "thread_id")
     assert not hasattr(module, "thread_id_from_ident")
     assert not hasattr(module, "common_coordinates_prefix_length")
+    assert not hasattr(module, "U64Buffer")
 
     try:
         module.coordinates((0,))
-    except LookupError:
+    except TypeError:
         pass
     else:
-        raise AssertionError("explicit zero thread id was accepted")
+        raise AssertionError("sequence thread id was accepted")
     try:
         module.coordinates(0)
     except LookupError:
@@ -332,16 +332,10 @@ def main() -> int:
         assert thread_id == _thread.get_ident()
         coordinates = module.coordinates()
         coordinates_by_id = module.coordinates(thread_id)
-        coordinates_by_tuple_id = module.coordinates((thread_id,))
-        view = memoryview(coordinates)
+        assert type(coordinates) is tuple
         assert len(coordinates) >= 1
-        assert coordinates[0] == thread_id
-        assert view.format == "Q"
-        assert view.readonly
         assert tuple(coordinates[0:]) == tuple(coordinates)
-        assert coordinates == tuple(coordinates)
         assert len(coordinates_by_id) == len(coordinates)
-        assert len(coordinates_by_tuple_id) == len(coordinates)
         dropped = module.coordinates(None, 1)
         dropped_by_id = module.coordinates(thread_id, 1)
         dropped_all = module.coordinates(None, len(coordinates) + 1)
@@ -386,8 +380,6 @@ def main() -> int:
         print("_retrace_module=builtin")
         print(f"coordinates_type={type(coordinates).__name__}")
         print(f"coordinates_len={len(coordinates)}")
-        print(f"coordinates_format={view.format}")
-        print(f"coordinates_readonly={view.readonly}")
         print("thread_delta=available")
         print("hash=available")
         print("ctypes_async_exc_bridge=available")

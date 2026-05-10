@@ -7,7 +7,6 @@
 #  include "internal/pycore_runtime.h"
 #endif
 
-#include <stddef.h>
 #include <stdint.h>
 
 #if PY_VERSION_HEX < 0x030C0000
@@ -20,55 +19,8 @@
 #  define RETRACE_HEAD_UNLOCK(runtime) HEAD_UNLOCK(runtime)
 #endif
 
-typedef struct {
-    PyObject_VAR_HEAD
-    uint64_t ob_item[1];
-} RetraceU64BufferObject;
-
-static PyTypeObject RetraceU64Buffer_Type;
-
-static RetraceU64BufferObject *
-retrace_u64buffer_new(Py_ssize_t size)
-{
-    return PyObject_NewVar(RetraceU64BufferObject, &RetraceU64Buffer_Type, size);
-}
-
-static void
-retrace_u64buffer_dealloc(RetraceU64BufferObject *self)
-{
-    PyObject_Free(self);
-}
-
-static Py_ssize_t
-retrace_u64buffer_len(RetraceU64BufferObject *self)
-{
-    return Py_SIZE(self);
-}
-
-static PyObject *
-retrace_u64buffer_item(RetraceU64BufferObject *self, Py_ssize_t i)
-{
-    if (i < 0 || i >= Py_SIZE(self)) {
-        PyErr_SetString(PyExc_IndexError, "U64Buffer index out of range");
-        return NULL;
-    }
-    return PyLong_FromUnsignedLongLong((unsigned long long)self->ob_item[i]);
-}
-
 static int
-retrace_u64buffer_value(PyObject *value, uint64_t *out)
-{
-    unsigned long long converted = PyLong_AsUnsignedLongLong(value);
-    if (converted == (unsigned long long)-1 && PyErr_Occurred()) {
-        PyErr_Clear();
-        return 0;
-    }
-    *out = (uint64_t)converted;
-    return 1;
-}
-
-static int
-retrace_u64buffer_value_required(PyObject *value, uint64_t *out)
+retrace_u64_from_object(PyObject *value, uint64_t *out)
 {
     unsigned long long converted = PyLong_AsUnsignedLongLong(value);
     if (converted == (unsigned long long)-1 && PyErr_Occurred()) {
@@ -78,8 +30,27 @@ retrace_u64buffer_value_required(PyObject *value, uint64_t *out)
     return 0;
 }
 
-static RetraceU64BufferObject *
-retrace_u64buffer_from_sequence(PyObject *sequence, const char *message)
+static PyObject *
+retrace_tuple_from_u64s(const uint64_t *values, Py_ssize_t size)
+{
+    PyObject *tuple = PyTuple_New(size);
+    if (tuple == NULL) {
+        return NULL;
+    }
+    for (Py_ssize_t index = 0; index < size; index++) {
+        PyObject *item = PyLong_FromUnsignedLongLong(
+            (unsigned long long)values[index]);
+        if (item == NULL) {
+            Py_DECREF(tuple);
+            return NULL;
+        }
+        PyTuple_SET_ITEM(tuple, index, item);
+    }
+    return tuple;
+}
+
+static PyObject *
+retrace_tuple_from_sequence(PyObject *sequence, const char *message)
 {
     PyObject *fast = PySequence_Fast(sequence, message);
     if (fast == NULL) {
@@ -87,282 +58,33 @@ retrace_u64buffer_from_sequence(PyObject *sequence, const char *message)
     }
 
     Py_ssize_t size = PySequence_Fast_GET_SIZE(fast);
-    RetraceU64BufferObject *buffer = retrace_u64buffer_new(size);
-    if (buffer == NULL) {
+    PyObject *tuple = PyTuple_New(size);
+    if (tuple == NULL) {
         Py_DECREF(fast);
         return NULL;
     }
 
     PyObject **items = PySequence_Fast_ITEMS(fast);
     for (Py_ssize_t index = 0; index < size; index++) {
-        int converted = retrace_u64buffer_value_required(
-            items[index], &buffer->ob_item[index]);
-        if (converted < 0) {
-            Py_DECREF(buffer);
+        uint64_t value;
+        if (retrace_u64_from_object(items[index], &value) < 0) {
+            Py_DECREF(tuple);
             Py_DECREF(fast);
             return NULL;
         }
+        PyObject *item = PyLong_FromUnsignedLongLong(
+            (unsigned long long)value);
+        if (item == NULL) {
+            Py_DECREF(tuple);
+            Py_DECREF(fast);
+            return NULL;
+        }
+        PyTuple_SET_ITEM(tuple, index, item);
     }
 
     Py_DECREF(fast);
-    return buffer;
+    return tuple;
 }
-
-static int
-retrace_u64buffer_contains(RetraceU64BufferObject *self, PyObject *value)
-{
-    uint64_t needle;
-    if (!retrace_u64buffer_value(value, &needle)) {
-        return 0;
-    }
-
-    for (Py_ssize_t i = 0; i < Py_SIZE(self); i++) {
-        if (self->ob_item[i] == needle) {
-            return 1;
-        }
-    }
-    return 0;
-}
-
-static PyObject *
-retrace_u64buffer_slice(RetraceU64BufferObject *self, Py_ssize_t start,
-                        Py_ssize_t step, Py_ssize_t slicelen)
-{
-    RetraceU64BufferObject *result = retrace_u64buffer_new(slicelen);
-    if (result == NULL) {
-        return NULL;
-    }
-
-    for (Py_ssize_t i = 0, source = start; i < slicelen; i++, source += step) {
-        result->ob_item[i] = self->ob_item[source];
-    }
-    return (PyObject *)result;
-}
-
-static PyObject *
-retrace_u64buffer_subscript(RetraceU64BufferObject *self, PyObject *item)
-{
-    if (PyIndex_Check(item)) {
-        Py_ssize_t i = PyNumber_AsSsize_t(item, PyExc_IndexError);
-        if (i == -1 && PyErr_Occurred()) {
-            return NULL;
-        }
-        if (i < 0) {
-            i += Py_SIZE(self);
-        }
-        return retrace_u64buffer_item(self, i);
-    }
-
-    if (PySlice_Check(item)) {
-        Py_ssize_t start, stop, step;
-        if (PySlice_Unpack(item, &start, &stop, &step) < 0) {
-            return NULL;
-        }
-        Py_ssize_t slicelen = PySlice_AdjustIndices(Py_SIZE(self), &start,
-                                                    &stop, step);
-        return retrace_u64buffer_slice(self, start, step, slicelen);
-    }
-
-    PyErr_Format(PyExc_TypeError,
-                 "U64Buffer indices must be integers or slices, not %.200s",
-                 Py_TYPE(item)->tp_name);
-    return NULL;
-}
-
-static Py_hash_t
-retrace_u64buffer_hash(RetraceU64BufferObject *self)
-{
-    PyObject *tuple = PySequence_Tuple((PyObject *)self);
-    if (tuple == NULL) {
-        return -1;
-    }
-    Py_hash_t hash = PyObject_Hash(tuple);
-    Py_DECREF(tuple);
-    return hash;
-}
-
-static PyObject *
-retrace_u64buffer_richcompare(PyObject *self, PyObject *other, int op)
-{
-    PyObject *self_tuple = PySequence_Tuple(self);
-    if (self_tuple == NULL) {
-        return NULL;
-    }
-
-    PyObject *other_tuple;
-    if (PyObject_TypeCheck(other, &RetraceU64Buffer_Type)) {
-        other_tuple = PySequence_Tuple(other);
-        if (other_tuple == NULL) {
-            Py_DECREF(self_tuple);
-            return NULL;
-        }
-    }
-    else if (PyTuple_Check(other)) {
-        other_tuple = Py_NewRef(other);
-    }
-    else {
-        Py_DECREF(self_tuple);
-        if (op == Py_EQ) {
-            Py_RETURN_FALSE;
-        }
-        if (op == Py_NE) {
-            Py_RETURN_TRUE;
-        }
-        Py_RETURN_NOTIMPLEMENTED;
-    }
-
-    PyObject *result = PyObject_RichCompare(self_tuple, other_tuple, op);
-    Py_DECREF(self_tuple);
-    Py_DECREF(other_tuple);
-    return result;
-}
-
-static PyObject *
-retrace_u64buffer_count(RetraceU64BufferObject *self, PyObject *value)
-{
-    uint64_t needle;
-    Py_ssize_t count = 0;
-    if (retrace_u64buffer_value(value, &needle)) {
-        for (Py_ssize_t i = 0; i < Py_SIZE(self); i++) {
-            if (self->ob_item[i] == needle) {
-                count++;
-            }
-        }
-    }
-    return PyLong_FromSsize_t(count);
-}
-
-static PyObject *
-retrace_u64buffer_index(RetraceU64BufferObject *self, PyObject *args)
-{
-    PyObject *value;
-    Py_ssize_t start = 0;
-    Py_ssize_t stop = Py_SIZE(self);
-    if (!PyArg_ParseTuple(args, "O|nn:index", &value, &start, &stop)) {
-        return NULL;
-    }
-
-    Py_ssize_t size = Py_SIZE(self);
-    if (start < 0) {
-        start += size;
-        if (start < 0) {
-            start = 0;
-        }
-    }
-    if (stop < 0) {
-        stop += size;
-        if (stop < 0) {
-            stop = 0;
-        }
-    }
-    if (stop > size) {
-        stop = size;
-    }
-
-    uint64_t needle;
-    if (retrace_u64buffer_value(value, &needle)) {
-        for (Py_ssize_t i = start; i < stop; i++) {
-            if (self->ob_item[i] == needle) {
-                return PyLong_FromSsize_t(i);
-            }
-        }
-    }
-
-    PyErr_SetString(PyExc_ValueError, "U64Buffer.index(x): x not in U64Buffer");
-    return NULL;
-}
-
-static PyObject *
-retrace_u64buffer_repr(RetraceU64BufferObject *self)
-{
-    PyObject *tuple = PySequence_Tuple((PyObject *)self);
-    if (tuple == NULL) {
-        return NULL;
-    }
-    PyObject *repr = PyUnicode_FromFormat("_retrace.U64Buffer(%R)", tuple);
-    Py_DECREF(tuple);
-    return repr;
-}
-
-static int
-retrace_u64buffer_getbuffer(RetraceU64BufferObject *self, Py_buffer *view,
-                            int flags)
-{
-    if (view == NULL) {
-        PyErr_SetString(PyExc_BufferError,
-                        "U64Buffer getbuffer view argument is NULL");
-        return -1;
-    }
-
-    view->buf = self->ob_item;
-    view->obj = Py_NewRef(self);
-    view->len = Py_SIZE(self) * (Py_ssize_t)sizeof(uint64_t);
-    view->readonly = 1;
-    view->ndim = 1;
-    view->itemsize = (Py_ssize_t)sizeof(uint64_t);
-    view->suboffsets = NULL;
-    view->shape = NULL;
-    if ((flags & PyBUF_ND) == PyBUF_ND) {
-        view->shape = &((PyVarObject *)self)->ob_size;
-    }
-    view->strides = NULL;
-    if ((flags & PyBUF_STRIDES) == PyBUF_STRIDES) {
-        view->strides = &view->itemsize;
-    }
-    view->format = NULL;
-    if ((flags & PyBUF_FORMAT) == PyBUF_FORMAT) {
-        view->format = "Q";
-    }
-    view->internal = NULL;
-    return 0;
-}
-
-static void
-retrace_u64buffer_releasebuffer(RetraceU64BufferObject *self, Py_buffer *view)
-{
-}
-
-static PySequenceMethods retrace_u64buffer_as_sequence = {
-    .sq_length = (lenfunc)retrace_u64buffer_len,
-    .sq_item = (ssizeargfunc)retrace_u64buffer_item,
-    .sq_contains = (objobjproc)retrace_u64buffer_contains,
-};
-
-static PyMappingMethods retrace_u64buffer_as_mapping = {
-    .mp_length = (lenfunc)retrace_u64buffer_len,
-    .mp_subscript = (binaryfunc)retrace_u64buffer_subscript,
-};
-
-static PyBufferProcs retrace_u64buffer_as_buffer = {
-    .bf_getbuffer = (getbufferproc)retrace_u64buffer_getbuffer,
-    .bf_releasebuffer = (releasebufferproc)retrace_u64buffer_releasebuffer,
-};
-
-static PyMethodDef retrace_u64buffer_methods[] = {
-    {"count", (PyCFunction)retrace_u64buffer_count, METH_O,
-     PyDoc_STR("Return number of occurrences of value.")},
-    {"index", (PyCFunction)retrace_u64buffer_index, METH_VARARGS,
-     PyDoc_STR("Return first index of value.")},
-    {NULL, NULL, 0, NULL},
-};
-
-static PyTypeObject RetraceU64Buffer_Type = {
-    PyVarObject_HEAD_INIT(NULL, 0)
-    .tp_name = "_retrace.U64Buffer",
-    .tp_basicsize = offsetof(RetraceU64BufferObject, ob_item),
-    .tp_itemsize = sizeof(uint64_t),
-    .tp_dealloc = (destructor)retrace_u64buffer_dealloc,
-    .tp_repr = (reprfunc)retrace_u64buffer_repr,
-    .tp_hash = (hashfunc)retrace_u64buffer_hash,
-    .tp_richcompare = retrace_u64buffer_richcompare,
-    .tp_as_sequence = &retrace_u64buffer_as_sequence,
-    .tp_as_mapping = &retrace_u64buffer_as_mapping,
-    .tp_as_buffer = &retrace_u64buffer_as_buffer,
-    .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_IMMUTABLETYPE |
-                Py_TPFLAGS_DISALLOW_INSTANTIATION,
-    .tp_methods = retrace_u64buffer_methods,
-    .tp_iter = PySeqIter_New,
-};
 
 static int
 retrace_frame_is_visible(_PyInterpreterFrame *frame)
@@ -409,96 +131,19 @@ retrace_thread_state_frame(PyThreadState *target_tstate)
 }
 
 static int
-retrace_thread_id_from_object(
-    PyObject *value,
-    uint64_t thread_coordinate[_PY_RETRACE_THREAD_COORDINATE_WORDS],
-    uint64_t *folded_thread_id)
+retrace_thread_id_from_object(PyObject *value, uint64_t *thread_id)
 {
-    unsigned long long int_value = PyLong_AsUnsignedLongLong(value);
-    if (!(int_value == (unsigned long long)-1 && PyErr_Occurred())) {
-        *folded_thread_id = (uint64_t)int_value;
-        thread_coordinate[0] = *folded_thread_id;
-        return 0;
-    }
-    PyErr_Clear();
-
-    if (PyObject_TypeCheck(value, &RetraceU64Buffer_Type)) {
-        RetraceU64BufferObject *buffer = (RetraceU64BufferObject *)value;
-        if (Py_SIZE(buffer) != _PY_RETRACE_THREAD_COORDINATE_WORDS) {
-            PyErr_SetString(PyExc_ValueError,
-                            "thread id must contain one word");
-            return -1;
-        }
-        for (Py_ssize_t index = 0;
-             index < _PY_RETRACE_THREAD_COORDINATE_WORDS;
-             index++)
-        {
-            thread_coordinate[index] = buffer->ob_item[index];
-        }
-        *folded_thread_id = _PyRetrace_FoldThreadCoordinate(thread_coordinate);
-        return 0;
-    }
-
-    PyObject *fast = PySequence_Fast(value, "thread id must be a sequence");
-    if (fast == NULL) {
-        return -1;
-    }
-    if (PySequence_Fast_GET_SIZE(fast) != _PY_RETRACE_THREAD_COORDINATE_WORDS) {
-        Py_DECREF(fast);
-        PyErr_SetString(PyExc_ValueError,
-                        "thread id must contain one word");
-        return -1;
-    }
-
-    PyObject **items = PySequence_Fast_ITEMS(fast);
-    for (Py_ssize_t index = 0;
-         index < _PY_RETRACE_THREAD_COORDINATE_WORDS;
-         index++)
-    {
-        if (retrace_u64buffer_value_required(
-                items[index], &thread_coordinate[index]) < 0)
-        {
-            Py_DECREF(fast);
-            return -1;
-        }
-    }
-    Py_DECREF(fast);
-
-    *folded_thread_id = _PyRetrace_FoldThreadCoordinate(thread_coordinate);
-    return 0;
-}
-
-static int
-retrace_thread_coordinate_matches(
-    PyThreadState *tstate,
-    const uint64_t thread_coordinate[_PY_RETRACE_THREAD_COORDINATE_WORDS])
-{
-    for (Py_ssize_t index = 0;
-         index < _PY_RETRACE_THREAD_COORDINATE_WORDS;
-         index++)
-    {
-        if (tstate->retrace.thread_coordinate[index] !=
-            thread_coordinate[index])
-        {
-            return 0;
-        }
-    }
-    return 1;
+    return retrace_u64_from_object(value, thread_id);
 }
 
 static PyThreadState *
-retrace_find_thread_state(
-    PyInterpreterState *interp,
-    const uint64_t thread_coordinate[_PY_RETRACE_THREAD_COORDINATE_WORDS],
-    uint64_t folded_thread_id)
+retrace_find_thread_state(PyInterpreterState *interp, uint64_t thread_id)
 {
-    if (folded_thread_id == 0) {
+    if (thread_id == 0) {
         return NULL;
     }
     for (PyThreadState *scan = interp->threads.head; scan != NULL; scan = scan->next) {
-        if (scan->retrace.thread_id == folded_thread_id &&
-            retrace_thread_coordinate_matches(scan, thread_coordinate))
-        {
+        if (scan->retrace.thread_id == thread_id) {
             return scan;
         }
     }
@@ -512,36 +157,21 @@ retrace_coordinate_count(_PyInterpreterFrame *frame)
         frame = frame->previous;
     }
     if (frame == NULL) {
-        return _PY_RETRACE_THREAD_COORDINATE_WORDS;
+        return 0;
     }
-    return _PY_RETRACE_THREAD_COORDINATE_WORDS +
-           retrace_frame_depth(frame) + 1;
+    return retrace_frame_depth(frame) + 1;
 }
 
 static void
-retrace_fill_coordinates(RetraceU64BufferObject *buffer,
-                         PyThreadState *tstate,
+retrace_fill_coordinates(uint64_t *coordinates,
                          _PyInterpreterFrame *frame,
                          Py_ssize_t drop)
 {
-    for (Py_ssize_t position = 0;
-         position < _PY_RETRACE_THREAD_COORDINATE_WORDS;
-         position++)
-    {
-        if (position >= drop) {
-            buffer->ob_item[position - drop] =
-                tstate->retrace.thread_coordinate[position];
-        }
-    }
-
     for (_PyInterpreterFrame *scan = frame; scan != NULL; scan = scan->previous) {
         if (retrace_frame_is_visible(scan)) {
-            Py_ssize_t position =
-                _PY_RETRACE_THREAD_COORDINATE_WORDS +
-                retrace_frame_depth(scan);
+            Py_ssize_t position = retrace_frame_depth(scan);
             if (position >= drop) {
-                buffer->ob_item[position - drop] =
-                    retrace_frame_coordinate(scan);
+                coordinates[position - drop] = retrace_frame_coordinate(scan);
             }
         }
     }
@@ -567,9 +197,7 @@ retrace_thread_delta(PyObject *module, PyObject *Py_UNUSED(ignored))
         }
 
         uint64_t coordinate = retrace_frame_coordinate(scan);
-        Py_ssize_t position =
-            _PY_RETRACE_THREAD_COORDINATE_WORDS +
-            retrace_frame_depth(scan);
+        Py_ssize_t position = retrace_frame_depth(scan);
         if (scan->retrace.last_coordinate != coordinate &&
             position < common_count)
         {
@@ -577,20 +205,13 @@ retrace_thread_delta(PyObject *module, PyObject *Py_UNUSED(ignored))
         }
     }
 
-    Py_ssize_t new_count = current_size - common_count;
-    RetraceU64BufferObject *delta = retrace_u64buffer_new(1 + new_count);
+    Py_ssize_t size = 1 + current_size - common_count;
+    uint64_t *delta = PyMem_New(uint64_t, size);
     if (delta == NULL) {
+        PyErr_NoMemory();
         return NULL;
     }
-    delta->ob_item[0] = (uint64_t)common_count;
-
-    for (Py_ssize_t position = common_count;
-         position < _PY_RETRACE_THREAD_COORDINATE_WORDS;
-         position++)
-    {
-        delta->ob_item[1 + position - common_count] =
-            tstate->retrace.thread_coordinate[position];
-    }
+    delta[0] = (uint64_t)common_count;
 
     for (_PyInterpreterFrame *scan = frame; scan != NULL; scan = scan->previous)
     {
@@ -599,17 +220,17 @@ retrace_thread_delta(PyObject *module, PyObject *Py_UNUSED(ignored))
         }
 
         uint64_t coordinate = retrace_frame_coordinate(scan);
-        Py_ssize_t position =
-            _PY_RETRACE_THREAD_COORDINATE_WORDS +
-            retrace_frame_depth(scan);
+        Py_ssize_t position = retrace_frame_depth(scan);
         if (position >= common_count) {
             scan->retrace.last_coordinate = coordinate;
-            delta->ob_item[1 + position - common_count] = coordinate;
+            delta[1 + position - common_count] = coordinate;
         }
     }
     tstate->retrace.last_root_coordinate = tstate->retrace.root_coordinate;
 
-    return (PyObject *)delta;
+    PyObject *result = retrace_tuple_from_u64s(delta, size);
+    PyMem_Free(delta);
+    return result;
 }
 
 static void
@@ -626,34 +247,30 @@ static int
 retrace_replay_checkpoint_matches(PyThreadState *tstate,
                                   _PyInterpreterFrame *frame)
 {
-    RetraceU64BufferObject *target =
-        (RetraceU64BufferObject *)tstate->interp->retrace.replay_checkpoint_coordinates;
+    PyObject *target = tstate->interp->retrace.replay_checkpoint_coordinates;
     if (target == NULL) {
         return 0;
     }
 
-    Py_ssize_t target_size = Py_SIZE(target);
+    Py_ssize_t target_size = PyTuple_GET_SIZE(target);
     Py_ssize_t current_size = retrace_coordinate_count(frame);
     if (target_size != current_size) {
         return 0;
-    }
-    for (Py_ssize_t index = 0;
-         index < _PY_RETRACE_THREAD_COORDINATE_WORDS;
-         index++)
-    {
-        if (target->ob_item[index] != tstate->retrace.thread_coordinate[index]) {
-            return 0;
-        }
     }
 
     for (_PyInterpreterFrame *scan = frame; scan != NULL; scan = scan->previous) {
         if (!retrace_frame_is_visible(scan)) {
             continue;
         }
-        Py_ssize_t position =
-            _PY_RETRACE_THREAD_COORDINATE_WORDS +
-            retrace_frame_depth(scan);
-        if (target->ob_item[position] != retrace_frame_coordinate(scan)) {
+        Py_ssize_t position = retrace_frame_depth(scan);
+        uint64_t target_coordinate;
+        if (retrace_u64_from_object(
+                PyTuple_GET_ITEM(target, position), &target_coordinate) < 0)
+        {
+            PyErr_Clear();
+            return 0;
+        }
+        if (target_coordinate != retrace_frame_coordinate(scan)) {
             return 0;
         }
     }
@@ -666,9 +283,8 @@ PyDoc_STRVAR(retrace_coordinates_doc,
 "\n"
 "Return a thread's visible Python frame coordinates.\n"
 "\n"
-"The first word is the thread id, followed by visible Python\n"
-"frame coordinates from oldest frame to current frame. drop omits that many\n"
-"leading coordinates from the returned sequence.");
+"Coordinates are ordered from oldest visible Python frame to current frame.\n"
+"drop omits that many leading coordinates from the returned sequence.");
 
 PyDoc_STRVAR(retrace_thread_delta_doc,
 "thread_delta($module, /)\n"
@@ -696,8 +312,7 @@ retrace_coordinates(PyObject *module, PyObject *args)
 {
     PyThreadState *current_tstate = _PyThreadState_GET();
     PyObject *thread_id_arg = Py_None;
-    uint64_t thread_coordinate[_PY_RETRACE_THREAD_COORDINATE_WORDS] = {0};
-    uint64_t folded_thread_id = 0;
+    uint64_t thread_id = 0;
     Py_ssize_t drop = 0;
     int explicit_thread_id = 0;
 
@@ -712,9 +327,7 @@ retrace_coordinates(PyObject *module, PyObject *args)
         return NULL;
     }
     if (thread_id_arg != Py_None) {
-        if (retrace_thread_id_from_object(
-                thread_id_arg, thread_coordinate, &folded_thread_id) < 0)
-        {
+        if (retrace_thread_id_from_object(thread_id_arg, &thread_id) < 0) {
             return NULL;
         }
         explicit_thread_id = 1;
@@ -722,12 +335,11 @@ retrace_coordinates(PyObject *module, PyObject *args)
 
     _PyRuntimeState *runtime = &_PyRuntime;
     PyInterpreterState *interp = current_tstate->interp;
-    RetraceU64BufferObject *buffer = NULL;
+    uint64_t *coordinates = NULL;
 
     RETRACE_HEAD_LOCK(runtime);
     PyThreadState *target_tstate = explicit_thread_id ?
-        retrace_find_thread_state(
-            interp, thread_coordinate, folded_thread_id) : current_tstate;
+        retrace_find_thread_state(interp, thread_id) : current_tstate;
     if (target_tstate == NULL) {
         RETRACE_HEAD_UNLOCK(runtime);
         PyErr_SetString(PyExc_LookupError, "unknown thread id");
@@ -740,38 +352,44 @@ retrace_coordinates(PyObject *module, PyObject *args)
     Py_ssize_t size = coordinate_count > drop ? coordinate_count - drop : 0;
     RETRACE_HEAD_UNLOCK(runtime);
 
-    buffer = retrace_u64buffer_new(size);
-    if (buffer == NULL) {
-        return NULL;
+    if (size != 0) {
+        coordinates = PyMem_New(uint64_t, size);
+        if (coordinates == NULL) {
+            PyErr_NoMemory();
+            return NULL;
+        }
     }
 
     RETRACE_HEAD_LOCK(runtime);
     target_tstate = explicit_thread_id ?
-        retrace_find_thread_state(
-            interp, thread_coordinate, folded_thread_id) : current_tstate;
+        retrace_find_thread_state(interp, thread_id) : current_tstate;
     if (target_tstate == NULL) {
         RETRACE_HEAD_UNLOCK(runtime);
-        Py_DECREF(buffer);
+        PyMem_Free(coordinates);
         PyErr_SetString(PyExc_LookupError, "unknown thread id");
         return NULL;
     }
     frame = retrace_thread_state_frame(target_tstate);
     if (retrace_coordinate_count(frame) != coordinate_count) {
         RETRACE_HEAD_UNLOCK(runtime);
-        Py_DECREF(buffer);
+        PyMem_Free(coordinates);
         PyErr_SetString(PyExc_RuntimeError, "thread frame stack changed");
         return NULL;
     }
     if (target_tstate->retrace.root_coordinate != root_coordinate) {
         RETRACE_HEAD_UNLOCK(runtime);
-        Py_DECREF(buffer);
+        PyMem_Free(coordinates);
         PyErr_SetString(PyExc_RuntimeError, "thread root coordinate changed");
         return NULL;
     }
-    retrace_fill_coordinates(buffer, target_tstate, frame, drop);
+    if (size != 0) {
+        retrace_fill_coordinates(coordinates, frame, drop);
+    }
     RETRACE_HEAD_UNLOCK(runtime);
 
-    return (PyObject *)buffer;
+    PyObject *result = retrace_tuple_from_u64s(coordinates, size);
+    PyMem_Free(coordinates);
+    return result;
 }
 
 static int
@@ -898,14 +516,11 @@ retrace_set_replay_checkpoint(PyObject *module, PyObject *args)
         return NULL;
     }
 
-    uint64_t thread_coordinate[_PY_RETRACE_THREAD_COORDINATE_WORDS] = {0};
-    uint64_t folded_thread_id = 0;
-    if (retrace_thread_id_from_object(
-            PyTuple_GET_ITEM(args, 0), thread_coordinate, &folded_thread_id) < 0)
-    {
+    uint64_t thread_id = 0;
+    if (retrace_thread_id_from_object(PyTuple_GET_ITEM(args, 0), &thread_id) < 0) {
         return NULL;
     }
-    if (folded_thread_id == 0) {
+    if (thread_id == 0) {
         PyErr_SetString(PyExc_ValueError,
                         "replay checkpoint thread id must be non-zero");
         return NULL;
@@ -918,14 +533,13 @@ retrace_set_replay_checkpoint(PyObject *module, PyObject *args)
         return NULL;
     }
 
-    RetraceU64BufferObject *coordinates =
-        retrace_u64buffer_from_sequence(
-            PyTuple_GET_ITEM(args, 1),
-            "checkpoint coordinates must be a sequence");
+    PyObject *coordinates =
+        retrace_tuple_from_sequence(PyTuple_GET_ITEM(args, 1),
+                                    "checkpoint coordinates must be a sequence");
     if (coordinates == NULL) {
         return NULL;
     }
-    if (Py_SIZE(coordinates) <= _PY_RETRACE_THREAD_COORDINATE_WORDS) {
+    if (PyTuple_GET_SIZE(coordinates) <= 0) {
         Py_DECREF(coordinates);
         PyErr_SetString(PyExc_ValueError,
                         "checkpoint coordinates must include a frame");
@@ -934,9 +548,15 @@ retrace_set_replay_checkpoint(PyObject *module, PyObject *args)
 
     PyObject *callback_ref = Py_NewRef(callback);
     retrace_clear_replay_checkpoint(interp);
-    interp->retrace.replay_checkpoint_thread_id = folded_thread_id;
-    interp->retrace.replay_checkpoint_top =
-        coordinates->ob_item[Py_SIZE(coordinates) - 1];
+    interp->retrace.replay_checkpoint_thread_id = thread_id;
+    if (retrace_u64_from_object(
+            PyTuple_GET_ITEM(coordinates, PyTuple_GET_SIZE(coordinates) - 1),
+            &interp->retrace.replay_checkpoint_top) < 0)
+    {
+        Py_DECREF(coordinates);
+        Py_DECREF(callback_ref);
+        return NULL;
+    }
     interp->retrace.replay_checkpoint_coordinates = (PyObject *)coordinates;
     interp->retrace.replay_checkpoint_callback = callback_ref;
     interp->retrace.replay_checkpoint_armed = 1;
@@ -1107,9 +727,6 @@ static PyMethodDef retrace_methods[] = {
 static int
 retrace_exec(PyObject *module)
 {
-    if (PyModule_AddType(module, &RetraceU64Buffer_Type) < 0) {
-        return -1;
-    }
     return 0;
 }
 

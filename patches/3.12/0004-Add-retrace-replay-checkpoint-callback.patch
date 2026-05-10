@@ -13,14 +13,12 @@ diff --git a/Python/ceval.c b/Python/ceval.c
 index 3ed202c..97cfe6b 100644
 --- a/Python/ceval.c
 +++ b/Python/ceval.c
-@@ -18,6 +18,7 @@
- #include "pycore_pymem.h"         // _PyMem_IsPtrFreed()
- #include "pycore_pystate.h"       // _PyInterpreterState_GET()
- #include "pycore_range.h"         // _PyRangeIterObject
+@@ -5,4 +5,5 @@
+ #include "Python.h"
 +#include "pycore_retrace.h"       // _PyRetrace_CheckReplayCheckpoint()
- #include "pycore_sliceobject.h"   // _PyBuildSlice_ConsumeRefs
- #include "pycore_sysmodule.h"     // _PySys_Audit()
- #include "pycore_traceback.h"     // _PyTraceBack_FromFrame
+ #include "pycore_abstract.h"      // _PyIndex_Check()
+ #include "pycore_call.h"          // _PyObject_FastCallDictTstate()
+ #include "pycore_ceval.h"         // _PyEval_SignalAsyncExc()
 diff --git a/Python/ceval_macros.h b/Python/ceval_macros.h
 index 7987816..a67a697 100644
 --- a/Python/ceval_macros.h

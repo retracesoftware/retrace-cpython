@@ -38,12 +38,6 @@ _PyRetrace_InitialRootCoordinateHash(void)
 }
 
 static inline uint64_t
-_PyRetrace_FoldThreadCoordinate(const uint64_t thread_coordinate[_PY_RETRACE_THREAD_COORDINATE_WORDS])
-{
-    return thread_coordinate[0];
-}
-
-static inline uint64_t
 _PyRetrace_NormalizeThreadId(uint64_t thread_id)
 {
     thread_id = _PyRetrace_NormalizeCoordinateHash(thread_id);
@@ -344,12 +338,6 @@ _PyRetrace_InitializeThreadState(
     }
     tstate->retrace.thread_id = 0;
     tstate->retrace.cpython_thread_ident = 0;
-    for (Py_ssize_t index = 0;
-         index < _PY_RETRACE_THREAD_COORDINATE_WORDS;
-         index++)
-    {
-        tstate->retrace.thread_coordinate[index] = 0;
-    }
     tstate->retrace.root_coordinate = 0;
     tstate->retrace.last_root_coordinate = (uint64_t)-1;
     tstate->retrace.root_coordinate_hash = _PyRetrace_InitialRootCoordinateHash();
@@ -376,7 +364,6 @@ _PyRetrace_SeedThreadState(PyThreadState *parent, PyThreadState *child)
     child->retrace.thread_id =
         _PyRetrace_UniqueThreadId(
             child->interp, child, _PyRetrace_ThreadIdSeed(parent));
-    child->retrace.thread_coordinate[0] = child->retrace.thread_id;
     child->retrace.root_coordinate_hash = child->retrace.thread_id;
 }
 

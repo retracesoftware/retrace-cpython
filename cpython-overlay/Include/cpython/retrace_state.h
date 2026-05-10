@@ -6,7 +6,6 @@
 #define _PyFrame_RETRACE_LAST_COORDINATE_UNSET UINT64_MAX
 #define _PyFrame_RETRACE_COORDINATE_DEPTH_UNSET UINT32_MAX
 #define _PyFrame_RETRACE_COORDINATE_HASH_UNSET UINT64_MAX
-#define _PY_RETRACE_THREAD_COORDINATE_WORDS 1
 
 typedef struct _object PyObject;
 typedef struct _ts PyThreadState;
@@ -24,7 +23,6 @@ typedef struct {
     int thread_resume_pending;
     uint64_t thread_id;
     unsigned long cpython_thread_ident;
-    uint64_t thread_coordinate[_PY_RETRACE_THREAD_COORDINATE_WORDS];
     uint64_t root_coordinate;
     uint64_t last_root_coordinate;
     uint64_t root_coordinate_hash;
