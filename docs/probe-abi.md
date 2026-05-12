@@ -30,6 +30,7 @@ retrace.thread_delta()
 retrace.hash()
 retrace.exclude(callable)
 retrace.include(callable)
+retrace.with_new_coordinates(callable, *args, **kwargs)
 retrace.callbacks.thread_start = callback_or_none
 retrace.callbacks.thread_yield = callback_or_none
 retrace.callbacks.thread_resume = callback_or_none
@@ -37,7 +38,7 @@ retrace.call_at(
     thread_id, coordinates, callback, overshoot_callback=None
 )
 retrace.call_at(None)
-retrace.ThreadHandoff()
+retrace.ThreadHandoff(timeout=None)
 ```
 
 The low-level builtin exposes native primitives under `_retrace`, including
@@ -52,6 +53,11 @@ thread ids raise `LookupError`.
 `drop` omits that many leading coordinate words from the returned tuple, which
 lets callers reuse a known common prefix and fetch only the remaining suffix.
 Use `coordinates(None, drop)` to drop coordinates for the current thread.
+
+`with_new_coordinates(callable, *args, **kwargs)` calls `callable` as the root
+of a fresh coordinate space. Outer frames are hidden, the first visible frame
+starts with root ordinal `0`, and the parent thread's root ordinal and delta
+state are restored after the call returns or raises.
 
 `thread_delta()` returns a tuple for efficient current-thread deltas. The first
 item is the number of leading coordinates still common with the caller's
@@ -115,12 +121,14 @@ reached or passed the target. Calling a no-argument callable wrapped with
 then returns to the transparent callback. `call_at(None)` clears the armed
 callback.
 
-`ThreadHandoff()` creates a callable replay scheduling gate. Calling
-`handoff(thread_id)` uses the stable `_thread.get_ident()` value as the key:
-it stores a durable runnable permit for `thread_id`, then parks the current
-thread with the GIL released until another handoff stores a permit for the
-current thread. `handoff.close()` wakes current sleepers and rejects future
-handoff calls.
+`ThreadHandoff(timeout=None)` creates a replay scheduling gate.
+`handoff.start()` uses the current stable `_thread.get_ident()` value as the
+key, registers that live thread, then parks it with the GIL released.
+`handoff.to(thread_id)` stores a durable runnable permit for `thread_id`, then
+parks the current thread until another transfer stores a permit for the current
+thread. When `timeout` is not `None`, parked waits raise `TimeoutError` after
+that many seconds without a transfer. `handoff.close()` wakes current sleepers
+and rejects future `start()` or `to()` calls.
 
 Native Retrace extensions should eventually discover a native API through a
 capsule, for example:
@@ -315,10 +323,18 @@ to the target frame.
 They may arm `call_at` for another thread and wait; the other thread can still
 hit that target while the first callback is paused.
 
-Replay code can use `_retrace.ThreadHandoff()` inside call_at callbacks to
-perform the actual thread handoff. The C helper handles durable wake tokens and
-releases the GIL while the current thread is parked; Python replay policy still
-decides which `call_at` target to arm and which stable thread id to wake next.
+Replay code can use `_retrace.ThreadHandoff(timeout=None)` inside call_at
+callbacks to perform the actual thread handoff. The C helper handles durable
+transfer tokens and releases the GIL while the current thread is parked; Python
+replay policy still decides which `call_at` target to arm and which stable
+thread id should run next.
+
+A replay scheduler that controls thread starts should register a
+`thread_start` callback that records the current stable thread id, consumes the
+matching start event, looks ahead to arm any immediately available yield point,
+then calls `handoff.start()`. The unscheduled controller thread can transfer the
+first permit with `handoff.to(thread_id)` once the recorded start barriers ahead
+of that permit have parked.
 
 Callback exceptions propagate back through the eval loop. Replay should treat
 that as a scheduler/control-plane failure rather than application behavior.

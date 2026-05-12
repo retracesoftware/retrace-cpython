@@ -14,6 +14,7 @@ hash = _retrace.hash
 exclude = _retrace.exclude
 include = _retrace.include
 run_transparent = _retrace.run_transparent
+with_new_coordinates = _retrace.with_new_coordinates
 ThreadHandoff = _retrace.ThreadHandoff
 
 
@@ -99,6 +100,7 @@ __all__ = [
     "hash",
     "include",
     "run_transparent",
+    "with_new_coordinates",
     "call_at",
     "thread_delta",
 ]

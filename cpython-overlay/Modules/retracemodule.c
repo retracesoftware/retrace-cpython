@@ -93,6 +93,12 @@ retrace_frame_is_visible(_PyInterpreterFrame *frame)
     return _PyRetrace_FrameIsVisible(frame);
 }
 
+static int
+retrace_frame_is_fresh_coordinate_parent(_PyInterpreterFrame *frame)
+{
+    return _PyRetrace_FrameIsFreshCoordinateParent(frame);
+}
+
 static uint64_t
 retrace_frame_call_ordinal(_PyInterpreterFrame *frame)
 {
@@ -119,6 +125,9 @@ retrace_frame_depth(_PyInterpreterFrame *frame)
          parent != NULL;
          parent = parent->previous)
     {
+        if (retrace_frame_is_fresh_coordinate_parent(parent)) {
+            break;
+        }
         if (retrace_frame_is_visible(parent)) {
             depth = retrace_frame_depth(parent) + 1;
             break;
@@ -169,9 +178,7 @@ retrace_frame_word_position(_PyInterpreterFrame *frame)
 static Py_ssize_t
 retrace_coordinate_count(_PyInterpreterFrame *frame)
 {
-    while (frame != NULL && !retrace_frame_is_visible(frame)) {
-        frame = frame->previous;
-    }
+    frame = _PyRetrace_NearestVisibleFrame(frame);
     if (frame == NULL) {
         return 0;
     }
@@ -184,6 +191,9 @@ retrace_fill_coordinates(uint64_t *coordinates,
                          Py_ssize_t drop)
 {
     for (_PyInterpreterFrame *scan = frame; scan != NULL; scan = scan->previous) {
+        if (retrace_frame_is_fresh_coordinate_parent(scan)) {
+            break;
+        }
         if (retrace_frame_is_visible(scan)) {
             Py_ssize_t position = retrace_frame_word_position(scan);
             if (position >= drop) {
@@ -204,9 +214,7 @@ retrace_thread_delta(PyObject *module, PyObject *Py_UNUSED(ignored))
 {
     PyThreadState *tstate = _PyThreadState_GET();
     _PyInterpreterFrame *frame = retrace_thread_state_frame(tstate);
-    while (frame != NULL && !retrace_frame_is_visible(frame)) {
-        frame = frame->previous;
-    }
+    frame = _PyRetrace_NearestVisibleFrame(frame);
 
     Py_ssize_t current_size = retrace_coordinate_count(frame);
     Py_ssize_t common_count =
@@ -214,6 +222,9 @@ retrace_thread_delta(PyObject *module, PyObject *Py_UNUSED(ignored))
         0 : current_size;
 
     for (_PyInterpreterFrame *scan = frame; scan != NULL; scan = scan->previous) {
+        if (retrace_frame_is_fresh_coordinate_parent(scan)) {
+            break;
+        }
         if (!retrace_frame_is_visible(scan)) {
             continue;
         }
@@ -244,6 +255,9 @@ retrace_thread_delta(PyObject *module, PyObject *Py_UNUSED(ignored))
 
     for (_PyInterpreterFrame *scan = frame; scan != NULL; scan = scan->previous)
     {
+        if (retrace_frame_is_fresh_coordinate_parent(scan)) {
+            break;
+        }
         if (!retrace_frame_is_visible(scan)) {
             continue;
         }
@@ -654,6 +668,14 @@ typedef struct {
 
 typedef struct {
     int active;
+    _PyInterpreterFrame *parent_frame;
+    uint64_t previous_parent_call_ordinal;
+    uint64_t previous_last_root_coordinate;
+    uint64_t previous_root_coordinate_hash;
+} RetraceFreshCoordinateScope;
+
+typedef struct {
+    int active;
     uint32_t previous_depth;
     _PyInterpreterFrame *previous_exclude_parent;
     _PyInterpreterFrame *previous_visible_parent;
@@ -713,6 +735,55 @@ retrace_leave_excluded(PyThreadState *tstate, RetraceExcludeScope *scope)
         tstate->retrace.coordinate_exclude_parent_frame =
             scope->previous_parent;
     }
+}
+
+static void
+retrace_enter_fresh_coordinates(PyThreadState *tstate,
+                                RetraceFreshCoordinateScope *scope)
+{
+    scope->active = 0;
+    scope->parent_frame = NULL;
+    scope->previous_parent_call_ordinal = 0;
+    scope->previous_last_root_coordinate = 0;
+    scope->previous_root_coordinate_hash = 0;
+    if (tstate == NULL) {
+        return;
+    }
+
+    scope->active = 1;
+    scope->parent_frame =
+        _PyRetrace_NearestVisibleFrame(_PyRetrace_CurrentThreadFrame(tstate));
+    if (scope->parent_frame != NULL) {
+        scope->previous_parent_call_ordinal =
+            scope->parent_frame->retrace.current_call_ordinal;
+        scope->parent_frame->retrace.current_call_ordinal =
+            _PyFrame_RETRACE_CALL_ORDINAL_FRESH_PARENT;
+    }
+    scope->previous_last_root_coordinate =
+        tstate->retrace.last_root_coordinate;
+    scope->previous_root_coordinate_hash =
+        tstate->retrace.root_coordinate_hash;
+
+    tstate->retrace.last_root_coordinate = (uint64_t)-1;
+    tstate->retrace.root_coordinate_hash =
+        _PyRetrace_InitialRootCoordinateHash();
+}
+
+static void
+retrace_leave_fresh_coordinates(PyThreadState *tstate,
+                                RetraceFreshCoordinateScope *scope)
+{
+    if (tstate == NULL || !scope->active) {
+        return;
+    }
+    if (scope->parent_frame != NULL) {
+        scope->parent_frame->retrace.current_call_ordinal =
+            scope->previous_parent_call_ordinal;
+    }
+    tstate->retrace.last_root_coordinate =
+        scope->previous_last_root_coordinate;
+    tstate->retrace.root_coordinate_hash =
+        scope->previous_root_coordinate_hash;
 }
 
 static void
@@ -951,6 +1022,39 @@ retrace_run_transparent(PyObject *module, PyObject *callable)
         RETRACE_CALL_EXCLUDE, callable, NULL, 0, NULL, 1);
 }
 
+PyDoc_STRVAR(retrace_with_new_coordinates_doc,
+"with_new_coordinates($module, callable, /, *args, **kwargs)\n"
+"--\n"
+"\n"
+"Call callable as the root of a fresh Retrace coordinate space.");
+
+static PyObject *
+retrace_with_new_coordinates(PyObject *module,
+                             PyObject *const *args,
+                             Py_ssize_t nargs,
+                             PyObject *kwnames)
+{
+    if (nargs < 1) {
+        PyErr_SetString(PyExc_TypeError,
+                        "with_new_coordinates expected at least 1 argument");
+        return NULL;
+    }
+    PyObject *callable = args[0];
+    if (!PyCallable_Check(callable)) {
+        PyErr_SetString(PyExc_TypeError,
+                        "with_new_coordinates argument must be callable");
+        return NULL;
+    }
+
+    PyThreadState *tstate = _PyThreadState_GET();
+    RetraceFreshCoordinateScope scope;
+    retrace_enter_fresh_coordinates(tstate, &scope);
+    PyObject *result = PyObject_Vectorcall(
+        callable, args + 1, (size_t)(nargs - 1), kwnames);
+    retrace_leave_fresh_coordinates(tstate, &scope);
+    return result;
+}
+
 PyDoc_STRVAR(retrace_call_at_doc,
 "call_at($module, thread_id, coordinates, callback,\n"
 "        overshoot_callback=None, /)\n"
@@ -1086,6 +1190,8 @@ typedef struct {
     PyObject_HEAD
     PyThread_type_lock lock;
     int closed;
+    int has_timeout;
+    PY_TIMEOUT_T timeout_us;
     RetraceThreadHandoffEntry *entries;
 } RetraceThreadHandoff;
 
@@ -1156,11 +1262,38 @@ retrace_thread_handoff_new(PyTypeObject *type,
                            PyObject *args,
                            PyObject *kwargs)
 {
-    static char *keywords[] = {NULL};
+    static char *keywords[] = {"timeout", NULL};
+    PyObject *timeout_obj = Py_None;
     if (!PyArg_ParseTupleAndKeywords(
-            args, kwargs, ":ThreadHandoff", keywords))
+            args, kwargs, "|O:ThreadHandoff", keywords, &timeout_obj))
     {
         return NULL;
+    }
+
+    int has_timeout = 0;
+    PY_TIMEOUT_T timeout_us = -1;
+    if (timeout_obj != Py_None) {
+        _PyTime_t timeout;
+        if (_PyTime_FromSecondsObject(
+                &timeout, timeout_obj, _PyTime_ROUND_TIMEOUT) < 0)
+        {
+            return NULL;
+        }
+        if (timeout < 0) {
+            PyErr_SetString(PyExc_ValueError,
+                            "thread handoff timeout must be non-negative");
+            return NULL;
+        }
+
+        _PyTime_t microseconds =
+            _PyTime_AsMicroseconds(timeout, _PyTime_ROUND_TIMEOUT);
+        if (microseconds > PY_TIMEOUT_MAX) {
+            PyErr_SetString(PyExc_OverflowError,
+                            "thread handoff timeout is too large");
+            return NULL;
+        }
+        has_timeout = 1;
+        timeout_us = (PY_TIMEOUT_T)microseconds;
     }
 
     RetraceThreadHandoff *self =
@@ -1175,6 +1308,8 @@ retrace_thread_handoff_new(PyTypeObject *type,
         return NULL;
     }
     self->closed = 0;
+    self->has_timeout = has_timeout;
+    self->timeout_us = timeout_us;
     self->entries = NULL;
     return (PyObject *)self;
 }
@@ -1206,6 +1341,47 @@ retrace_thread_handoff_wake_entry_locked(RetraceThreadHandoffEntry *entry)
     }
 }
 
+static int
+retrace_thread_handoff_wait_entry_locked(RetraceThreadHandoff *self,
+                                         RetraceThreadHandoffEntry *entry)
+{
+    if (entry->permit) {
+        entry->permit = 0;
+        entry->waiting = 0;
+        return 0;
+    }
+
+    entry->waiting = 1;
+    while (!self->closed && !entry->permit) {
+        PyThread_type_lock gate = entry->gate;
+        PyThread_release_lock(self->lock);
+
+        PyLockStatus status;
+        Py_BEGIN_ALLOW_THREADS
+        status = PyThread_acquire_lock_timed(
+            gate, self->has_timeout ? self->timeout_us : -1, 0);
+        Py_END_ALLOW_THREADS
+
+        PyThread_acquire_lock(self->lock, WAIT_LOCK);
+        if (self->has_timeout && status == PY_LOCK_FAILURE) {
+            entry->waiting = 0;
+            PyErr_SetString(PyExc_TimeoutError,
+                            "thread handoff timed out");
+            return -1;
+        }
+        else if (status != PY_LOCK_ACQUIRED) {
+            entry->waiting = 0;
+            PyErr_SetString(PyExc_RuntimeError,
+                            "thread handoff wait failed");
+            return -1;
+        }
+    }
+
+    entry->waiting = 0;
+    entry->permit = 0;
+    return 0;
+}
+
 static PyObject *
 retrace_thread_handoff_close(PyObject *self_obj, PyObject *Py_UNUSED(ignored))
 {
@@ -1219,15 +1395,12 @@ retrace_thread_handoff_close(PyObject *self_obj, PyObject *Py_UNUSED(ignored))
 }
 
 static PyObject *
-retrace_thread_handoff_wake(PyObject *self_obj, PyObject *target_arg)
+retrace_thread_handoff_start(PyObject *self_obj, PyObject *Py_UNUSED(ignored))
 {
-    uint64_t target_id = 0;
-    if (retrace_thread_id_from_object(target_arg, &target_id) < 0) {
-        return NULL;
-    }
-    if (target_id == 0) {
-        PyErr_SetString(PyExc_ValueError,
-                        "thread handoff target id must be non-zero");
+    PyThreadState *tstate = _PyThreadState_GET();
+    uint64_t current_id = tstate == NULL ? 0 : tstate->retrace.thread_id;
+    if (current_id == 0) {
+        PyErr_SetString(PyExc_RuntimeError, "no Retrace thread id");
         return NULL;
     }
 
@@ -1239,34 +1412,24 @@ retrace_thread_handoff_wake(PyObject *self_obj, PyObject *target_arg)
         return NULL;
     }
 
-    RetraceThreadHandoffEntry *target =
-        retrace_thread_handoff_get_entry(self, target_id);
-    if (target == NULL) {
+    RetraceThreadHandoffEntry *current =
+        retrace_thread_handoff_get_entry(self, current_id);
+    if (current == NULL) {
         PyThread_release_lock(self->lock);
         return NULL;
     }
 
-    retrace_thread_handoff_wake_entry_locked(target);
+    int status = retrace_thread_handoff_wait_entry_locked(self, current);
     PyThread_release_lock(self->lock);
+    if (status < 0) {
+        return NULL;
+    }
     Py_RETURN_NONE;
 }
 
 static PyObject *
-retrace_thread_handoff_call(PyObject *self_obj,
-                            PyObject *args,
-                            PyObject *kwargs)
+retrace_thread_handoff_to(PyObject *self_obj, PyObject *target_arg)
 {
-    if (kwargs != NULL && PyDict_GET_SIZE(kwargs) != 0) {
-        PyErr_SetString(PyExc_TypeError,
-                        "thread handoff does not accept keyword arguments");
-        return NULL;
-    }
-
-    PyObject *target_arg;
-    if (!PyArg_UnpackTuple(args, "thread handoff", 1, 1, &target_arg)) {
-        return NULL;
-    }
-
     uint64_t target_id = 0;
     if (retrace_thread_id_from_object(target_arg, &target_id) < 0) {
         return NULL;
@@ -1308,37 +1471,11 @@ retrace_thread_handoff_call(PyObject *self_obj,
 
     retrace_thread_handoff_wake_entry_locked(target);
 
-    if (current->permit) {
-        current->permit = 0;
-        current->waiting = 0;
-        PyThread_release_lock(self->lock);
-        Py_RETURN_NONE;
-    }
-
-    current->waiting = 1;
-    while (!self->closed && !current->permit) {
-        PyThread_type_lock gate = current->gate;
-        PyThread_release_lock(self->lock);
-
-        PyLockStatus status;
-        Py_BEGIN_ALLOW_THREADS
-        status = PyThread_acquire_lock_timed(gate, -1, 0);
-        Py_END_ALLOW_THREADS
-
-        if (status != PY_LOCK_ACQUIRED) {
-            PyThread_acquire_lock(self->lock, WAIT_LOCK);
-            current->waiting = 0;
-            PyThread_release_lock(self->lock);
-            PyErr_SetString(PyExc_RuntimeError,
-                            "thread handoff wait failed");
-            return NULL;
-        }
-        PyThread_acquire_lock(self->lock, WAIT_LOCK);
-    }
-
-    current->waiting = 0;
-    current->permit = 0;
+    int status = retrace_thread_handoff_wait_entry_locked(self, current);
     PyThread_release_lock(self->lock);
+    if (status < 0) {
+        return NULL;
+    }
     Py_RETURN_NONE;
 }
 
@@ -1358,28 +1495,32 @@ retrace_thread_handoff_dealloc(PyObject *self_obj)
 
 static PyMethodDef retrace_thread_handoff_methods[] = {
     {"close", retrace_thread_handoff_close, METH_NOARGS,
-     PyDoc_STR("Wake sleeping threads and reject future handoffs.")},
-    {"wake", retrace_thread_handoff_wake, METH_O,
-     PyDoc_STR("Mark thread_id runnable without parking the current thread.")},
+     PyDoc_STR("Wake sleeping threads and reject future starts or transfers.")},
+    {"start", retrace_thread_handoff_start, METH_NOARGS,
+     PyDoc_STR("Register and park the current replay thread.")},
+    {"to", retrace_thread_handoff_to, METH_O,
+     PyDoc_STR("Transfer execution to thread_id and park the current thread.")},
     {NULL, NULL, 0, NULL},
 };
 
 PyDoc_STRVAR(retrace_thread_handoff_doc,
-"ThreadHandoff()\n"
+"ThreadHandoff(timeout=None)\n"
 "--\n"
 "\n"
 "Create a replay handoff gate.\n"
 "\n"
-"Calling handoff(thread_id) marks thread_id runnable, then parks the current\n"
-"thread with the GIL released until another handoff marks it runnable.\n"
-"Calling handoff.wake(thread_id) marks thread_id runnable without parking.");
+"start() registers the current stable thread id, then parks the thread with\n"
+"the GIL released until another thread transfers execution to it.\n"
+"to(thread_id) marks thread_id runnable, then parks the current thread until\n"
+"another transfer marks it runnable.\n"
+"If timeout is not None, parked waits raise TimeoutError after timeout\n"
+"seconds without a transfer.");
 
 static PyTypeObject retrace_thread_handoff_type = {
     PyVarObject_HEAD_INIT(NULL, 0)
     .tp_name = "_retrace.ThreadHandoff",
     .tp_basicsize = sizeof(RetraceThreadHandoff),
     .tp_dealloc = retrace_thread_handoff_dealloc,
-    .tp_call = retrace_thread_handoff_call,
     .tp_flags = Py_TPFLAGS_DEFAULT,
     .tp_doc = retrace_thread_handoff_doc,
     .tp_methods = retrace_thread_handoff_methods,
@@ -1626,6 +1767,8 @@ static PyMethodDef retrace_methods[] = {
     {"include", retrace_include, METH_O, retrace_include_doc},
     {"run_transparent", retrace_run_transparent, METH_O,
      retrace_run_transparent_doc},
+    {"with_new_coordinates", _PyCFunction_CAST(retrace_with_new_coordinates),
+     METH_FASTCALL | METH_KEYWORDS, retrace_with_new_coordinates_doc},
     {"call_at", retrace_call_at, METH_VARARGS,
      retrace_call_at_doc},
     {NULL, NULL, 0, NULL},

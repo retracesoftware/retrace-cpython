@@ -1,10 +1,17 @@
 import os
+import queue
 import sys
-import threading
+import _thread
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-from thread_schedule import MASK, ThreadScheduleConfig, main
+from thread_schedule import (
+    MASK,
+    ThreadScheduleConfig,
+    enter_schedule_control,
+    exit_schedule_control,
+    main,
+)
 
 
 CONFIG = ThreadScheduleConfig(
@@ -25,23 +32,39 @@ def run_loop(events, tid, iterations):
 
 def run_workload(module, controller, config):
     events = []
+    done = queue.Queue()
 
     controller.start()
 
+    def report(result):
+        enter_schedule_control()
+        try:
+            done.put(result)
+        finally:
+            exit_schedule_control()
+
     def worker(tid):
-        controller.register_thread(tid)
-        controller.yield_until_turn()
-        run_loop(events, tid, config.iterations)
+        try:
+            controller.register_thread(tid)
+            controller.yield_until_turn()
+            run_loop(events, tid, config.iterations)
+        except BaseException as exc:
+            report(exc)
+        else:
+            report(None)
 
-    workers = [
-        threading.Thread(target=worker, args=(tid,))
-        for tid in range(config.thread_count)
-    ]
-    for worker_thread in workers:
-        worker_thread.start()
+    for tid in range(config.thread_count):
+        _thread.start_new_thread(worker, (tid,))
 
-    for worker_thread in workers:
-        worker_thread.join()
+    controller.run_replay()
+
+    for _ in range(config.thread_count):
+        try:
+            result = done.get(timeout=config.timeout)
+        except queue.Empty as exc:
+            raise AssertionError("worker did not finish") from exc
+        if result is not None:
+            raise result
     return events
 
 

@@ -13,6 +13,7 @@ build/install/3.12.8+retrace/bin/python3 tests/smoke/retrace_public.py
 build/install/3.12.8+retrace/bin/python3 tests/smoke/thread_handoff.py
 build/install/3.12.8+retrace/bin/python3 tests/smoke/thread_id_determinism.py
 build/install/3.12.8+retrace/bin/python3 tests/smoke/thread_probe_concurrency.py
+build/install/3.12.8+retrace/bin/python3 tests/smoke/thread_schedule_fresh.py
 build/install/3.12.8+retrace/bin/python3 tests/smoke/thread_schedule_minimal.py
 build/install/3.12.8+retrace/bin/python3 tests/smoke/thread_schedule_stress.py
 ```
@@ -28,7 +29,9 @@ past-coordinate rejection behavior, plus the convention where an
 `_retrace.include` decorators: hidden callable frames are omitted from
 coordinates, included callables become visible again inside excluded regions,
 method binding works, vectorcall-style arguments are preserved, and exception
-paths restore the thread's coordinate mode.
+paths restore the thread's coordinate mode. It also checks
+`_retrace.with_new_coordinates`, including fresh root coordinates, exception
+restoration, and deterministic same-process child thread ids.
 
 `retrace_public.py` checks the Python `retrace` convenience module: public
 callback registration through `retrace.callbacks` wraps callbacks with
@@ -36,9 +39,9 @@ callback registration through `retrace.callbacks` wraps callbacks with
 `retrace.include`, and overshoot callbacks use the same wrapping path.
 
 `thread_handoff.py` checks the `_retrace.ThreadHandoff` replay gate: stable
-thread-id arguments, durable wake tokens for targets that are not asleep yet,
-GIL release while parked, repeated ping-pong handoffs, and close waking
-sleepers.
+thread-id arguments, durable transfer tokens for targets that are not asleep
+yet, timeout failures, GIL release while parked, repeated ping-pong handoffs,
+and close waking sleepers.
 
 `thread_id_determinism.py` starts a small `_thread.start_new_thread` loop in
 fresh subprocesses and asserts the returned public thread-id sequence is stable
@@ -54,7 +57,17 @@ frame see an empty cursor, and scheduler callback thread ids are visible through
 `thread_schedule.py` contains reusable capture/replay support for the schedule
 tests. The scenario files own thread creation and workload shape, while the
 helper records yield/resume callbacks and replays them with call_at callbacks
-plus `_retrace.ThreadHandoff`. The helper verifies that replay consumes the
-recorded schedule and that each thread completes its expected work; exact
-event-order comparison is available for workloads whose side effects align with
-call_at boundaries.
+plus `_retrace.ThreadHandoff`. Replay thread-start callbacks register the
+started thread, look ahead to arm any available yield point, then park in
+`ThreadHandoff.start()` until the controller transfers execution with
+`ThreadHandoff.to()`. The helper verifies that replay consumes the recorded
+schedule and that each thread completes its expected work; exact event-order
+comparison is available for workloads whose side effects align with call_at
+boundaries.
+
+`thread_schedule_fresh.py` records and replays a small schedule sequentially in
+one process under `retrace.with_new_coordinates`, asserting that replay can use
+the recorded thread ids and coordinate roots literally. The helper-owned
+launcher thread stays outside the schedule; the schedule covers threads created
+by the target. It also exercises `test_thread_schedule(retrace, function, args,
+kwargs)`, which raises if record and replay return different values.

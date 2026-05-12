@@ -104,6 +104,21 @@ coordinate space when called from transparent callback code.
 
 Both wrappers support decorator usage.
 
+## Fresh Coordinates
+
+```python
+result = retrace.with_new_coordinates(workload, *args, **kwargs)
+```
+
+`with_new_coordinates()` calls `workload` as the root of a fresh coordinate
+space. Outer frames are hidden, the first visible frame starts with root
+ordinal `0`, and coordinate hashes use the default root hash. When the callable
+returns or raises, Retrace restores the parent thread's root ordinal and delta
+state.
+
+This helper is intended for tests that need to record and replay a workload
+sequentially in one process without translating thread ids or coordinate roots.
+
 ## Scheduling Callbacks
 
 ```python
@@ -166,15 +181,21 @@ coordinate is already in the past when arming, `call_at` raises `ValueError`.
 ## ThreadHandoff
 
 ```python
-handoff = retrace.ThreadHandoff()
-handoff(target_thread_id)
+handoff = retrace.ThreadHandoff(timeout=None)
+handoff.start()
+handoff.to(target_thread_id)
 handoff.close()
 ```
 
-`ThreadHandoff()` creates a replay scheduling gate. Calling the object marks the
-target deterministic thread id runnable, then parks the current thread with the
-GIL released until another handoff marks the current thread runnable. Wake
+`ThreadHandoff(timeout=None)` creates a replay scheduling gate. `start()` is
+intended for the replay thread-start callback: it registers the current stable
+thread id, then parks that newly started thread with the GIL released.
+`to(thread_id)` transfers execution to the target deterministic thread id, then
+parks the current thread until another transfer marks it runnable. Transfer
 tokens are durable: the target thread does not need to be asleep yet.
 
-`close()` wakes sleeping threads and causes future handoff calls to raise
-`RuntimeError`.
+When `timeout` is not `None`, parked waits raise `TimeoutError` after that many
+seconds without a transfer.
+
+`close()` wakes sleeping threads and causes future `start()` or `to()` calls to
+raise `RuntimeError`.

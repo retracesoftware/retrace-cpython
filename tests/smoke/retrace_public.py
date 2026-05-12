@@ -154,10 +154,12 @@ def main() -> int:
     assert public.hash is native.hash
     assert public.exclude is native.exclude
     assert public.include is native.include
+    assert public.with_new_coordinates is native.with_new_coordinates
     assert public.call_at is not getattr(native, "call_at")
     assert public.ThreadHandoff is native.ThreadHandoff
     assert "call_at" in public.__all__
     assert "callbacks" in public.__all__
+    assert "with_new_coordinates" in public.__all__
     assert not hasattr(public, "set_replay_checkpoint")
     assert not hasattr(public, "set_thread_start_callback")
     assert not hasattr(public, "get_thread_start_callback")

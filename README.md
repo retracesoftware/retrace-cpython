@@ -65,6 +65,7 @@ retrace.thread_delta()
 retrace.hash()
 retrace.exclude(callable)
 retrace.include(callable)
+retrace.with_new_coordinates(callable, *args, **kwargs)
 retrace.callbacks.thread_start = callback_or_none
 retrace.callbacks.thread_yield = callback_or_none
 retrace.callbacks.thread_resume = callback_or_none
@@ -72,7 +73,7 @@ retrace.call_at(
     thread_id, coordinates, callback, overshoot_callback=None
 )
 retrace.call_at(None)
-retrace.ThreadHandoff()
+retrace.ThreadHandoff(timeout=None)
 ```
 
 `coordinates()` returns a tuple of Python `int` values ordered from oldest
@@ -152,12 +153,21 @@ transparent and skipped by coordinate walks; if a callback-created generator or
 coroutine is resumed later, that frame remains transparent. Transparent frames
 do not consume root activation counters or parent child-call ordinals.
 
-`ThreadHandoff()` creates a replay handoff gate. Calling
-`handoff(thread_id)` marks the stable `_thread.get_ident()` id runnable, then
-parks the current thread with the GIL released until a later handoff marks the
-current thread runnable. Wake tokens are durable: the target thread does not
-need to be asleep yet. `handoff.close()` wakes any sleeping threads and causes
-future handoff calls to raise `RuntimeError`.
+`with_new_coordinates(callable, *args, **kwargs)` calls `callable` as the root
+of a fresh coordinate space. Outer frames are hidden, the first visible frame
+starts with root ordinal `0`, and coordinate hashes use the default root hash.
+When the callable returns or raises, Retrace restores the parent thread's root
+ordinal and delta state. This helper is intended for same-process record/replay
+tests that need literal thread ids and coordinate roots.
+
+`ThreadHandoff(timeout=None)` creates a replay handoff gate. `handoff.start()`
+registers the current stable `_thread.get_ident()` id, then parks that thread
+with the GIL released. `handoff.to(thread_id)` marks the target id runnable,
+then parks the current thread until a later transfer marks it runnable. Transfer
+tokens are durable: the target thread does not need to be asleep yet. When
+`timeout` is not `None`, parked waits raise `TimeoutError` after that many
+seconds without a transfer. `handoff.close()` wakes any sleeping threads and
+causes future `start()` or `to()` calls to raise `RuntimeError`.
 
 ## Build Locally
 

@@ -1,9 +1,11 @@
 import importlib.util
 import json
 import os
+import queue
 import subprocess
 import sys
 import threading
+import time
 import _thread
 from dataclasses import dataclass
 
@@ -80,13 +82,27 @@ def exit_schedule_control():
 
 
 class ReplayScheduler:
-    def __init__(self, module, schedule, thread_ids, thread_roots):
+    def __init__(
+        self,
+        module,
+        schedule,
+        thread_ids,
+        thread_roots,
+        *,
+        literal_coordinates=False,
+        allow_current_before_future_start=False,
+        timeout=None,
+    ):
         self.module = module
         self.schedule = schedule
         self.thread_ids = thread_ids
         self.thread_roots = thread_roots
         self.lock = threading.RLock()
-        self.handoff = module.ThreadHandoff()
+        self.condition = threading.Condition(self.lock)
+        self.handoff = module.ThreadHandoff(timeout=timeout)
+        self.literal_coordinates = literal_coordinates
+        self.allow_current_before_future_start = (
+            allow_current_before_future_start)
         self.index = 0
         self.record_cursors = {}
         self.current_tid = None
@@ -98,6 +114,8 @@ class ReplayScheduler:
         return self.thread_ids.get(str(tid), tid)
 
     def translate_cursor(self, tid, cursor):
+        if self.literal_coordinates:
+            return cursor
         if not cursor:
             return cursor
         root = self.thread_roots.get(str(tid))
@@ -141,7 +159,10 @@ class ReplayScheduler:
                 raise AssertionError(f"unknown schedule item: {item!r}")
 
             tid = item[1]
-            if str(tid) not in self.thread_roots:
+            if (
+                not self.literal_coordinates and
+                str(tid) not in self.thread_roots
+            ):
                 debug(f"wait root tid={tid!r}")
                 return
 
@@ -170,6 +191,7 @@ class ReplayScheduler:
         self.current_tid = None
         debug("schedule done")
         self.module.call_at(None)
+        self.handoff.close()
 
     def target_tid_locked(self):
         if self.current_tid is not None:
@@ -181,12 +203,23 @@ class ReplayScheduler:
             return item[1]
         raise AssertionError(f"unknown schedule item: {item!r}")
 
-    def waiting_for_future_start_locked(self):
+    def next_future_start_locked(self):
         return (
-            self.current_tid is None and
             self.index < len(self.schedule) and
             self.schedule[self.index][0] == "start" and
             self.schedule[self.index][1] not in self.started_threads
+        )
+
+    def waiting_for_future_start_locked(self):
+        return self.current_tid is None and self.next_future_start_locked()
+
+    def future_start_blocks_handoff_locked(self):
+        return (
+            self.next_future_start_locked() and
+            not (
+                self.allow_current_before_future_start and
+                self.current_tid is not None
+            )
         )
 
     def yield_until_turn(self):
@@ -203,7 +236,7 @@ class ReplayScheduler:
                 target_tid = self.target_tid_locked()
                 if target_tid is None or target_tid == tid:
                     return
-                if self.waiting_for_future_start_locked():
+                if self.next_future_start_locked():
                     debug(
                         f"continue tid={tid!r} waiting for future "
                         f"start target={target_tid!r}"
@@ -214,7 +247,7 @@ class ReplayScheduler:
                     f"wait tid={tid!r} target={target_tid!r} "
                     f"cursor={tuple(self.module.coordinates())!r}"
                 )
-            self.handoff(target_ident)
+            self.handoff.to(target_ident)
 
     def pause_current_thread(self):
         tid = current_schedule_id()
@@ -234,7 +267,7 @@ class ReplayScheduler:
                 target_ident = None
             else:
                 target_tid = self.target_tid_locked()
-                if self.waiting_for_future_start_locked():
+                if self.next_future_start_locked():
                     target_ident = None
                 elif target_tid is not None and target_tid != tid:
                     target_ident = self.replay_ident(target_tid)
@@ -246,19 +279,67 @@ class ReplayScheduler:
             self.handoff.close()
         elif target_ident is not None:
             debug(f"handoff tid={tid!r} target={target_ident!r}")
-            self.handoff(target_ident)
+            self.handoff.to(target_ident)
 
     def note_thread_start(self, ident):
         with self.lock:
+            debug(f"thread start ident={ident!r}")
             self.thread_ids.setdefault(str(ident), ident)
             self.started_threads.add(ident)
             self.arm_locked()
+            self.condition.notify_all()
+
+    def start_current_thread(self):
+        with self.lock:
+            if self.done:
+                debug(f"thread start skip park ident={_thread.get_ident()!r}")
+                return
+        debug(f"thread start park ident={_thread.get_ident()!r}")
+        self.handoff.start()
+        debug(f"thread start run ident={_thread.get_ident()!r}")
 
     def note_thread_registered(self, ident):
         with self.lock:
+            debug(f"thread registered ident={ident!r}")
             self.thread_ids.setdefault(str(ident), ident)
             self.started_threads.add(ident)
             self.arm_locked()
+            self.condition.notify_all()
+
+    def run_until_done(self, timeout=None):
+        deadline = None if timeout is None else time.monotonic() + timeout
+        with self.condition:
+            while True:
+                self.arm_locked()
+                if self.done:
+                    self.handoff.close()
+                    return
+                target_tid = self.target_tid_locked()
+                if (
+                    target_tid is not None and
+                    not self.future_start_blocks_handoff_locked()
+                ):
+                    target_ident = self.replay_ident(target_tid)
+                    debug(
+                        f"initial handoff target_tid={target_tid!r} "
+                        f"target_ident={target_ident!r}"
+                    )
+                    break
+                if deadline is None:
+                    self.condition.wait(0.01)
+                else:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError("replay scheduler timed out")
+                    self.condition.wait(min(0.01, remaining))
+
+        self.handoff.to(target_ident)
+        debug("initial handoff returned")
+
+        with self.lock:
+            self.arm_locked()
+            if not self.done:
+                raise AssertionError("replay handoff returned before done")
 
     def on_call_at(self):
         debug("call_at callback")
@@ -302,7 +383,11 @@ class ThreadScheduleController:
         self.thread_roots[str(ident)] = root
         self.id_to_tid[ident] = tid
         if self.scheduler is not None:
-            self.scheduler.note_thread_registered(ident)
+            enter_schedule_control()
+            try:
+                self.scheduler.note_thread_registered(ident)
+            finally:
+                exit_schedule_control()
         return ident
 
     def start(self):
@@ -349,7 +434,21 @@ class ThreadScheduleController:
 
     def replay_start(self):
         if self.scheduler is not None:
-            self.scheduler.note_thread_start(_thread.get_ident())
+            enter_schedule_control()
+            try:
+                self.scheduler.note_thread_start(_thread.get_ident())
+                self.scheduler.start_current_thread()
+            finally:
+                exit_schedule_control()
+
+    def run_replay(self):
+        if self.mode != "replay" or self.scheduler is None:
+            return
+        enter_schedule_control()
+        try:
+            self.scheduler.run_until_done()
+        finally:
+            exit_schedule_control()
 
     def replay_yield_until_turn(self):
         enter_schedule_control()
@@ -418,6 +517,254 @@ class ThreadScheduleController:
         elif self.mode == "replay":
             assert self.scheduler is not None and self.scheduler.done
         return result
+
+
+def _run_raw_thread(target, args, kwargs):
+    done = queue.Queue(maxsize=1)
+
+    def runner():
+        try:
+            result = target(*args, **kwargs)
+        except BaseException as exc:
+            done.put((False, exc))
+        else:
+            done.put((True, result))
+
+    _thread.start_new_thread(runner, ())
+    return done
+
+
+def _get_raw_thread_result(done, timeout):
+    try:
+        ok, value = done.get(timeout=timeout)
+    except queue.Empty as exc:
+        raise TimeoutError("scheduled target did not finish") from exc
+    if ok:
+        return value
+    raise value
+
+
+class FreshScheduleRecorder:
+    def __init__(self, module):
+        self.module = module
+        self.lock = threading.RLock()
+        self.schedule = []
+        self.scheduled_tid = None
+        self.started_threads = set()
+        self.record_cursors = {}
+        self.call_at_cursors = {}
+        self.previous_start = None
+        self.previous_yield = None
+        self.previous_resume = None
+        self.skip_launcher_start = True
+
+    def start(self):
+        self.previous_start = self.module.callbacks.thread_start
+        self.previous_yield = self.module.callbacks.thread_yield
+        self.previous_resume = self.module.callbacks.thread_resume
+        self.module.callbacks.thread_start = self.record_start
+        self.module.callbacks.thread_yield = self.record_yield
+        self.module.callbacks.thread_resume = self.record_resume
+
+    def close(self):
+        self.module.callbacks.thread_start = self.previous_start
+        self.module.callbacks.thread_yield = self.previous_yield
+        self.module.callbacks.thread_resume = self.previous_resume
+
+    def record_start(self):
+        ident = _thread.get_ident()
+        if self.skip_launcher_start:
+            self.skip_launcher_start = False
+            return
+        _thread_local.schedule_id = ident
+        with self.lock:
+            if ident in self.started_threads:
+                return
+            self.started_threads.add(ident)
+            self.scheduled_tid = ident
+            self.schedule.append(["start", ident])
+
+    def record_yield(self):
+        ident = current_schedule_id()
+        if ident is None or thread_in_schedule_control():
+            return
+        with self.lock:
+            if ident not in self.started_threads:
+                return
+            if self.scheduled_tid != ident:
+                self.scheduled_tid = ident
+                self.schedule.append(["resume", ident])
+            raw_delta = tuple(self.module.thread_delta())
+            raw_cursor = apply_delta(
+                self.record_cursors.setdefault(ident, []), raw_delta)
+            call_at_stack = self.call_at_cursors.setdefault(ident, [])
+            delta = delta_from_cursor(call_at_stack, raw_cursor)
+            self.schedule.append(["yield", ident, list(delta)])
+            apply_delta(call_at_stack, delta)
+            self.scheduled_tid = None
+
+    def record_resume(self):
+        return None
+
+    def after_target_start(self, timeout):
+        return None
+
+    def finish(self, result):
+        return self.schedule, result
+
+
+class FreshScheduleReplay:
+    def __init__(self, module, schedule, timeout):
+        self.module = module
+        self.scheduler = ReplayScheduler(
+            module,
+            schedule,
+            {},
+            {},
+            literal_coordinates=True,
+            allow_current_before_future_start=True,
+            timeout=timeout,
+        )
+        self.previous_start = None
+        self.previous_yield = None
+        self.previous_resume = None
+        self.skip_launcher_start = True
+
+    def start(self):
+        self.previous_start = self.module.callbacks.thread_start
+        self.previous_yield = self.module.callbacks.thread_yield
+        self.previous_resume = self.module.callbacks.thread_resume
+        self.module.callbacks.thread_start = self.replay_start
+        self.module.callbacks.thread_yield = None
+        self.module.callbacks.thread_resume = self.replay_resume
+        self.scheduler.start()
+
+    def close(self):
+        self.module.callbacks.thread_start = self.previous_start
+        self.module.callbacks.thread_yield = self.previous_yield
+        self.module.callbacks.thread_resume = self.previous_resume
+        self.module.call_at(None)
+        self.scheduler.close()
+
+    def replay_start(self):
+        ident = _thread.get_ident()
+        if self.skip_launcher_start:
+            self.skip_launcher_start = False
+            return
+        _thread_local.schedule_id = ident
+        enter_schedule_control()
+        try:
+            self.scheduler.note_thread_start(ident)
+            self.scheduler.start_current_thread()
+        finally:
+            exit_schedule_control()
+
+    def replay_resume(self):
+        if thread_in_schedule_control():
+            return
+        ident = current_schedule_id()
+        if ident is None:
+            return
+        enter_schedule_control()
+        try:
+            self.scheduler.yield_until_turn()
+        finally:
+            exit_schedule_control()
+
+    def run_until_done(self, timeout):
+        enter_schedule_control()
+        try:
+            self.scheduler.run_until_done(timeout=timeout)
+        finally:
+            exit_schedule_control()
+
+    def after_target_start(self, timeout):
+        self.run_until_done(timeout)
+
+    def finish(self, result):
+        return result
+
+
+def record_thread_schedule(
+    module,
+    target,
+    *args,
+    timeout=10.0,
+    switch_interval=1e-6,
+    **kwargs,
+):
+    """Run target under fresh coordinates and record target-created threads."""
+    runner = FreshScheduleRecorder(module)
+    return module.with_new_coordinates(
+        _run_fresh_thread_schedule,
+        runner,
+        target,
+        args,
+        kwargs,
+        timeout,
+        switch_interval,
+    )
+
+
+def replay_thread_schedule(
+    module,
+    schedule,
+    target,
+    *args,
+    timeout=10.0,
+    switch_interval=1e-6,
+    **kwargs,
+):
+    """Replay target-created thread schedule under fresh coordinates."""
+    runner = FreshScheduleReplay(module, schedule, timeout)
+    return module.with_new_coordinates(
+        _run_fresh_thread_schedule,
+        runner,
+        target,
+        args,
+        kwargs,
+        timeout,
+        switch_interval,
+    )
+
+
+def test_thread_schedule(retrace, function, args, kwargs):
+    """Record and replay function, raising if replay returns a different value."""
+    args = tuple(args)
+    kwargs = dict(kwargs)
+    schedule, record_result = record_thread_schedule(
+        retrace, function, *args, **kwargs)
+    if not schedule:
+        raise AssertionError("record did not capture any thread switches")
+    replay_result = replay_thread_schedule(
+        retrace, schedule, function, *args, **kwargs)
+    if replay_result != record_result:
+        raise AssertionError(
+            f"record result {record_result!r} != replay result "
+            f"{replay_result!r}"
+        )
+    return None
+
+
+def _run_fresh_thread_schedule(
+    runner,
+    target,
+    args,
+    kwargs,
+    timeout,
+    switch_interval,
+):
+    old_interval = sys.getswitchinterval()
+    sys.setswitchinterval(switch_interval)
+    try:
+        runner.start()
+        done = _run_raw_thread(target, args, kwargs)
+        runner.after_target_start(timeout)
+        result = _get_raw_thread_result(done, timeout)
+        return runner.finish(result)
+    finally:
+        runner.close()
+        sys.setswitchinterval(old_interval)
 
 
 def run_workload(module, mode, schedule, config, workload):

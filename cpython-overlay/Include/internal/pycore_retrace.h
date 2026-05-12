@@ -116,6 +116,14 @@ _PyRetrace_FrameIsCallbackTransparent(_PyInterpreterFrame *frame)
                _PyFrame_RETRACE_CALL_ORDINAL_TRANSPARENT;
 }
 
+static inline int
+_PyRetrace_FrameIsFreshCoordinateParent(_PyInterpreterFrame *frame)
+{
+    return frame != NULL &&
+           frame->retrace.current_call_ordinal ==
+               _PyFrame_RETRACE_CALL_ORDINAL_FRESH_PARENT;
+}
+
 static inline void
 _PyRetrace_MarkFrameCallbackTransparent(_PyInterpreterFrame *frame)
 {
@@ -138,6 +146,7 @@ _PyRetrace_FrameIsVisible(_PyInterpreterFrame *frame)
            frame->owner != FRAME_OWNED_BY_CSTACK &&
 #endif
            !_PyRetrace_FrameIsCallbackTransparent(frame) &&
+           !_PyRetrace_FrameIsFreshCoordinateParent(frame) &&
            !_PyFrame_IsIncomplete(frame);
 }
 
@@ -186,10 +195,33 @@ _PyRetrace_RootCoordinateHash(PyThreadState *tstate)
 static inline _PyInterpreterFrame *
 _PyRetrace_NearestVisibleFrame(_PyInterpreterFrame *frame)
 {
-    while (frame != NULL && !_PyRetrace_FrameIsVisible(frame)) {
+    while (frame != NULL) {
+        if (_PyRetrace_FrameIsFreshCoordinateParent(frame)) {
+            return NULL;
+        }
+        if (_PyRetrace_FrameIsVisible(frame)) {
+            return frame;
+        }
         frame = frame->previous;
     }
-    return frame;
+    return NULL;
+}
+
+static inline int
+_PyRetrace_FrameHasFreshCoordinateParent(_PyInterpreterFrame *frame)
+{
+    for (_PyInterpreterFrame *parent = frame == NULL ? NULL : frame->previous;
+         parent != NULL;
+         parent = parent->previous)
+    {
+        if (_PyRetrace_FrameIsFreshCoordinateParent(parent)) {
+            return 1;
+        }
+        if (_PyRetrace_FrameIsVisible(parent)) {
+            return 0;
+        }
+    }
+    return 0;
 }
 
 static inline int
@@ -199,6 +231,9 @@ _PyRetrace_FrameHasCallbackTransparentParent(_PyInterpreterFrame *frame)
          parent != NULL;
          parent = parent->previous)
     {
+        if (_PyRetrace_FrameIsFreshCoordinateParent(parent)) {
+            return 0;
+        }
         if (_PyRetrace_FrameIsCallbackTransparent(parent)) {
             return 1;
         }
@@ -643,7 +678,8 @@ _PyRetrace_ActivateFrame(PyThreadState *tstate, _PyInterpreterFrame *frame)
     }
     _PyInterpreterFrame *parent =
         _PyRetrace_NearestVisibleFrame(frame->previous);
-    if (parent == NULL && tstate != NULL) {
+    int fresh_parent = _PyRetrace_FrameHasFreshCoordinateParent(frame);
+    if (parent == NULL && !fresh_parent && tstate != NULL) {
         parent = _PyRetrace_NearestVisibleFrame(
             tstate->retrace.thread_visible_callback_parent_frame);
     }
@@ -659,6 +695,9 @@ _PyRetrace_ActivateFrame(PyThreadState *tstate, _PyInterpreterFrame *frame)
         }
         frame->retrace.current_call_ordinal =
             parent->retrace.next_child_call_ordinal++;
+    }
+    else if (fresh_parent) {
+        frame->retrace.current_call_ordinal = 0;
     }
     else if (tstate != NULL) {
         frame->retrace.current_call_ordinal =
