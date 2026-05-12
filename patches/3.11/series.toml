@@ -29,8 +29,9 @@ patches = [
   "0001-Add-Retrace-coordinate-bias-to-interpreter-frames.patch",
   "0002-Add-retrace-coordinate-module.patch",
   "0003-Add-retrace-thread-scheduling-callbacks.patch",
-  "0004-Add-retrace-replay-checkpoint-callback.patch",
+  "0004-Add-retrace-call-at-callback.patch",
   "0005-Update-frame-size-tests-for-retrace-field.patch",
   "0006-Build-retrace-as-a-Windows-builtin-module.patch",
   "0007-Add-deterministic-retrace-pointer-hashes.patch",
+  "0008-Freeze-public-retrace-module.patch",
 ]

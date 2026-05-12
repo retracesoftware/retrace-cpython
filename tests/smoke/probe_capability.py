@@ -1,4 +1,5 @@
 import importlib.util
+import inspect
 import json
 import os
 import subprocess
@@ -15,29 +16,209 @@ def is_u64(value) -> bool:
     return type(value) is int and 0 < value < 2**64
 
 
-def check_replay_checkpoint(module) -> None:
+def check_call_at(module) -> None:
     hits = []
 
-    def attempt(delta: int) -> None:
+    def attempt(delta: int) -> bool:
         base = tuple(module.coordinates())
         target = (*base[:-1], base[-1] + delta)
 
         def callback():
             hits.append(target)
 
-        module.set_replay_checkpoint(_thread.get_ident(), target, callback)
+        try:
+            module.call_at(_thread.get_ident(), target, callback)
+        except ValueError as exc:
+            assert str(exc) == "call_at coordinates are in the past"
+            return False
         value = 0
         for index in range(1000):
             value += index
             value ^= index
             value += 1
-        module.set_replay_checkpoint(None)
+        module.call_at(None)
+        return True
 
-    for delta in range(1, 400):
+    for delta in range(1, 1000):
         attempt(delta)
         if hits:
             break
     assert hits
+
+
+def check_call_at_past_rejected(module) -> None:
+    coordinates = tuple(module.coordinates())
+    for _ in range(1000):
+        if coordinates[-1] > 0:
+            break
+        coordinates = tuple(module.coordinates())
+    assert coordinates[-1] > 0
+
+    past = (*coordinates[:-1], coordinates[-1] - 1)
+    try:
+        module.call_at(_thread.get_ident(), past, lambda: None)
+    except ValueError:
+        pass
+    else:
+        module.call_at(None)
+        raise AssertionError("past call_at coordinates were accepted")
+
+
+def check_call_at_overshoot(module) -> None:
+    hits = []
+    overshoots = []
+
+    def run_body() -> None:
+        value = 0
+        for index in range(1000):
+            value += index
+            value ^= index
+            value += 1
+
+    def attempt(delta: int) -> bool:
+        hits.clear()
+        overshoots.clear()
+        base = tuple(module.coordinates())
+        target = (*base[:-1], base[-1] + delta)
+        try:
+            module.call_at(
+                _thread.get_ident(),
+                target,
+                lambda: hits.append(target),
+                lambda: overshoots.append(target),
+            )
+        except ValueError as exc:
+            assert str(exc) == "call_at coordinates are in the past"
+            return False
+        run_body()
+        module.call_at(None)
+        assert not (hits and overshoots)
+        return bool(overshoots)
+
+    for delta in range(1, 1000):
+        if attempt(delta):
+            break
+    assert overshoots
+
+
+def check_callback_coordinate_transparency(module) -> None:
+    hits = []
+    generated = []
+
+    def callback() -> None:
+        pinned_coordinates = tuple(module.coordinates())
+        pinned_hash = module.hash()
+        hits.append(pinned_coordinates)
+
+        def helper(depth: int) -> None:
+            assert tuple(module.coordinates()) == pinned_coordinates
+            assert module.hash() == pinned_hash
+            if depth:
+                helper(depth - 1)
+
+        helper(4)
+
+        delta = tuple(module.thread_delta())
+        common_count = delta[0]
+        assert 0 <= common_count <= len(pinned_coordinates)
+        assert delta[1:] == pinned_coordinates[common_count:]
+
+        def transparent_generator():
+            assert tuple(module.coordinates()) == pinned_coordinates
+            assert module.hash() == pinned_hash
+            yield tuple(module.coordinates()), module.hash()
+            yield tuple(module.coordinates()), module.hash()
+
+        generator = transparent_generator()
+        assert next(generator) == (pinned_coordinates, pinned_hash)
+        generated.append(generator)
+
+    def attempt(delta: int) -> None:
+        base = tuple(module.coordinates())
+        target = (*base[:-1], base[-1] + delta)
+        try:
+            module.call_at(_thread.get_ident(), target, callback)
+        except ValueError as exc:
+            assert str(exc) == "call_at coordinates are in the past"
+            return
+        value = 0
+        for index in range(1000):
+            value += index
+            value ^= index
+            value += 1
+        module.call_at(None)
+
+    for delta in range(1, 1000):
+        attempt(delta)
+        if hits:
+            break
+
+    assert hits
+    assert generated
+
+    outside_coordinates = tuple(module.coordinates())
+    resumed_coordinates, resumed_hash = next(generated[0])
+    assert type(resumed_hash) is int
+    assert len(resumed_coordinates) == len(outside_coordinates)
+
+
+def check_call_at_include(module) -> None:
+    order = []
+    control_coordinates = []
+    visible_coordinates = []
+    nested_coordinates = []
+
+    def visible() -> None:
+        order.append("visible")
+        current = tuple(module.coordinates())
+        visible_coordinates.append(current)
+        pinned = control_coordinates[0]
+        assert current[: len(pinned)] == pinned
+        assert len(current) > len(pinned)
+
+        def nested() -> None:
+            nested_coordinates.append(tuple(module.coordinates()))
+
+        nested()
+        assert nested_coordinates[-1][: len(pinned)] == pinned
+        assert len(nested_coordinates[-1]) > len(pinned)
+        assert nested_coordinates[-1] != current
+
+    included_visible = module.include(visible)
+
+    def callback():
+        order.append("control-before")
+        current = tuple(module.coordinates())
+        control_coordinates.append(current)
+        included_visible()
+        order.append("control-after")
+        control_coordinates.append(tuple(module.coordinates()))
+        return None
+
+    def attempt(delta: int) -> None:
+        base = tuple(module.coordinates())
+        target = (*base[:-1], base[-1] + delta)
+        try:
+            module.call_at(_thread.get_ident(), target, callback)
+        except ValueError as exc:
+            assert str(exc) == "call_at coordinates are in the past"
+            return
+        value = 0
+        for index in range(1000):
+            value += index
+            value ^= index
+            value += 1
+        module.call_at(None)
+
+    for delta in range(1, 1000):
+        attempt(delta)
+        if visible_coordinates:
+            break
+
+    assert order == ["control-before", "visible", "control-after"]
+    assert control_coordinates[0] == control_coordinates[1]
+    assert visible_coordinates
+    assert nested_coordinates
 
 
 def check_thread_callbacks(module) -> None:
@@ -47,14 +228,39 @@ def check_thread_callbacks(module) -> None:
     yield_hits = []
     resume_hits = []
     callback_deltas = []
+    callback_failures = []
     stop = False
+
+    def check_callback_frame_pinned(kind: str) -> None:
+        try:
+            coordinates = tuple(module.coordinates())
+            coordinate_hash = module.hash()
+
+            def helper():
+                return tuple(module.coordinates()), module.hash()
+
+            helper_coordinates, helper_hash = helper()
+            assert helper_coordinates == coordinates, (
+                kind,
+                coordinates,
+                helper_coordinates,
+            )
+            assert helper_hash == coordinate_hash, (
+                kind,
+                coordinate_hash,
+                helper_hash,
+            )
+        except BaseException as exc:
+            callback_failures.append((kind, repr(exc)))
 
     def yield_callback():
         yield_hits.append(_thread.get_ident())
+        check_callback_frame_pinned("yield")
         callback_deltas.append(tuple(module.thread_delta()))
 
     def resume_callback():
         resume_hits.append(_thread.get_ident())
+        check_callback_frame_pinned("resume")
         callback_deltas.append(tuple(module.thread_delta()))
 
     def contender():
@@ -87,6 +293,7 @@ def check_thread_callbacks(module) -> None:
 
     assert yield_hits
     assert resume_hits
+    assert not callback_failures, callback_failures
     assert callback_deltas
     assert all(delta and delta[0] >= 0 for delta in callback_deltas)
 
@@ -327,6 +534,8 @@ def main() -> int:
         assert PROBE_MODULE in sys.builtin_module_names
         assert "retrace" not in sys.builtin_module_names
         module = __import__(PROBE_MODULE)
+        assert hasattr(module, "call_at")
+        assert not hasattr(module, "set_replay_checkpoint")
         thread_id = _thread.get_ident()
         assert is_u64(thread_id)
         assert thread_id == _thread.get_ident()
@@ -334,6 +543,7 @@ def main() -> int:
         coordinates_by_id = module.coordinates(thread_id)
         assert type(coordinates) is tuple
         assert len(coordinates) >= 1
+        assert len(coordinates) % 2 == 0
         assert tuple(coordinates[0:]) == tuple(coordinates)
         assert len(coordinates_by_id) == len(coordinates)
         dropped = module.coordinates(None, 1)
@@ -354,8 +564,12 @@ def main() -> int:
         check_thread_ids(module)
         check_ctypes_async_exc_bridge(module)
         check_root_seed_environment(module)
+        assert module.get_thread_start_callback() is None
         assert module.get_thread_yield_callback() is None
         assert module.get_thread_resume_callback() is None
+
+        def start_callback():
+            return None
 
         def yield_callback():
             return None
@@ -363,16 +577,24 @@ def main() -> int:
         def resume_callback():
             return None
 
+        module.set_thread_start_callback(start_callback)
+        assert inspect.unwrap(module.get_thread_start_callback()) is start_callback
+        module.set_thread_start_callback(None)
+        assert module.get_thread_start_callback() is None
         module.set_thread_yield_callback(yield_callback)
-        assert module.get_thread_yield_callback() is yield_callback
+        assert inspect.unwrap(module.get_thread_yield_callback()) is yield_callback
         module.set_thread_yield_callback(None)
         assert module.get_thread_yield_callback() is None
         module.set_thread_resume_callback(resume_callback)
-        assert module.get_thread_resume_callback() is resume_callback
+        assert inspect.unwrap(module.get_thread_resume_callback()) is resume_callback
         module.set_thread_resume_callback(None)
         assert module.get_thread_resume_callback() is None
         check_thread_callbacks(module)
-        check_replay_checkpoint(module)
+        check_call_at(module)
+        check_call_at_past_rejected(module)
+        check_call_at_overshoot(module)
+        check_callback_coordinate_transparency(module)
+        check_call_at_include(module)
         check_c_driven_callback_coordinates(module)
         check_no_disable_api(module)
         check_deterministic_identity_hashes()
@@ -386,9 +608,13 @@ def main() -> int:
         print("root_seed_environment=available")
         print("disable_api=unavailable")
         print("deterministic_identity_hashes=available")
+        print("thread_start_callback=available")
         print("thread_yield_callback=available")
         print("thread_resume_callback=available")
-        print("replay_checkpoint=available")
+        print("call_at=available")
+        print("call_at_overshoot=available")
+        print("callback_coordinate_transparency=available")
+        print("call_at_include=available")
     else:
         print("_retrace_module=unavailable")
 

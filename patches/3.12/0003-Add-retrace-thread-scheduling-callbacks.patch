@@ -8,9 +8,10 @@ Subject: [PATCH 3/7] Add retrace thread scheduling callbacks
  Include/internal/pycore_interp.h |  3 +++
  Modules/_threadmodule.c          | 19 +++++++++++++++----
  Modules/signalmodule.c           |  3 +++
- Python/ceval_gil.c               | 14 ++++++++++++--
- Python/pystate.c                 | 12 +++++++++---
- 6 files changed, 52 insertions(+), 10 deletions(-)
+ Python/ceval.c                   | 10 +++++++++-
+ Python/ceval_gil.c               | 15 +++++++++++++--
+ Python/pystate.c                 | 13 ++++++++++---
+ 7 files changed, 62 insertions(+), 11 deletions(-)
 
 diff --git a/Include/cpython/pystate.h b/Include/cpython/pystate.h
 index 95fad89..cdb861b 100644
@@ -156,38 +157,61 @@ index c1ab588..6bd4ec4 100644
      }
 
  #ifdef FORCE_SWITCHING
-@@ -596,6 +600,7 @@ PyEval_AcquireLock(void)
+@@ -596,4 +600,5 @@ PyEval_AcquireLock(void)
      _Py_EnsureTstateNotNULL(tstate);
 
      take_gil(tstate);
-+    _PyRetrace_DeliverThreadResumeCallback(tstate);
++    _PyRetrace_DeliverThreadResumeCallback(tstate, NULL);
  }
-
- void
-@@ -614,6 +619,7 @@ _PyEval_AcquireLock(PyThreadState *tstate)
+@@ -610,4 +615,6 @@ PyEval_ReleaseLock(void)
+        in debug mode. */
+     struct _ceval_state *ceval = &tstate->interp->ceval;
++    (void)_PyRetrace_PinThreadCallbackFrame(
++        tstate, _PyRetrace_CurrentThreadFrame(tstate));
+     drop_gil(ceval, tstate);
+ }
+@@ -614,4 +621,5 @@ _PyEval_AcquireLock(PyThreadState *tstate)
  {
      _Py_EnsureTstateNotNULL(tstate);
      take_gil(tstate);
-+    _PyRetrace_DeliverThreadResumeCallback(tstate);
++    _PyRetrace_DeliverThreadResumeCallback(tstate, NULL);
  }
-
- void
-@@ -636,6 +642,7 @@ PyEval_AcquireThread(PyThreadState *tstate)
+@@ -627,5 +635,7 @@ _PyEval_ReleaseLock(PyInterpreterState *interp, PyThreadState *tstate)
+        to acquire the GIL ever again. */
+     assert(tstate == NULL || tstate->interp == interp);
+     struct _ceval_state *ceval = &interp->ceval;
++    (void)_PyRetrace_PinThreadCallbackFrame(
++        tstate, _PyRetrace_CurrentThreadFrame(tstate));
+     drop_gil(ceval, tstate);
+ }
+@@ -636,4 +646,5 @@ PyEval_AcquireThread(PyThreadState *tstate)
      if (_PyThreadState_SwapNoGIL(tstate) != NULL) {
          Py_FatalError("non-NULL old thread state");
      }
-+    _PyRetrace_DeliverThreadResumeCallback(tstate);
++    _PyRetrace_DeliverThreadResumeCallback(tstate, NULL);
  }
-
+@@ -641,6 +652,7 @@ PyEval_ReleaseThread(PyThreadState *tstate)
  void
-@@ -708,6 +715,7 @@ PyEval_RestoreThread(PyThreadState *tstate)
-     take_gil(tstate);
-
+ PyEval_ReleaseThread(PyThreadState *tstate)
+ {
+     assert(_PyThreadState_CheckConsistency(tstate));
+-
++    (void)_PyRetrace_PinThreadCallbackFrame(
++        tstate, _PyRetrace_CurrentThreadFrame(tstate));
+     PyThreadState *new_tstate = _PyThreadState_SwapNoGIL(NULL);
+@@ -700,4 +711,6 @@ PyEval_SaveThread(void)
+-    PyThreadState *tstate = _PyThreadState_SwapNoGIL(NULL);
++    PyThreadState *tstate = _PyThreadState_GET();
+     _Py_EnsureTstateNotNULL(tstate);
+-
++    (void)_PyRetrace_PinThreadCallbackFrame(
++        tstate, _PyRetrace_CurrentThreadFrame(tstate));
++    tstate = _PyThreadState_SwapNoGIL(NULL);
+     struct _ceval_state *ceval = &tstate->interp->ceval;
+@@ -717,2 +732,3 @@ PyEval_RestoreThread(PyThreadState *tstate)
      _PyThreadState_SwapNoGIL(tstate);
-+    _PyRetrace_DeliverThreadResumeCallback(tstate);
++    _PyRetrace_DeliverThreadResumeCallback(tstate, NULL);
  }
-
-
 @@ -770,6 +778,7 @@ _push_pending_call(struct _pending_calls *pending,
      return 0;
  }
@@ -200,23 +224,36 @@ index c1ab588..6bd4ec4 100644
      /* GIL drop request */
      if (_Py_atomic_load_relaxed_int32(&interp_ceval_state->gil_drop_request)) {
          /* Give another thread a chance */
-+        _PyRetrace_DeliverThreadYieldCallback(tstate);
++        _PyRetrace_DeliverThreadYieldCallback(tstate, NULL);
          if (_PyThreadState_SwapNoGIL(NULL) != tstate) {
              Py_FatalError("tstate mix-up");
          }
-@@ -1060,6 +1070,7 @@ _Py_HandlePending(PyThreadState *tstate)
+@@ -1060,4 +1070,5 @@ _Py_HandlePending(PyThreadState *tstate)
          if (_PyThreadState_SwapNoGIL(tstate) != NULL) {
              Py_FatalError("orphan tstate");
          }
-+        _PyRetrace_DeliverThreadResumeCallback(tstate);
++        _PyRetrace_DeliverThreadResumeCallback(tstate, NULL);
      }
-
-     /* Check for asynchronous exception. */
-@@ -1086,4 +1097,3 @@ _Py_HandlePending(PyThreadState *tstate)
-
-     return 0;
- }
--
+diff --git a/Python/ceval.c b/Python/ceval.c
+index 17191af..138f388 100644
+--- a/Python/ceval.c
++++ b/Python/ceval.c
+@@ -5,3 +5,4 @@
+ #include "Python.h"
++#include "pycore_retrace.h"       // thread scheduling callbacks
+ #include "pycore_abstract.h"      // _PyIndex_Check()
+ #include "pycore_call.h"          // _PyObject_FastCallDictTstate()
+@@ -844,5 +845,9 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *frame, int
+      * until so desired.
+      */
+-    if (_Py_HandlePending(tstate) != 0) {
++    _PyInterpreterFrame *retrace_callback_frame =
++        _PyRetrace_PinThreadCallbackFrame(tstate, frame);
++    int retrace_pending_err = _Py_HandlePending(tstate);
++    _PyRetrace_RestoreThreadCallbackFrame(tstate, retrace_callback_frame);
++    if (retrace_pending_err != 0) {
+         goto error;
+     }
 diff --git a/Python/pystate.c b/Python/pystate.c
 index 6aed9ac..c8823e8 100644
 --- a/Python/pystate.c
@@ -229,10 +266,11 @@ index 6aed9ac..c8823e8 100644
  #include "pycore_pystate.h"
  #include "pycore_runtime_init.h"  // _PyRuntimeState_INIT
  #include "pycore_sysmodule.h"
-@@ -851,6 +851,8 @@ interpreter_clear(PyInterpreterState *interp, PyThreadState *tstate)
+@@ -851,6 +851,9 @@ interpreter_clear(PyInterpreterState *interp, PyThreadState *tstate)
      // XXX Make sure we properly deal with problematic finalizers.
 
      Py_CLEAR(interp->audit_hooks);
++    Py_CLEAR(interp->retrace.thread_start_callback);
 +    Py_CLEAR(interp->retrace.thread_yield_callback);
 +    Py_CLEAR(interp->retrace.thread_resume_callback);
 

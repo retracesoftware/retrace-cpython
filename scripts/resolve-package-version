@@ -1,14 +1,10 @@
 #!/usr/bin/env python3
 import argparse
-import json
 import re
 import sys
-import urllib.error
-import urllib.request
+from pathlib import Path
 
 
-PROJECT_NAME = "retracesoftware-cpython"
-DEFAULT_INDEX_URL = "https://pypi.org/pypi"
 VERSION_RE = re.compile(
     r"^v?(?P<major>[0-9]+)"
     r"(?:\.(?P<minor>[0-9]+))?"
@@ -31,27 +27,6 @@ def format_version(version):
     return ".".join(str(part) for part in version)
 
 
-def fetch_versions(project, index_url):
-    url = f"{index_url.rstrip('/')}/{project}/json"
-    try:
-        with urllib.request.urlopen(url, timeout=15) as response:
-            data = json.load(response)
-    except urllib.error.HTTPError as exc:
-        if exc.code == 404:
-            return []
-        raise
-
-    return list((data.get("releases") or {}).keys())
-
-
-def latest_release(versions):
-    parsed = [parse_version(version) for version in versions]
-    parsed = [version for version in parsed if version is not None]
-    if not parsed:
-        return 0, 0, 0
-    return max(parsed)
-
-
 def bump_version(version, bump):
     major, minor, point = version
     if bump == "major":
@@ -65,18 +40,25 @@ def bump_version(version, bump):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Resolve the next retracesoftware-cpython package version."
+        description=(
+            "Resolve the next retracesoftware-cpython package version from "
+            "the checked-in VERSION file."
+        )
     )
     parser.add_argument(
         "bump",
         choices=("major", "minor", "point", "patch"),
         help="Version component to bump. 'patch' is accepted as an alias for 'point'.",
     )
-    parser.add_argument("--project", default=PROJECT_NAME)
-    parser.add_argument("--index-url", default=DEFAULT_INDEX_URL)
     parser.add_argument(
         "--current-version",
-        help="Use this version instead of querying PyPI; useful for local checks.",
+        help="Use this version instead of reading VERSION; useful for local checks.",
+    )
+    parser.add_argument(
+        "--version-file",
+        type=Path,
+        default=Path("VERSION"),
+        help="Version file to read when --current-version is not set.",
     )
     args = parser.parse_args()
 
@@ -85,7 +67,12 @@ def main():
         if current is None:
             raise SystemExit(f"unsupported current version: {args.current_version}")
     else:
-        current = latest_release(fetch_versions(args.project, args.index_url))
+        if not args.version_file.is_file():
+            raise SystemExit(f"version file does not exist: {args.version_file}")
+        current_text = args.version_file.read_text(encoding="utf-8").strip()
+        current = parse_version(current_text)
+        if current is None:
+            raise SystemExit(f"unsupported version in {args.version_file}: {current_text}")
 
     next_version = bump_version(current, args.bump)
     print(format_version(next_version))

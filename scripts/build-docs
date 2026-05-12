@@ -1,0 +1,84 @@
+#!/usr/bin/env python3
+"""Build MkDocs documentation and refresh LLM-readable artifacts."""
+
+from __future__ import annotations
+
+import argparse
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+
+LLMS_ARTIFACTS = ("llms.txt", "llms-full.txt")
+
+
+def repo_root() -> Path:
+    return Path(__file__).resolve().parents[1]
+
+
+def build_docs(site_dir: Path, *, strict: bool) -> None:
+    command = [
+        sys.executable,
+        "-m",
+        "mkdocs",
+        "build",
+        "--clean",
+        "--site-dir",
+        str(site_dir),
+    ]
+    if strict:
+        command.append("--strict")
+    subprocess.run(command, cwd=repo_root(), check=True)
+
+
+def copy_llms_artifacts(site_dir: Path, output_dir: Path) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    missing = []
+    for name in LLMS_ARTIFACTS:
+        source = site_dir / name
+        if not source.is_file():
+            missing.append(str(source))
+            continue
+        content = source.read_text(encoding="utf-8").rstrip() + "\n"
+        source.write_text(content, encoding="utf-8")
+        shutil.copy2(source, output_dir / name)
+    if missing:
+        raise SystemExit(
+            "MkDocs did not generate expected LLM artifacts: "
+            + ", ".join(missing)
+        )
+
+
+def main() -> None:
+    root = repo_root()
+    parser = argparse.ArgumentParser(
+        description="Build docs and generate llms.txt / llms-full.txt."
+    )
+    parser.add_argument(
+        "--site-dir",
+        type=Path,
+        default=root / "build" / "site",
+        help="MkDocs output directory.",
+    )
+    parser.add_argument(
+        "--llms-output-dir",
+        type=Path,
+        default=root,
+        help="Directory to refresh with generated llms.txt artifacts.",
+    )
+    parser.add_argument(
+        "--no-strict",
+        action="store_true",
+        help="Build without MkDocs strict mode.",
+    )
+    args = parser.parse_args()
+
+    site_dir = args.site_dir.resolve()
+    output_dir = args.llms_output_dir.resolve()
+    build_docs(site_dir, strict=not args.no_strict)
+    copy_llms_artifacts(site_dir, output_dir)
+
+
+if __name__ == "__main__":
+    main()

@@ -28,14 +28,11 @@ index 4866ea2..1e40ec5 100644
      /* Locals and stack */
      PyObject *localsplus[1];
  } _PyInterpreterFrame;
-@@ -113,6 +115,10 @@ _PyFrame_InitializeSpecials(
+@@ -113,6 +115,7 @@ _PyFrame_InitializeSpecials(
      frame->prev_instr = _PyCode_CODE(frame->f_code) - 1;
      frame->is_entry = false;
      frame->owner = FRAME_OWNED_BY_THREAD;
-+    frame->retrace.coordinate_bias = 0;
-+    frame->retrace.coordinate_depth = _PyFrame_RETRACE_COORDINATE_DEPTH_UNSET;
-+    frame->retrace.last_coordinate = _PyFrame_RETRACE_LAST_COORDINATE_UNSET;
-+    frame->retrace.coordinate_hash = _PyFrame_RETRACE_COORDINATE_HASH_UNSET;
++    _PyRetraceFrameState_Init(&frame->retrace);
  }
 
  /* Gets the pointer to the locals array

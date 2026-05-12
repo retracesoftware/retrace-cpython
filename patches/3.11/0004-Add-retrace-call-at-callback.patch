@@ -1,12 +1,12 @@
 From cb5f6e7827836cc5cca6f537402a66fabcabb2ec Mon Sep 17 00:00:00 2001
 From: Retrace CPython Builder <retrace-cpython@retracesoftware.com>
 Date: Thu, 7 May 2026 09:50:59 +0100
-Subject: [PATCH 4/6] Add retrace replay checkpoint callback
+Subject: [PATCH 4/6] Add retrace call_at callback
 
 ---
- Python/ceval.c   | 28 ++++++++++++++++++++++++++--
- Python/pystate.c |  7 +++++++
- 2 files changed, 33 insertions(+), 2 deletions(-)
+ Python/ceval.c   | 26 ++++++++++++++++++++++++--
+ Python/pystate.c |  5 +++++
+ 2 files changed, 29 insertions(+), 2 deletions(-)
 
 diff --git a/Python/ceval.c b/Python/ceval.c
 index 3816a42..d90457d 100644
@@ -21,21 +21,19 @@ index 3816a42..d90457d 100644
  #include "pycore_sysmodule.h"     // _PySys_Audit()
  #include "pycore_tuple.h"         // _PyTuple_ITEMS()
  #include "pycore_emscripten_signal.h"  // _Py_CHECK_EMSCRIPTEN_SIGNALS
-@@ -1299,6 +1299,25 @@ eval_frame_handle_pending(PyThreadState *tstate)
+@@ -1299,6 +1299,23 @@ eval_frame_handle_pending(PyThreadState *tstate)
      #define USE_COMPUTED_GOTOS 0
  #endif
 
-+#define RETRACE_REPLAY_CHECKPOINT() \
++#define RETRACE_CALL_AT() \
 +    do { \
 +        PyInterpreterState *retrace_interp = tstate->interp; \
-+        if (retrace_interp->retrace.replay_checkpoint_armed && \
-+            retrace_interp->retrace.replay_checkpoint_thread_id == tstate->retrace.thread_id && \
-+            _PyRetrace_FrameIsVisible(frame) && \
-+            retrace_interp->retrace.replay_checkpoint_top == \
-+                _PyRetrace_FrameCoordinate(frame)) \
++        if (retrace_interp->retrace.call_at_armed && \
++            retrace_interp->retrace.call_at_thread_id == tstate->retrace.thread_id && \
++            _PyRetrace_FrameIsVisible(frame)) \
 +        { \
 +            _PyFrame_SetStackPointer(frame, stack_pointer); \
-+            int retrace_err = _PyRetrace_CheckReplayCheckpoint(tstate, frame); \
++            int retrace_err = _PyRetrace_CheckCallAt(tstate, frame); \
 +            stack_pointer = _PyFrame_GetStackPointer(frame); \
 +            frame->stacktop = -1; \
 +            if (retrace_err < 0) { \
@@ -47,18 +45,18 @@ index 3816a42..d90457d 100644
  #ifdef Py_STATS
  #define INSTRUCTION_START(op) \
      do { \
-@@ -1306,9 +1325,14 @@ eval_frame_handle_pending(PyThreadState *tstate)
+@@ -1306,9 +1323,14 @@ eval_frame_handle_pending(PyThreadState *tstate)
          OPCODE_EXE_INC(op); \
          _py_stats.opcode_stats[lastopcode].pair_count[op]++; \
          lastopcode = op; \
-+        RETRACE_REPLAY_CHECKPOINT(); \
++        RETRACE_CALL_AT(); \
      } while (0)
  #else
 -#define INSTRUCTION_START(op) (frame->prev_instr = next_instr++)
 +#define INSTRUCTION_START(op) \
 +    do { \
 +        frame->prev_instr = next_instr++; \
-+        RETRACE_REPLAY_CHECKPOINT(); \
++        RETRACE_CALL_AT(); \
 +    } while (0)
  #endif
 
@@ -69,13 +67,14 @@ index 1c93702..77f4084 100644
 +++ b/Python/pystate.c
 @@ -413,6 +413,11 @@ interpreter_clear(PyInterpreterState *interp, PyThreadState *tstate)
      Py_CLEAR(interp->audit_hooks);
+     Py_CLEAR(interp->retrace.thread_start_callback);
      Py_CLEAR(interp->retrace.thread_yield_callback);
      Py_CLEAR(interp->retrace.thread_resume_callback);
 +    _PyRetrace_ClearIdentityHashTable(interp);
-+    interp->retrace.replay_checkpoint_armed = 0;
-+    Py_CLEAR(interp->retrace.replay_checkpoint_coordinates);
-+    Py_CLEAR(interp->retrace.replay_checkpoint_callback);
-+    interp->retrace.replay_checkpoint_callback_active = 0;
++    interp->retrace.call_at_armed = 0;
++    Py_CLEAR(interp->retrace.call_at_coordinates);
++    Py_CLEAR(interp->retrace.call_at_callback);
++    Py_CLEAR(interp->retrace.call_at_overshoot_callback);
 
      PyConfig_Clear(&interp->config);
      Py_CLEAR(interp->codec_search_path);

@@ -1,0 +1,127 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Retrace CPython Builder <retrace-cpython@retracesoftware.com>
+Date: Mon, 11 May 2026 00:00:00 +0100
+Subject: [PATCH 8/8] Freeze public retrace module
+
+---
+ Makefile.pre.in                        | 6 ++++++
+ PCbuild/_freeze_module.vcxproj         | 6 ++++++
+ PCbuild/_freeze_module.vcxproj.filters | 3 +++
+ Python/frozen.c                        | 4 ++++
+ Tools/scripts/freeze_modules.py        | 3 +++
+ 5 files changed, 22 insertions(+)
+
+diff --git a/Makefile.pre.in b/Makefile.pre.in
+index 81d4d50..24f4e2e 100644
+--- a/Makefile.pre.in
++++ b/Makefile.pre.in
+@@ -1028,6 +1028,7 @@ FROZEN_FILES_IN = \
+ 		Lib/importlib/util.py \
+ 		Lib/importlib/machinery.py \
+ 		Lib/runpy.py \
++		Lib/retrace.py \
+ 		Lib/__hello__.py \
+ 		Lib/__phello__/__init__.py \
+ 		Lib/__phello__/ham/__init__.py \
+@@ -1053,6 +1054,7 @@ FROZEN_FILES_OUT = \
+ 		Python/frozen_modules/importlib.util.h \
+ 		Python/frozen_modules/importlib.machinery.h \
+ 		Python/frozen_modules/runpy.h \
++		Python/frozen_modules/retrace.h \
+ 		Python/frozen_modules/__hello__.h \
+ 		Python/frozen_modules/__phello__.h \
+ 		Python/frozen_modules/__phello__.ham.h \
+@@ -1125,6 +1127,9 @@ Python/frozen_modules/importlib.machinery.h: Lib/importlib/machinery.py $(FREEZE
+ Python/frozen_modules/runpy.h: Lib/runpy.py $(FREEZE_MODULE_DEPS)
+ 	$(FREEZE_MODULE) runpy $(srcdir)/Lib/runpy.py Python/frozen_modules/runpy.h
+ 
++Python/frozen_modules/retrace.h: Lib/retrace.py $(FREEZE_MODULE_DEPS)
++	$(FREEZE_MODULE) retrace $(srcdir)/Lib/retrace.py Python/frozen_modules/retrace.h
++
+ Python/frozen_modules/__hello__.h: Lib/__hello__.py $(FREEZE_MODULE_DEPS)
+ 	$(FREEZE_MODULE) __hello__ $(srcdir)/Lib/__hello__.py Python/frozen_modules/__hello__.h
+ 
+@@ -1180,6 +1185,7 @@ $(DEEPFREEZE_C): $(DEEPFREEZE_DEPS)
+ 	Python/frozen_modules/importlib.util.h:importlib.util \
+ 	Python/frozen_modules/importlib.machinery.h:importlib.machinery \
+ 	Python/frozen_modules/runpy.h:runpy \
++	Python/frozen_modules/retrace.h:retrace \
+ 	Python/frozen_modules/__hello__.h:__hello__ \
+ 	Python/frozen_modules/__phello__.h:__phello__ \
+ 	Python/frozen_modules/__phello__.ham.h:__phello__.ham \
+diff --git a/PCbuild/_freeze_module.vcxproj b/PCbuild/_freeze_module.vcxproj
+index b3fd2a6..cb791c4 100644
+--- a/PCbuild/_freeze_module.vcxproj
++++ b/PCbuild/_freeze_module.vcxproj
+@@ -323,6 +323,11 @@
+       <IntFile>$(IntDir)runpy.g.h</IntFile>
+       <OutFile>$(PySourcePath)Python\frozen_modules\runpy.h</OutFile>
+     </None>
++    <None Include="..\Lib\retrace.py">
++      <ModName>retrace</ModName>
++      <IntFile>$(IntDir)retrace.g.h</IntFile>
++      <OutFile>$(PySourcePath)Python\frozen_modules\retrace.h</OutFile>
++    </None>
+     <None Include="..\Lib\__hello__.py">
+       <ModName>__hello__</ModName>
+       <IntFile>$(IntDir)__hello__.g.h</IntFile>
+@@ -413,6 +418,7 @@
+ 		 "$(PySourcePath)Python\frozen_modules\importlib.util.h:importlib.util" ^
+ 		 "$(PySourcePath)Python\frozen_modules\importlib.machinery.h:importlib.machinery" ^
+ 		 "$(PySourcePath)Python\frozen_modules\runpy.h:runpy" ^
++		 "$(PySourcePath)Python\frozen_modules\retrace.h:retrace" ^
+ 		 "$(PySourcePath)Python\frozen_modules\__hello__.h:__hello__" ^
+ 		 "$(PySourcePath)Python\frozen_modules\__phello__.h:__phello__" ^
+ 		 "$(PySourcePath)Python\frozen_modules\__phello__.ham.h:__phello__.ham" ^
+diff --git a/PCbuild/_freeze_module.vcxproj.filters b/PCbuild/_freeze_module.vcxproj.filters
+index d107849..ce8c5d7 100644
+--- a/PCbuild/_freeze_module.vcxproj.filters
++++ b/PCbuild/_freeze_module.vcxproj.filters
+@@ -456,6 +456,9 @@
+     <None Include="..\Lib\runpy.py">
+       <Filter>Python Files</Filter>
+     </None>
++    <None Include="..\Lib\retrace.py">
++      <Filter>Python Files</Filter>
++    </None>
+     <None Include="..\Lib\__hello__.py">
+       <Filter>Python Files</Filter>
+     </None>
+diff --git a/Python/frozen.c b/Python/frozen.c
+index 8a2a724..9f4d454 100644
+--- a/Python/frozen.c
++++ b/Python/frozen.c
+@@ -64,6 +64,7 @@ extern PyObject *_Py_get_stat_toplevel(void);
+ extern PyObject *_Py_get_importlib_util_toplevel(void);
+ extern PyObject *_Py_get_importlib_machinery_toplevel(void);
+ extern PyObject *_Py_get_runpy_toplevel(void);
++extern PyObject *_Py_get_retrace_toplevel(void);
+ extern PyObject *_Py_get___hello___toplevel(void);
+ extern PyObject *_Py_get___hello___toplevel(void);
+ extern PyObject *_Py_get___hello___toplevel(void);
+@@ -104,6 +105,9 @@ static const struct _frozen stdlib_modules[] = {
+     {"importlib.util", NULL, 0, false, GET_CODE(importlib_util)},
+     {"importlib.machinery", NULL, 0, false, GET_CODE(importlib_machinery)},
+     {"runpy", NULL, 0, false, GET_CODE(runpy)},
++
++    /* retrace */
++    {"retrace", NULL, 0, false, GET_CODE(retrace)},
+     {0, 0, 0} /* stdlib sentinel */
+ };
+ static const struct _frozen test_modules[] = {
+diff --git a/Tools/scripts/freeze_modules.py b/Tools/scripts/freeze_modules.py
+index 0e41d96..8c6aa4f 100644
+--- a/Tools/scripts/freeze_modules.py
++++ b/Tools/scripts/freeze_modules.py
+@@ -73,6 +73,9 @@
+         "importlib.machinery",
+         "runpy",
+     ]),
++    ('retrace', [
++        'retrace',
++    ]),
+     (TESTS_SECTION, [
+         '__hello__',
+         '__hello__ : __hello_alias__',
+-- 
+2.50.1 (Apple Git-155)

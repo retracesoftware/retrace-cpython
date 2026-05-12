@@ -8,6 +8,10 @@ on:
         required: true
         default: "manifest-all"
         type: string
+      release_tag:
+        description: "Git tag / GitHub Release to build from; empty uses the current tag or v<VERSION>"
+        required: false
+        type: string
       target:
         description: "Platform target to build"
         required: true
@@ -22,19 +26,11 @@ on:
           - windows-x64
           - windows-x86
           - windows-arm64
+          - none
       package_version:
-        description: "Exact Retrace package version; overrides package_bump when set"
+        description: "Exact Retrace package version; empty reads VERSION from the release tag"
         required: false
         type: string
-      package_bump:
-        description: "Retrace package version component to bump from the latest PyPI release"
-        required: true
-        default: "point"
-        type: choice
-        options:
-          - point
-          - minor
-          - major
       release_build:
         description: "Use optimized CPython configure flags on POSIX builds"
         required: true
@@ -46,12 +42,17 @@ on:
         default: false
         type: boolean
       upload_artifacts:
-        description: "Upload minimal runtime archives"
+        description: "Upload workflow-run runtime/wheel artifacts"
+        required: true
+        default: true
+        type: boolean
+      upload_release_assets:
+        description: "Upload missing wheels to the GitHub Release for the release tag"
         required: true
         default: true
         type: boolean
       publish_pypi:
-        description: "Publish retracesoftware-cpython wheels to PyPI"
+        description: "Publish all wheel assets from the GitHub Release to PyPI"
         required: true
         default: false
         type: boolean
@@ -60,13 +61,14 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.python_version || 'manifest-all' }}-${{ inputs.target || 'all' }}-${{ inputs.publish_pypi || false }}
+  group: ${{ github.workflow }}-${{ inputs.release_tag || github.ref }}-${{ inputs.python_version || 'manifest-all' }}-${{ inputs.target || 'all' }}-${{ inputs.publish_pypi || false }}
   cancel-in-progress: true
 
 env:
   RELEASE_BUILD: ${{ inputs.release_build || false }}
   SKIP_TESTS: ${{ inputs.skip_tests || false }}
   UPLOAD_ARTIFACTS: ${{ inputs.upload_artifacts }}
+  UPLOAD_RELEASE_ASSETS: ${{ inputs.upload_release_assets }}
   PUBLISH_PYPI: ${{ inputs.publish_pypi || false }}
 
 jobs:
@@ -75,6 +77,8 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       package_version: ${{ steps.package_version.outputs.package_version }}
+      release_tag: ${{ steps.package_version.outputs.release_tag }}
+      checkout_ref: ${{ steps.package_version.outputs.checkout_ref }}
       versions: ${{ steps.versions.outputs.versions }}
       posix_platforms: ${{ steps.versions.outputs.posix_platforms }}
       windows_platforms: ${{ steps.versions.outputs.windows_platforms }}
@@ -83,6 +87,57 @@ jobs:
     steps:
       - name: Check out retrace-cpython
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve release tag and package version
+        id: package_version
+        env:
+          PACKAGE_VERSION_INPUT: ${{ inputs.package_version || '' }}
+          RELEASE_TAG_INPUT: ${{ inputs.release_tag || '' }}
+          GITHUB_REF_TYPE_VALUE: ${{ github.ref_type }}
+          GITHUB_REF_NAME_VALUE: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          release_tag="${RELEASE_TAG_INPUT#refs/tags/}"
+          if [[ -z "${release_tag}" && "${GITHUB_REF_TYPE_VALUE}" == "tag" ]]; then
+            release_tag="${GITHUB_REF_NAME_VALUE}"
+          fi
+          if [[ -z "${release_tag}" ]]; then
+            if [[ -n "${PACKAGE_VERSION_INPUT}" ]]; then
+              version_for_tag="${PACKAGE_VERSION_INPUT#v}"
+            else
+              version_for_tag="$(scripts/package-version)"
+            fi
+            release_tag="v${version_for_tag}"
+          fi
+
+          git fetch --force --tags
+          if ! git rev-parse --verify --quiet "refs/tags/${release_tag}^{commit}" >/dev/null; then
+            echo "Release tag does not exist: ${release_tag}" >&2
+            echo "Create and push the tag before building release assets." >&2
+            exit 1
+          fi
+
+          git checkout --detach "refs/tags/${release_tag}"
+
+          if [[ -n "${PACKAGE_VERSION_INPUT}" ]]; then
+            package_version="${PACKAGE_VERSION_INPUT#v}"
+          else
+            package_version="$(scripts/package-version)"
+            if [[ "${release_tag}" == v* && "${package_version}" != "${release_tag#v}" ]]; then
+              echo "VERSION (${package_version}) does not match release tag (${release_tag})." >&2
+              echo "Update VERSION or pass package_version explicitly for exceptional rebuilds." >&2
+              exit 1
+            fi
+          fi
+
+          echo "package_version=${package_version}" >> "${GITHUB_OUTPUT}"
+          echo "release_tag=${release_tag}" >> "${GITHUB_OUTPUT}"
+          echo "checkout_ref=refs/tags/${release_tag}" >> "${GITHUB_OUTPUT}"
+          echo "Selected package version: ${package_version}"
+          echo "Selected release tag: ${release_tag}"
 
       - name: Resolve versions
         id: versions
@@ -146,9 +201,13 @@ jobs:
           ]
 
           all_targets = {item["target"] for item in posix_platforms + windows_platforms}
+          all_targets.add("none")
           if target != "all" and target not in all_targets:
               raise SystemExit(f"Unsupported target: {target}")
-          if target != "all":
+          if target == "none":
+              posix_platforms = []
+              windows_platforms = []
+          elif target != "all":
               posix_platforms = [
                   item for item in posix_platforms if item["target"] == target
               ]
@@ -170,21 +229,6 @@ jobs:
           )
           PY
 
-      - name: Resolve package version
-        id: package_version
-        env:
-          PACKAGE_VERSION_INPUT: ${{ inputs.package_version || '' }}
-          PACKAGE_BUMP: ${{ inputs.package_bump || 'point' }}
-        run: |
-          set -euo pipefail
-          if [[ -n "${PACKAGE_VERSION_INPUT}" ]]; then
-            package_version="${PACKAGE_VERSION_INPUT#v}"
-          else
-            package_version="$(scripts/resolve-package-version "${PACKAGE_BUMP}")"
-          fi
-          echo "package_version=${package_version}" >> "${GITHUB_OUTPUT}"
-          echo "Selected package version: ${package_version}"
-
   posix:
     name: ${{ matrix.python-version }} ${{ matrix.platform.target }}
     needs: versions
@@ -203,6 +247,13 @@ jobs:
     steps:
       - name: Check out retrace-cpython
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.versions.outputs.checkout_ref }}
+
+      - name: Set up Python for docs tooling
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
 
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
@@ -312,11 +363,23 @@ jobs:
             find "${source_dir}" -maxdepth 1 -type f -perm -111 -print >&2
             exit 1
           fi
+          smoke_tests=(
+            tests/smoke/probe_capability.py
+            tests/smoke/thread_handoff.py
+            tests/smoke/thread_id_determinism.py
+            tests/smoke/thread_probe_concurrency.py
+          )
           scripts/test-against-vanilla \
             "${patched_python}" \
             "${GITHUB_WORKSPACE}/build/vanilla/${{ matrix.python-version }}" \
-            tests/smoke/probe_capability.py \
-            --version "${{ matrix.python-version }}"
+            --version "${{ matrix.python-version }}" \
+            "${smoke_tests[@]}"
+
+      - name: Install docs dependencies
+        run: python3 -m pip install -r requirements-docs.txt
+
+      - name: Build docs and LLM references
+        run: python3 scripts/build-docs
 
       - name: Package minimal runtime overlay
         run: |
@@ -331,10 +394,14 @@ jobs:
             "${{ matrix.python-version }}" \
             "${PACKAGE_VERSION}" \
             "${{ matrix.platform.target }}" \
-            "build/package/retrace-cpython-${{ matrix.python-version }}-${{ matrix.platform.target }}"
+            "build/package/retrace-cpython-${{ matrix.python-version }}-${{ matrix.platform.target }}" \
+            --docs-dir build/site
 
       - name: Upload wheel artifact
-        if: env.UPLOAD_ARTIFACTS == 'true' || env.PUBLISH_PYPI == 'true'
+        if: |
+          env.UPLOAD_ARTIFACTS == 'true' ||
+          env.UPLOAD_RELEASE_ASSETS == 'true' ||
+          env.PUBLISH_PYPI == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: retracesoftware-cpython-wheel-${{ matrix.python-version }}-${{ matrix.platform.target }}
@@ -367,6 +434,8 @@ jobs:
     steps:
       - name: Check out retrace-cpython
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.versions.outputs.checkout_ref }}
 
       - name: Set up Python for patch manifest parsing
         uses: actions/setup-python@v5
@@ -449,11 +518,25 @@ jobs:
           $source = Join-Path $env:GITHUB_WORKSPACE "build/src/cpython-$env:PYTHON_VERSION+retrace"
           $vanilla = Join-Path $env:GITHUB_WORKSPACE "build/vanilla/$env:PYTHON_VERSION-$env:PCBUILD_OUTPUT"
           $python = Join-Path $source "PCbuild/$env:PCBUILD_OUTPUT/python.exe"
+          $smokeTests = @(
+            "$env:GITHUB_WORKSPACE/tests/smoke/probe_capability.py",
+            "$env:GITHUB_WORKSPACE/tests/smoke/thread_handoff.py",
+            "$env:GITHUB_WORKSPACE/tests/smoke/thread_id_determinism.py",
+            "$env:GITHUB_WORKSPACE/tests/smoke/thread_probe_concurrency.py"
+          )
           python "$env:GITHUB_WORKSPACE/scripts/test-against-vanilla" `
             $python `
             $vanilla `
-            "$env:GITHUB_WORKSPACE/tests/smoke/probe_capability.py" `
-            --version $env:PYTHON_VERSION
+            --version $env:PYTHON_VERSION `
+            $smokeTests
+
+      - name: Install docs dependencies
+        shell: pwsh
+        run: python -m pip install -r requirements-docs.txt
+
+      - name: Build docs and LLM references
+        shell: pwsh
+        run: python scripts/build-docs
 
       - name: Package minimal runtime overlay
         shell: pwsh
@@ -481,10 +564,15 @@ jobs:
             $env:PYTHON_VERSION `
             $env:PACKAGE_VERSION `
             $env:TARGET `
-            $runtime
+            $runtime `
+            --docs-dir `
+            build/site
 
       - name: Upload wheel artifact
-        if: env.UPLOAD_ARTIFACTS == 'true' || env.PUBLISH_PYPI == 'true'
+        if: |
+          env.UPLOAD_ARTIFACTS == 'true' ||
+          env.UPLOAD_RELEASE_ASSETS == 'true' ||
+          env.PUBLISH_PYPI == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: retracesoftware-cpython-wheel-${{ matrix.python-version }}-${{ matrix.platform.target }}
@@ -499,23 +587,22 @@ jobs:
           path: build/dist/*.zip
           if-no-files-found: error
 
-  publish-pypi:
-    name: Publish wheels to PyPI
+  upload-release-assets:
+    name: Upload missing wheels to GitHub Release
     if: |
-      inputs.publish_pypi == true &&
+      (inputs.upload_release_assets == true || inputs.publish_pypi == true) &&
       always() &&
       (needs.posix.result == 'success' || needs.posix.result == 'skipped') &&
       (needs.windows.result == 'success' || needs.windows.result == 'skipped') &&
       (needs.posix.result == 'success' || needs.windows.result == 'success')
     needs:
+      - versions
       - posix
       - windows
     runs-on: ubuntu-24.04
-    environment: pypi
     permissions:
       actions: read
-      contents: read
-      id-token: write
+      contents: write
     steps:
       - name: Download wheel artifacts
         uses: actions/download-artifact@v4
@@ -524,6 +611,68 @@ jobs:
           path: dist
           merge-multiple: true
 
+      - name: Upload missing release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.versions.outputs.release_tag }}
+          PACKAGE_VERSION: ${{ needs.versions.outputs.package_version }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+
+          wheels=(dist/*.whl)
+          if (( ${#wheels[@]} == 0 )); then
+            echo "No wheels downloaded from this workflow run." >&2
+            exit 1
+          fi
+
+          if ! gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+            gh release create "${RELEASE_TAG}" \
+              --verify-tag \
+              --title "retracesoftware-cpython ${PACKAGE_VERSION}" \
+              --notes "Wheel artifacts for retracesoftware-cpython ${PACKAGE_VERSION}."
+          fi
+
+          gh release view "${RELEASE_TAG}" \
+            --json assets \
+            --jq '.assets[].name' > existing-assets.txt
+
+          for wheel in "${wheels[@]}"; do
+            name="$(basename "${wheel}")"
+            if grep -Fxq "${name}" existing-assets.txt; then
+              echo "Release asset already exists, skipping: ${name}"
+              continue
+            fi
+            echo "Uploading release asset: ${name}"
+            gh release upload "${RELEASE_TAG}" "${wheel}"
+          done
+
+  publish-pypi:
+    name: Publish release wheels to PyPI
+    if: |
+      inputs.publish_pypi == true &&
+      always() &&
+      (needs['upload-release-assets'].result == 'success' ||
+       needs['upload-release-assets'].result == 'skipped')
+    needs:
+      - versions
+      - upload-release-assets
+    runs-on: ubuntu-24.04
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Download wheel assets from GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.versions.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          gh release download "${RELEASE_TAG}" --pattern '*.whl' --dir dist
+          find dist -name '*.whl' -type f -print -quit | grep -q .
+
       - name: List distributions
         run: ls -lh dist
 
@@ -531,3 +680,4 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist
+          skip-existing: true

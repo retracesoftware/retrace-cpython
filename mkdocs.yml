@@ -1,0 +1,38 @@
+site_name: retrace-cpython
+site_url: https://retracesoftware.github.io/retrace-cpython/
+site_description: Patched CPython runtime artifacts and native probes for Retrace.
+docs_dir: docs
+site_dir: build/site
+
+nav:
+  - Overview: index.md
+  - Public API: api.md
+  - Runtime Package: runtime-package.md
+  - Build And Release: build-release.md
+  - Patch And Overlay Model: patching.md
+  - Testing: testing.md
+  - Probe ABI: probe-abi.md
+
+plugins:
+  - search
+  - llmstxt:
+      markdown_description: |
+        retrace-cpython builds patched CPython executables for Retrace. The
+        wheel package exposes retracesoftware_cpython.executable(), which
+        returns the packaged patched Python executable path. Patched
+        interpreters provide the public retrace module and the low-level
+        _retrace builtin for execution coordinates, thread scheduling
+        telemetry, call_at callbacks, deterministic identity hashes, and replay
+        handoff helpers.
+      full_output: llms-full.txt
+      sections:
+        Start Here:
+          - index.md: Project purpose, repository shape, and where to begin.
+          - runtime-package.md: How to consume the PyPI wheel from other projects.
+        Public Interfaces:
+          - api.md: Public retrace and retracesoftware_cpython Python APIs.
+          - probe-abi.md: Private native probe ABI and patched interpreter internals.
+        Maintainers:
+          - build-release.md: Local builds, docs generation, wheels, and release workflow.
+          - patching.md: Patch stack and overlay rules.
+          - testing.md: Smoke tests, CPython tests, and release validation.

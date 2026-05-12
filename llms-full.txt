@@ -1,0 +1,624 @@
+# retrace-cpython
+
+> Patched CPython runtime artifacts and native probes for Retrace.
+
+retrace-cpython builds patched CPython executables for Retrace. The
+wheel package exposes retracesoftware_cpython.executable(), which
+returns the packaged patched Python executable path. Patched
+interpreters provide the public retrace module and the low-level
+_retrace builtin for execution coordinates, thread scheduling
+telemetry, call_at callbacks, deterministic identity hashes, and replay
+handoff helpers.
+
+
+# Start Here
+
+# retrace-cpython
+
+`retrace-cpython` is the patched CPython runtime used by Retrace when it needs native execution probes for deterministic record and replay.
+
+The repository does not vendor CPython. It builds from exact upstream CPython release tags, applies the release-specific patch stack under `patches/`, copies Retrace-owned overlay files from `cpython-overlay/`, and packages the resulting patched executable for the `retracesoftware-cpython` PyPI project.
+
+## What It Provides
+
+- Patched CPython executables for supported upstream CPython releases.
+- A built-in `_retrace` module plus a public `retrace` Python module.
+- Fast execution coordinate snapshots, deltas, and coordinate hashes.
+- Thread start, yield, and resume callbacks for scheduling telemetry.
+- `call_at` callbacks for exact execution coordinate hooks.
+- Deterministic thread identities and identity hashes for replay stability.
+- Release tooling for runtime archives and PyPI wheels.
+
+## Who Should Use It
+
+Most application code should not import this repository directly. Higher-level Retrace packages should depend on the wheel artifact, call `retracesoftware_cpython.executable()`, and execute that path when a patched interpreter is required.
+
+Code running inside the patched interpreter should import `retrace` for the public Python API. `_retrace` is the low-level native builtin used for capability checks and native-oriented tests.
+
+## Documentation Map
+
+- [Public API](https://retracesoftware.github.io/retrace-cpython/api/index.md): public Python calls exposed by the patched interpreter and runtime package.
+- [Runtime Package](https://retracesoftware.github.io/retrace-cpython/runtime-package/index.md): how other projects should consume the PyPI wheel.
+- [Build And Release](https://retracesoftware.github.io/retrace-cpython/build-release/index.md): local builds, docs generation, and release workflow.
+- [Patch And Overlay Model](https://retracesoftware.github.io/retrace-cpython/patching/index.md): how CPython patches stay small.
+- [Testing](https://retracesoftware.github.io/retrace-cpython/testing/index.md): smoke tests and release validation.
+- [Probe ABI](https://retracesoftware.github.io/retrace-cpython/probe-abi/index.md): private native ABI notes and implementation details.
+
+# Runtime Package
+
+The `retracesoftware-cpython` PyPI package contains a minimal patched CPython runtime overlay for one CPython version and one platform.
+
+The package is intended for higher-level Retrace projects that need to launch a patched interpreter without knowing the wheel's private directory layout.
+
+## Public Helper
+
+```
+import os
+import retracesoftware_cpython
+
+python = retracesoftware_cpython.executable()
+os.execv(python, [python, "-c", "import retrace; print(retrace.coordinates())"])
+```
+
+`executable()` returns a string path to the packaged patched Python executable. This is the stable public API for the wheel.
+
+Do not hardcode paths under `retracesoftware_cpython._runtime`. The runtime layout is private and can differ by platform.
+
+## Console Script
+
+The wheel installs:
+
+```
+retrace-python
+```
+
+This command launches the packaged patched interpreter and forwards arguments:
+
+```
+retrace-python -c "import retrace; print(retrace.hash())"
+```
+
+## Runtime Shape
+
+Release wheels contain the patched Python executable and required runtime dynamic libraries. They intentionally avoid vendoring a full standard library. The launcher sets up the packaged executable so it can run with the matching Python environment.
+
+The package version is the Retrace runtime package version. It is independent of the upstream CPython version embedded in a specific wheel. Wheel filenames carry the CPython build tag and platform tag.
+
+## AI-Readable Docs
+
+Release builds generate `llms.txt` and `llms-full.txt` from the normal MkDocs documentation. The wheel includes those files inside the `retracesoftware_cpython` package so coding agents can inspect the installed artifact without scraping GitHub.
+# Public Interfaces
+
+# Public API
+
+Patched interpreters expose a public `retrace` module backed by the native `_retrace` builtin. Python code should prefer `retrace`; `_retrace` remains the lower-level capability and test substrate.
+
+## Runtime Package
+
+The `retracesoftware-cpython` wheel exposes one public helper:
+
+```
+import retracesoftware_cpython
+
+python_executable = retracesoftware_cpython.executable()
+```
+
+`executable()` returns the packaged patched Python executable path as a string. Callers should execute that path directly instead of hardcoding private runtime locations such as `_runtime/python.exe` or `_runtime/bin/python`.
+
+The wheel also installs a console script:
+
+```
+retrace-python
+```
+
+That command launches the packaged patched interpreter.
+
+## Probe Discovery
+
+On unpatched CPython, `_retrace` is absent. Consumers should probe before using native features:
+
+```
+import importlib.util
+
+if importlib.util.find_spec("_retrace") is None:
+    raise RuntimeError("Retrace CPython probes are unavailable")
+```
+
+## Coordinates
+
+```
+import retrace
+
+cursor = retrace.coordinates()
+other_thread_cursor = retrace.coordinates(thread_id)
+suffix = retrace.coordinates(thread_id, drop=common_prefix_count)
+```
+
+`coordinates()` returns a tuple of Python `int` values ordered from the oldest visible Python frame to the current frame. Each visible frame contributes:
+
+```
+(call_ordinal, instruction_coordinate)
+```
+
+`thread_id` is the deterministic integer returned by `_thread.get_ident()`. Unknown thread ids raise `LookupError`. `drop` omits leading coordinate words.
+
+## Thread Deltas
+
+```
+delta = retrace.thread_delta()
+common = delta[0]
+del materialized_cursor[common:]
+materialized_cursor.extend(delta[1:])
+```
+
+`thread_delta()` is the fast current-thread path for scheduling recorders. It returns a tuple where the first item is the common prefix length, followed by the changed coordinate suffix.
+
+## Coordinate Hash
+
+```
+location = retrace.hash()
+```
+
+`hash()` returns the current thread's 64-bit coordinate-location hash as a Python `int`. It hashes the same logical coordinate stream returned by `coordinates()` without materializing the full tuple.
+
+`RETRACE_ROOT_SEED` can be set before interpreter startup to seed the main thread id. If unset, the literal string `retrace` is used.
+
+## Include And Exclude Wrappers
+
+```
+@retrace.exclude
+def control_plane_helper():
+    ...
+
+@retrace.include
+def application_visible_callback():
+    ...
+```
+
+`exclude(callable)` returns a wrapper whose frames are transparent to coordinates, deltas, and hashes. It is intended for Retrace control-plane code.
+
+`include(callable)` returns a wrapper that re-enters application-visible coordinate space when called from transparent callback code.
+
+Both wrappers support decorator usage.
+
+## Scheduling Callbacks
+
+```
+def on_start():
+    ...
+
+def on_yield():
+    ...
+
+def on_resume():
+    ...
+
+retrace.callbacks.thread_start = on_start
+retrace.callbacks.thread_yield = on_yield
+retrace.callbacks.thread_resume = on_resume
+
+retrace.callbacks.thread_yield = None
+```
+
+Callbacks receive no arguments and run on the thread they describe. Use `_thread.get_ident()` inside the callback to read the deterministic thread id.
+
+`thread_start` runs after a new thread acquires the GIL and before its first Python frame runs. Coordinates observed inside it are `()`.
+
+`thread_yield` runs before the eval loop drops the GIL for a Python-level switch request.
+
+`thread_resume` runs after a thread reacquires the GIL and before application bytecode resumes.
+
+Scheduling callbacks are coordinate-transparent. Coordinates, deltas, and hashes observed inside them describe the application boundary that caused the callback, not callback-local helper frames.
+
+## call_at
+
+```
+def on_hit():
+    ...
+
+def on_overshoot():
+    ...
+
+retrace.call_at(thread_id, coordinates, on_hit, on_overshoot)
+retrace.call_at(None)
+```
+
+`call_at(thread_id, coordinates, callback, overshoot_callback=None)` arms one coordinate callback per interpreter. When the selected thread reaches the exact coordinate tuple, CPython clears the target and calls `callback()` on that thread.
+
+If the thread passes the target coordinate without hitting it exactly, CPython clears the target and calls `overshoot_callback()` when supplied. If the target coordinate is already in the past when arming, `call_at` raises `ValueError`.
+
+`call_at(None)` clears the armed target.
+
+## ThreadHandoff
+
+```
+handoff = retrace.ThreadHandoff()
+handoff(target_thread_id)
+handoff.close()
+```
+
+`ThreadHandoff()` creates a replay scheduling gate. Calling the object marks the target deterministic thread id runnable, then parks the current thread with the GIL released until another handoff marks the current thread runnable. Wake tokens are durable: the target thread does not need to be asleep yet.
+
+`close()` wakes sleeping threads and causes future handoff calls to raise `RuntimeError`.
+
+# Probe ABI
+
+This document sketches the native probe contract exposed by patched CPython builds. The ABI is private to Retrace and should be versioned explicitly.
+
+## Goals
+
+- Keep CPython injection points minimal.
+- Put most probe implementation code in new CPython compilation units.
+- Make unpatched CPython safe: Retrace imports must not crash when probes are absent.
+- Keep record-side thread-switch support telemetry-only for the first cut.
+- Leave room for replay-side enforcement later without moving the hook sites.
+
+## Discovery
+
+Patched CPython exposes a built-in `_retrace` module plus a public Python `retrace` convenience module. Python-level consumers should generally import `retrace`; it delegates to `_retrace` and owns policy such as wrapping registered callbacks with `exclude()`. Low-level consumers can probe for `_retrace` with `importlib.util.find_spec()` and can confirm the baked in module shape with `"_retrace" in sys.builtin_module_names`. Absence means "probe unavailable", which is the expected graceful-degradation path on unpatched CPython.
+
+The public Python API is:
+
+```
+retrace.coordinates(thread_id=None, drop=0)
+retrace.thread_delta()
+retrace.hash()
+retrace.exclude(callable)
+retrace.include(callable)
+retrace.callbacks.thread_start = callback_or_none
+retrace.callbacks.thread_yield = callback_or_none
+retrace.callbacks.thread_resume = callback_or_none
+retrace.call_at(
+    thread_id, coordinates, callback, overshoot_callback=None
+)
+retrace.call_at(None)
+retrace.ThreadHandoff()
+```
+
+The low-level builtin exposes native primitives under `_retrace`, including the callback get/set functions used by the public `retrace.callbacks` object.
+
+`coordinates()` returns a tuple of Python `int` values. Values are visible Python frame execution coordinates, oldest frame first and current frame last. Each visible frame contributes `(call_ordinal, instruction_coordinate)`. If `thread_id` is omitted, the current thread is used. When present, `thread_id` is the integer Retrace thread id returned by `_thread.get_ident()`; unknown thread ids raise `LookupError`. `drop` omits that many leading coordinate words from the returned tuple, which lets callers reuse a known common prefix and fetch only the remaining suffix. Use `coordinates(None, drop)` to drop coordinates for the current thread.
+
+`thread_delta()` returns a tuple for efficient current-thread deltas. The first item is the number of leading coordinates still common with the caller's previous materialized stack, followed by the changed suffix to append:
+
+```
+delta = _retrace.thread_delta()
+common_count = delta[0]
+del stack[common_count:]
+stack.extend(delta[1:])
+```
+
+The native side stores no previous coordinate vector and no previous stack size. Each visible frame carries remembered call-ordinal and instruction-coordinate words for the single Retrace delta stream. On a call, the module compares remembered frame coordinates with the current root-first frame path. It emits `[common_count, *new_suffix]` and updates remembered coordinate words only on emitted frames. On the first call, it emits the full current frame coordinate vector with `common_count == 0`.
+
+`hash()` returns the current thread's 64-bit coordinate-location hash as a Python `int`. It uses the same visible-frame rules as `coordinates()` but avoids materializing the coordinate vector.
+
+`RETRACE_ROOT_SEED` can be set to any stable string before interpreter startup to seed the main thread id. If it is unset, Retrace uses the literal seed string `retrace`.
+
+`callbacks.thread_start`, `callbacks.thread_yield`, and `callbacks.thread_resume` install Python callbacks for eval-loop thread scheduling telemetry. Assign `None` to any property to clear it. All three callbacks use the same signature:
+
+```
+callback()
+```
+
+The start callback runs once on a newly started thread after it acquires the GIL and before its first Python frame runs; coordinates observed inside it are `()`. The yield callback runs on the current thread just before the eval loop drops the GIL in response to a Python-level switch request. The resume callback runs on the current thread after it has acquired the GIL and restored its current thread state, before application bytecode resumes. The current deterministic thread id can be read with `_thread.get_ident()`. Callback return values are ignored. Thread scheduling callbacks are coordinate-transparent: coordinates, deltas, and hashes observed inside the callback describe the pinned application instruction boundary, not callback-local Python frames.
+
+`call_at(thread_id, coordinates, callback, overshoot_callback=None)` arms one coordinate callback for the current interpreter. `thread_id` is the integer Retrace thread id, `coordinates` is the full visible frame coordinate tuple returned by `coordinates()`, and `callback()` is called when that thread reaches the exact coordinate. Arming raises `ValueError` if `coordinates` is already in the past for that thread. If the thread passes the target without hitting it exactly, the optional `overshoot_callback()` is called. `call_at` callbacks run in a coordinate-transparent scope. The public `retrace` module stores registered callbacks as `_retrace.exclude` wrappers. The callback runs on the thread that reached or passed the target. Calling a no-argument callable wrapped with `retrace.include` runs application-visible work under the target frame, then returns to the transparent callback. `call_at(None)` clears the armed callback.
+
+`ThreadHandoff()` creates a callable replay scheduling gate. Calling `handoff(thread_id)` uses the stable `_thread.get_ident()` value as the key: it stores a durable runnable permit for `thread_id`, then parks the current thread with the GIL released until another handoff stores a permit for the current thread. `handoff.close()` wakes current sleepers and rejects future handoff calls.
+
+Native Retrace extensions should eventually discover a native API through a capsule, for example:
+
+```
+_retrace_probe._C_API
+```
+
+They should import the capsule at runtime and treat failure as "probe unavailable". They should not link against mandatory patched CPython symbols, because that would make the extension fail to import on vanilla CPython.
+
+The C API should include at least:
+
+```
+typedef struct {
+    uint32_t abi_version;
+    uint32_t feature_flags;
+    void *userdata;
+
+    int (*set_thread_yield_callback)(
+        void *userdata,
+        void (*callback)(void *userdata,
+                         PyInterpreterState *interp,
+                         PyThreadState *thread,
+                         uint64_t execution_coordinate));
+    int (*set_thread_resume_callback)(
+        void *userdata,
+        void (*callback)(void *userdata,
+                         PyInterpreterState *interp,
+                         PyThreadState *thread,
+                         uint64_t execution_coordinate));
+} RetraceProbeAPI;
+```
+
+The exact names can change once the CPython patch exists. The important part is runtime discovery plus feature/ABI checks.
+
+## Feature Flags
+
+```
+RETRACE_PROBE_THREAD_SCHEDULING
+RETRACE_PROBE_COORDINATES
+RETRACE_PROBE_CALL_AT
+```
+
+Retrace should support three modes:
+
+```
+auto     use native probes when available, otherwise fall back
+require  fail early if native probes are unavailable
+off      force fallback behavior
+```
+
+Patched interpreters always keep native coordinates enabled. Retrace control-plane/application classification is handled by higher-level cursor logic rather than by hiding frames in CPython.
+
+## Frame Coordinate
+
+The coordinate is an execution coordinate for one exact patched interpreter build. It is not a portable Python bytecode count.
+
+The 3.12 implementation stores a per-frame signed coordinate bias and computes the current coordinate as:
+
+```
+frame->retrace.coordinate_bias + f_lasti
+```
+
+The bias is adjusted when bytecode dispatch jumps. The exported coordinate path is a pair stream: `(current_call_ordinal, frame_coordinate)` for each visible frame. A child frame receives the nearest visible parent's next child ordinal, and the parent resets that ordinal lazily when its logical instruction coordinate changes. That keeps fallthrough instructions free of extra coordinate writes, keeps inline cache entries invisible, and gives repeated C-driven callbacks distinct coordinate spaces even when the Python caller is suspended at one bytecode offset. Ordinary child calls do not bump or bias the parent coordinate.
+
+`PyThreadState` stores a 64-bit Retrace thread id and records CPython's native `_thread.start_new_thread()` ident for bridge lookups. The main thread id is derived from `RETRACE_ROOT_SEED`, defaulting to the literal string `retrace`. New child thread ids are mixed from the creator's thread id plus parent cursor, then checked against active Retrace thread ids and remixed on the vanishingly unlikely collision path. `PyThreadState` also stores an internal root activation counter in `tstate->retrace.root_coordinate`. If a visible frame starts without a visible Python parent, activation assigns the frame's current call ordinal from that counter and increments it. This covers C-originated callbacks without exporting a separate synthetic root word.
+
+Frames also carry a lazy visible-depth cache. Coordinate snapshot code computes the cache from the parent chain only when needed, then stores it on the frame. Frame activation resets the cache; normal bytecode execution does not maintain a thread-depth counter.
+
+The native layer does not hide ordinary Python frames. Retrace callback frames are the exception: they are marked transparent and skipped so callback code sees the application coordinate that caused the callback.
+
+The patched core types each carry a single `retrace` struct field. Frame-local state lives in `frame->retrace`, thread-local state lives in `tstate->retrace`, and interpreter-wide callback/call_at state lives in `interp->retrace`. The struct definitions live in `Include/cpython/retrace_state.h`, which is copied from the overlay, so adding Retrace-owned fields normally does not require rewriting each CPython-version patch.
+
+Frames carry `uint64_t` state slots at `frame->retrace.last_call_ordinal` and `frame->retrace.last_coordinate`. Those slots hold either the `thread_delta()` stream's remembered coordinate words or unset sentinels. Linking a frame into the active interpreter frame chain refreshes the unset state. The thread uses `tstate->retrace.last_root_coordinate` as the delta stream's thread-prefix initialization sentinel.
+
+Patched builds also maintain a fast 64-bit coordinate-location hash. Each thread's root hash seed is its Retrace thread id. Each visible frame caches only the parent hash prefix in `frame->retrace.coordinate_hash`, and the current location hash is the mixer result of that prefix, the frame's current call ordinal, and the frame's current instruction coordinate. `_retrace.hash()` exposes that current-location hash.
+
+Avoid per-instruction Python callbacks, atomics, allocation, or lock traffic.
+
+## Thread Scheduling Callbacks
+
+The first record-side callbacks are telemetry. The Python API reports no thread arguments; each callback observes the current thread because it runs on that thread. Recorder code can write separate trace events such as:
+
+```
+THREAD_START  thread-id
+THREAD_YIELD  thread-id, coordinate-delta
+THREAD_RESUME thread-id, coordinate-delta
+```
+
+The start event describes a thread that acquired the GIL for the first time before its first Python frame exists; its cursor is empty. The yield event describes a thread reaching an eval-loop handoff point. The resume event describes a previously started thread that reacquired the GIL and is about to continue running Python bytecode. A newly started thread emits start, then later yield/resume events; it does not emit an initial resume. This avoids asking CPython to predict the next thread during yield.
+
+Reentrant delivery is suppressed only for the same thread while its callback is already active; other threads may run their own callbacks. Callback errors are reported through `PyErr_WriteUnraisable()` and treated as accepted telemetry so the interpreter does not deadlock on callback failure. The callbacks should remain small, should commit through a non-yielding writer path, and must not route control-plane I/O through Retrace gates.
+
+A later native capsule API can add richer data:
+
+```
+from thread, to thread, from execution coordinate, to execution coordinate,
+reason
+```
+
+Possible reasons can start coarse:
+
+```
+unknown
+gil_acquire
+gil_drop
+thread_start
+thread_exit
+blocking_wait
+```
+
+## call_at
+
+Replay scheduling can arm a logical execution point:
+
+```
+_retrace.call_at(
+    thread_id, coordinates, callback, overshoot_callback=None
+)
+```
+
+Only one `call_at` is armed per interpreter. The eval loop first checks a cheap armed flag, then the current thread id, then frame visibility. It only compares the full root-first frame coordinate tuple after those checks match.
+
+When the target is reached, CPython clears it before invoking `callback()`. If the current coordinate has passed the target, CPython clears it before invoking the optional `overshoot_callback()`. The callback runs on the thread that reached or passed the target. Calling a no-argument callable wrapped with `retrace.include` runs with counters enabled and parented to the target frame.
+
+`call_at` callbacks are transparent only for the thread running the callback. They may arm `call_at` for another thread and wait; the other thread can still hit that target while the first callback is paused.
+
+Replay code can use `_retrace.ThreadHandoff()` inside call_at callbacks to perform the actual thread handoff. The C helper handles durable wake tokens and releases the GIL while the current thread is parked; Python replay policy still decides which `call_at` target to arm and which stable thread id to wake next.
+
+Callback exceptions propagate back through the eval loop. Replay should treat that as a scheduler/control-plane failure rather than application behavior.
+# Maintainers
+
+# Build And Release
+
+This repository builds CPython from upstream release tags, applies Retrace patches, and packages the resulting runtime artifacts.
+
+## Local Patch And Build
+
+Apply the patch stack to a clean upstream CPython checkout:
+
+```
+scripts/apply-patches 3.12.13
+```
+
+Build and install a patched interpreter:
+
+```
+scripts/build-release 3.12.13
+```
+
+Package an installed interpreter:
+
+```
+scripts/package 3.12.13
+```
+
+By default:
+
+- patched sources go under `build/src/`
+- installed interpreters go under `build/install/`
+- release archives go under `build/dist/`
+
+Set `CPYTHON_REPO_URL` to use a CPython mirror or fork instead of `https://github.com/python/cpython.git`.
+
+## Documentation Build
+
+Install the docs dependencies:
+
+```
+python3 -m pip install -r requirements-docs.txt
+```
+
+Build the MkDocs site and refresh AI-readable docs:
+
+```
+python3 scripts/build-docs
+```
+
+The docs build writes the MkDocs site to `build/site/` and refreshes repository root `llms.txt` and `llms-full.txt` from the generated MkDocs output.
+
+The GitHub release workflow runs the same docs build before wheel packaging and passes the generated site directory into `scripts/package-wheel`, which copies the LLM-readable files into the wheel package.
+
+## Wheel Packaging
+
+The GitHub workflow builds platform wheels for the `retracesoftware-cpython` PyPI project. Wheels contain the minimal runtime overlay plus the `retrace-python` launcher.
+
+To build a wheel from an already packaged runtime:
+
+```
+scripts/package-wheel \
+  3.12.13 \
+  "$(scripts/package-version)" \
+  macos-arm64 \
+  build/package/retrace-cpython-3.12.13-macos-arm64 \
+  --docs-dir build/site
+```
+
+`--docs-dir` should point at the MkDocs output directory containing `llms.txt` and `llms-full.txt`.
+
+## Release Workflow
+
+Release versions live in the tracked `VERSION` file. To release:
+
+1. Update `VERSION`.
+1. Commit the release tree.
+1. Create and push a tag such as `v0.4.3`.
+1. Run the GitHub workflow against that tag.
+
+The workflow checks out the tag before reading patch manifests or building wheels, so later platform builds can be run retroactively against the same release tree.
+
+Built wheels are uploaded as GitHub Release assets. Uploads are additive: if a wheel with the same filename already exists on the release, the workflow leaves it alone. PyPI publishing downloads wheel assets from the GitHub Release and uses `skip-existing`, so rerunning publish is also additive.
+
+Important workflow inputs:
+
+- `release_tag=v0.4.3` builds from that Git tag.
+- `python_version=manifest-all` builds every verified CPython release.
+- `python_version=manifest-latest` builds the latest verified release per series.
+- `python_version=3.12.13` builds one exact CPython release.
+- `target=all` builds every supported platform.
+- `target=macos-arm64` builds only that platform.
+- `target=none` skips builds and only publishes existing GitHub Release wheel assets when `publish_pypi=true`.
+- `package_version=0.4.3` overrides the version read from `VERSION`.
+- `skip_tests` skips CPython test-suite runs for faster smoke publishing.
+- `upload_release_assets` uploads missing wheel assets to the GitHub Release.
+- `publish_pypi` opts into PyPI Trusted Publishing from GitHub Release assets.
+
+# Patch And Overlay Model
+
+Retrace keeps CPython patch files small and release-specific.
+
+## Source Layout
+
+```
+patches/
+  3.11/
+  3.12/
+cpython-overlay/
+  Include/
+  Lib/
+  Modules/
+  Python/
+```
+
+Patch directories may be keyed by exact release, such as `patches/3.12.8/`, or by minor series, such as `patches/3.12/`. `scripts/apply-patches` prefers an exact release directory, then falls back to the minor-series directory.
+
+If a patch directory has a `series.toml`, the manifest declares patch order, supported version range, and verified upstream CPython releases.
+
+## Rules
+
+- Do not vendor a full CPython source tree.
+- Build from exact upstream CPython release tags.
+- Keep patch files as small as possible.
+- Patch files should contain only release-specific CPython injection points and build-system edits.
+- Do not add new functions to patch files.
+- Put new functions, declarations, macros, and reusable scaffolding in a generic header or shared overlay file.
+- Treat the probe ABI as private to a specific `CPython version + retrace_probe_abi` pairing.
+- Do not add old-version compatibility shims.
+
+## Overlay Files
+
+Retrace-owned implementation code belongs in `cpython-overlay/`. The overlay is copied into the upstream CPython checkout after patches apply.
+
+The patch stack should create only the CPython hook sites needed to call that overlay code. This keeps release upgrades reviewable: when CPython changes, the patch diff shows where Retrace attaches, not the whole probe implementation.
+
+## Core State
+
+The patched core types each carry a single `retrace` struct field whose type is defined in `cpython-overlay/Include/cpython/retrace_state.h`.
+
+Adding Retrace-owned fields normally means editing that overlay header and the shared implementation, not expanding every release patch.
+
+See [Probe ABI](https://retracesoftware.github.io/retrace-cpython/probe-abi/index.md) for the current frame, thread, and interpreter state shapes.
+
+# Testing
+
+The repository has two validation layers: focused smoke tests for Retrace probe behavior and CPython's own regression tests for interpreter compatibility.
+
+## Smoke Tests
+
+Run the main capability smoke test against a patched executable:
+
+```
+build/src/cpython-3.12.13+retrace/python.exe tests/smoke/probe_capability.py
+```
+
+Other focused smoke tests cover thread handoff, deterministic thread ids, scheduling callbacks, public `retrace` wrappers, and schedule capture/replay:
+
+```
+build/src/cpython-3.12.13+retrace/python.exe tests/smoke/retrace_public.py
+build/src/cpython-3.12.13+retrace/python.exe tests/smoke/thread_handoff.py
+build/src/cpython-3.12.13+retrace/python.exe tests/smoke/thread_id_determinism.py
+build/src/cpython-3.12.13+retrace/python.exe tests/smoke/thread_probe_concurrency.py
+build/src/cpython-3.12.13+retrace/python.exe tests/smoke/thread_schedule_minimal.py
+build/src/cpython-3.12.13+retrace/python.exe tests/smoke/thread_schedule_stress.py
+```
+
+## Vanilla Compatibility Checks
+
+`scripts/test-against-vanilla` runs smoke tests with a patched executable while pointing it at a matching vanilla CPython install. This validates the intended runtime shape: the wheel carries a minimal patched executable overlay, not a full standard library copy.
+
+## CPython Regression Tests
+
+Run a focused CPython regression test:
+
+```
+build/src/cpython-3.12.13+retrace/python.exe -m test test_sys -q
+```
+
+The full CPython test suite is the stronger validation gate for release builds. The GitHub workflow runs it unless `skip_tests` is enabled for a fast packaging smoke run.
+
+## Docs Build Check
+
+The docs build runs MkDocs in strict mode:
+
+```
+python3 scripts/build-docs
+```
+
+Strict mode fails on broken links and turns missing `llms.txt` generation into a release blocker.

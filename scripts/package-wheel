@@ -60,6 +60,8 @@ if __name__ == "__main__":
     main()
 '''
 
+LLMS_ARTIFACTS = ("llms.txt", "llms-full.txt")
+
 
 def parse_cpython_version(cpython_version):
     parts = cpython_version.split(".")
@@ -140,7 +142,31 @@ def copy_runtime(runtime_root, package_root):
     return copied
 
 
-def build_stage(cpython_version, package_version, target, runtime_root, stage):
+def copy_docs(docs_dir, package_root):
+    if docs_dir is None:
+        return []
+
+    docs_dir = docs_dir.resolve()
+    copied = []
+    missing = []
+    for name in LLMS_ARTIFACTS:
+        src = docs_dir / name
+        if not src.is_file():
+            missing.append(str(src))
+            continue
+        dest = package_root / name
+        shutil.copy2(src, dest)
+        copied.append(dest)
+
+    if missing:
+        raise SystemExit(
+            "docs directory is missing expected LLM artifacts: "
+            + ", ".join(missing)
+        )
+    return copied
+
+
+def build_stage(cpython_version, package_version, target, runtime_root, stage, docs_dir):
     if stage.exists():
         shutil.rmtree(stage)
     stage.mkdir(parents=True)
@@ -163,6 +189,7 @@ def build_stage(cpython_version, package_version, target, runtime_root, stage):
     )
     write_text(package_root / "launcher.py", LAUNCHER)
     copy_runtime(runtime_root, package_root)
+    copy_docs(docs_dir, package_root)
 
     dist_info = stage / dist_info_name(package_version)
     metadata = f"""Metadata-Version: 2.1
@@ -172,6 +199,7 @@ Summary: Patched CPython runtime artifacts for Retrace
 Requires-Python: =={cpython_version}
 License: Apache-2.0
 Project-URL: Source, https://github.com/retracesoftware/retrace-cpython
+Project-URL: Documentation, https://github.com/retracesoftware/retrace-cpython/tree/main/docs
 
 Retrace-compatible CPython executable built from upstream CPython {cpython_version}.
 """
@@ -216,7 +244,7 @@ def write_record(stage, record_path):
         writer.writerows(rows)
 
 
-def build_wheel(cpython_version, package_version, target, runtime_root, wheel_dir):
+def build_wheel(cpython_version, package_version, target, runtime_root, wheel_dir, docs_dir):
     package_version = normalize_package_version(package_version)
     runtime_root = runtime_root.resolve()
     if not runtime_root.is_dir():
@@ -228,7 +256,7 @@ def build_wheel(cpython_version, package_version, target, runtime_root, wheel_di
         / f"{WHEEL_DIST_NAME}-{package_version}-{cpython_version}-{target}"
     )
     build_tag, tag = build_stage(
-        cpython_version, package_version, target, runtime_root, stage
+        cpython_version, package_version, target, runtime_root, stage, docs_dir
     )
     record_path = stage / dist_info_name(package_version) / "RECORD"
     write_record(stage, record_path)
@@ -264,6 +292,11 @@ def main():
         default=Path("build/wheelhouse"),
         help="Directory for the output wheel.",
     )
+    parser.add_argument(
+        "--docs-dir",
+        type=Path,
+        help="Directory containing generated llms.txt and llms-full.txt artifacts.",
+    )
     args = parser.parse_args()
 
     build_wheel(
@@ -272,6 +305,7 @@ def main():
         args.target,
         args.runtime_root,
         args.wheel_dir,
+        args.docs_dir,
     )
 
 
