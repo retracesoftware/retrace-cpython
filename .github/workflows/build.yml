@@ -604,6 +604,11 @@ jobs:
       actions: read
       contents: write
     steps:
+      - name: Check out retrace-cpython
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.versions.outputs.checkout_ref }}
+
       - name: Download wheel artifacts
         uses: actions/download-artifact@v4
         with:
@@ -663,6 +668,11 @@ jobs:
       contents: read
       id-token: write
     steps:
+      - name: Check out retrace-cpython
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.versions.outputs.checkout_ref }}
+
       - name: Download wheel assets from GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
