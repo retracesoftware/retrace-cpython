@@ -1,77 +1,57 @@
-From 78b9302aed761ed5d5aa2625b11f9caf2fe89037 Mon Sep 17 00:00:00 2001
+From c4f8fee70eedb12f9e0448d100e07a9b5a56225b Mon Sep 17 00:00:00 2001
 From: Retrace CPython Builder <retrace-cpython@retracesoftware.com>
 Date: Thu, 7 May 2026 09:50:42 +0100
-Subject: [PATCH 3/7] Add retrace thread scheduling callbacks
+Subject: [PATCH] Add retrace thread scheduling callbacks
 
 ---
  Include/cpython/pystate.h        |  4 ++++
  Include/internal/pycore_interp.h |  3 +++
- Modules/_threadmodule.c          | 19 +++++++++++++++----
+ Modules/_threadmodule.c          | 21 ++++++++++-----------
  Modules/signalmodule.c           |  3 +++
- Python/ceval.c                   | 10 +++++++++-
- Python/ceval_gil.c               | 15 +++++++++++++--
+ Python/ceval.c                   |  7 ++++++-
+ Python/ceval_gil.c               | 26 ++++++++++++++++++++++----
  Python/pystate.c                 | 13 ++++++++++---
- 7 files changed, 62 insertions(+), 11 deletions(-)
+ 7 files changed, 58 insertions(+), 19 deletions(-)
 
 diff --git a/Include/cpython/pystate.h b/Include/cpython/pystate.h
 index 95fad89..cdb861b 100644
 --- a/Include/cpython/pystate.h
 +++ b/Include/cpython/pystate.h
-@@ -2,6 +2,8 @@
- #  error "this header file must not be included directly"
- #endif
-
+@@ -4,2 +4,4 @@
+ 
 +#include "cpython/retrace_state.h" // _PyRetraceThreadState
 +
-
- /*
- Runtime Feature Flags
-@@ -246,6 +248,8 @@ struct _ts {
-
-     /* The bottom-most frame on the stack. */
+ 
+@@ -248,2 +250,4 @@ struct _ts {
      _PyCFrame root_cframe;
 +
 +    _PyRetraceThreadState retrace;
  };
-
- /* WASI has limited call stack. Python's recursion limit depends on code
 diff --git a/Include/internal/pycore_interp.h b/Include/internal/pycore_interp.h
 index 37cc88e..2cd432e 100644
 --- a/Include/internal/pycore_interp.h
 +++ b/Include/internal/pycore_interp.h
-@@ -33,6 +33,7 @@ extern "C" {
- #include "pycore_typeobject.h"    // struct type_cache
- #include "pycore_unicodeobject.h" // struct _Py_unicode_state
+@@ -35,2 +35,3 @@ extern "C" {
  #include "pycore_warnings.h"      // struct _warnings_runtime_state
 +#include "cpython/retrace_state.h" // _PyRetraceInterpreterState
-
-
- struct _Py_long_state {
-@@ -181,6 +182,8 @@ struct _is {
-     struct _obmalloc_state obmalloc;
-
+ 
+@@ -183,2 +184,4 @@ struct _is {
      PyObject *audit_hooks;
 +
 +    _PyRetraceInterpreterState retrace;
      PyType_WatchCallback type_watchers[TYPE_MAX_WATCHERS];
-     PyCode_WatchCallback code_watchers[CODE_MAX_WATCHERS];
-     // One bit is set for each non-NULL entry in code_watchers
 diff --git a/Modules/_threadmodule.c b/Modules/_threadmodule.c
-index 38107f0..e2ce6fa 100644
+index 56a9f3d..2475b0c 100644
 --- a/Modules/_threadmodule.c
 +++ b/Modules/_threadmodule.c
-@@ -5,4 +5,5 @@
+@@ -5,2 +5,3 @@
  #include "Python.h"
 +#include "pycore_retrace.h"       // retrace thread helpers
  #include "pycore_interp.h"        // _PyInterpreterState.threads.count
- #include "pycore_moduleobject.h"  // _PyModule_GetState()
- #include "pycore_pylifecycle.h"
-@@ -1225,5 +1226,6 @@ thread_PyThread_start_new_thread(PyObject *self, PyObject *fargs)
-         thread_bootstate_free(boot, 1);
-         return NULL;
+@@ -1227,3 +1228,4 @@ thread_PyThread_start_new_thread(PyObject *self, PyObject *fargs)
      }
-+    _PyRetrace_RegisterThreadIdent(boot->tstate, ident);
 -    return PyLong_FromUnsignedLong(ident);
++    _PyRetrace_RegisterThreadIdent(boot->tstate, ident);
 +    return _PyRetrace_ThreadIdentObject(boot->tstate);
  }
 @@ -1299,8 +1301,3 @@ thread_get_ident(PyObject *self, PyObject *Py_UNUSED(ignored))
@@ -84,9 +64,7 @@ index 38107f0..e2ce6fa 100644
 -    return PyLong_FromUnsignedLong(ident);
 +    return _PyRetrace_ThreadIdentObject(_PyThreadState_GET());
  }
-@@ -1485,19 +1482,21 @@ thread_excepthook_file(PyObject *file, PyObject *exc_type, PyObject *exc_value,
-         Py_DECREF(name);
-     }
+@@ -1490,4 +1487,8 @@ thread_excepthook_file(PyObject *file, PyObject *exc_type, PyObject *exc_value,
      else {
 -        unsigned long ident = PyThread_get_thread_ident();
 -        PyObject *str = PyUnicode_FromFormat("%lu", ident);
@@ -97,154 +75,33 @@ index 38107f0..e2ce6fa 100644
 +        PyObject *str = ident == NULL ? NULL : PyObject_Str(ident);
 +        Py_XDECREF(ident);
          if (str != NULL) {
-             if (PyFile_WriteObject(str, file, Py_PRINT_RAW) < 0) {
-                 Py_DECREF(str);
-                 return -1;
-             }
-             Py_DECREF(str);
-         }
+@@ -1500,4 +1501,2 @@ thread_excepthook_file(PyObject *file, PyObject *exc_type, PyObject *exc_value,
          else {
 -            PyErr_Clear();
 -
              if (PyFile_WriteString("<failed to get thread name>", file) < 0) {
-                 return -1;
-             }
-         }
-     }
 diff --git a/Modules/signalmodule.c b/Modules/signalmodule.c
-index 60d3a54..1fbc84c 100644
+index 4f4e6a3..da55895 100644
 --- a/Modules/signalmodule.c
 +++ b/Modules/signalmodule.c
-@@ -13,4 +13,5 @@
- #include "pycore_moduleobject.h"  // _PyModule_GetState()
- #include "pycore_pyerrors.h"      // _PyErr_SetString()
+@@ -15,2 +15,3 @@
  #include "pycore_pystate.h"       // _PyThreadState_GET()
 +#include "pycore_retrace.h"       // retrace thread helpers
  #include "pycore_signal.h"        // Py_NSIG
-@@ -1282,6 +1283,8 @@ signal_pthread_kill_impl(PyObject *module, unsigned long thread_id,
-         return NULL;
-     }
--
-+
+@@ -1284,2 +1285,4 @@ signal_pthread_kill_impl(PyObject *module, unsigned long thread_id,
+ 
 +    thread_id = _PyRetrace_CPythonThreadIdentFromPublicIdent(
 +        _PyInterpreterState_GET(), thread_id);
      err = pthread_kill((pthread_t)thread_id, signalnum);
-     if (err != 0) {
-         errno = err;
-diff --git a/Python/ceval_gil.c b/Python/ceval_gil.c
-index c1ab588..6bd4ec4 100644
---- a/Python/ceval_gil.c
-+++ b/Python/ceval_gil.c
-@@ -7,6 +7,7 @@
- #include "pycore_initconfig.h"    // _PyStatus_OK()
- #include "pycore_interp.h"        // _Py_RunGC()
- #include "pycore_pymem.h"         // _PyMem_IsPtrFreed()
-+#include "pycore_retrace.h"       // thread scheduling callbacks
-
- /*
-    Notes about the implementation:
-@@ -411,9 +412,12 @@ take_gil(PyThreadState *tstate)
-     _Py_atomic_store_relaxed(&gil->locked, 1);
-     _Py_ANNOTATE_RWLOCK_ACQUIRED(&gil->locked, /*is_write=*/1);
-
--    if (tstate != (PyThreadState*)_Py_atomic_load_relaxed(&gil->last_holder)) {
-+    PyThreadState *previous_holder =
-+        (PyThreadState*)_Py_atomic_load_relaxed(&gil->last_holder);
-+    if (tstate != previous_holder) {
-         _Py_atomic_store_relaxed(&gil->last_holder, (uintptr_t)tstate);
-         ++gil->switch_number;
-+        _PyRetrace_NoteThreadResume(tstate);
-     }
-
- #ifdef FORCE_SWITCHING
-@@ -596,4 +600,5 @@ PyEval_AcquireLock(void)
-     _Py_EnsureTstateNotNULL(tstate);
-
-     take_gil(tstate);
-+    _PyRetrace_DeliverThreadResumeCallback(tstate, NULL);
- }
-@@ -610,4 +615,6 @@ PyEval_ReleaseLock(void)
-        in debug mode. */
-     struct _ceval_state *ceval = &tstate->interp->ceval;
-+    (void)_PyRetrace_PinThreadCallbackFrame(
-+        tstate, _PyRetrace_CurrentThreadFrame(tstate));
-     drop_gil(ceval, tstate);
- }
-@@ -614,4 +621,5 @@ _PyEval_AcquireLock(PyThreadState *tstate)
- {
-     _Py_EnsureTstateNotNULL(tstate);
-     take_gil(tstate);
-+    _PyRetrace_DeliverThreadResumeCallback(tstate, NULL);
- }
-@@ -627,5 +635,7 @@ _PyEval_ReleaseLock(PyInterpreterState *interp, PyThreadState *tstate)
-        to acquire the GIL ever again. */
-     assert(tstate == NULL || tstate->interp == interp);
-     struct _ceval_state *ceval = &interp->ceval;
-+    (void)_PyRetrace_PinThreadCallbackFrame(
-+        tstate, _PyRetrace_CurrentThreadFrame(tstate));
-     drop_gil(ceval, tstate);
- }
-@@ -636,4 +646,5 @@ PyEval_AcquireThread(PyThreadState *tstate)
-     if (_PyThreadState_SwapNoGIL(tstate) != NULL) {
-         Py_FatalError("non-NULL old thread state");
-     }
-+    _PyRetrace_DeliverThreadResumeCallback(tstate, NULL);
- }
-@@ -641,6 +652,7 @@ PyEval_ReleaseThread(PyThreadState *tstate)
- void
- PyEval_ReleaseThread(PyThreadState *tstate)
- {
-     assert(_PyThreadState_CheckConsistency(tstate));
--
-+    (void)_PyRetrace_PinThreadCallbackFrame(
-+        tstate, _PyRetrace_CurrentThreadFrame(tstate));
-     PyThreadState *new_tstate = _PyThreadState_SwapNoGIL(NULL);
-@@ -700,4 +711,6 @@ PyEval_SaveThread(void)
--    PyThreadState *tstate = _PyThreadState_SwapNoGIL(NULL);
-+    PyThreadState *tstate = _PyThreadState_GET();
-     _Py_EnsureTstateNotNULL(tstate);
--
-+    (void)_PyRetrace_PinThreadCallbackFrame(
-+        tstate, _PyRetrace_CurrentThreadFrame(tstate));
-+    tstate = _PyThreadState_SwapNoGIL(NULL);
-     struct _ceval_state *ceval = &tstate->interp->ceval;
-@@ -717,2 +732,3 @@ PyEval_RestoreThread(PyThreadState *tstate)
-     _PyThreadState_SwapNoGIL(tstate);
-+    _PyRetrace_DeliverThreadResumeCallback(tstate, NULL);
- }
-@@ -770,6 +778,7 @@ _push_pending_call(struct _pending_calls *pending,
-     return 0;
- }
-
-+
- static int
- _next_pending_call(struct _pending_calls *pending,
-                    int (**func)(void *), void **arg)
-@@ -1048,6 +1057,7 @@ _Py_HandlePending(PyThreadState *tstate)
-     /* GIL drop request */
-     if (_Py_atomic_load_relaxed_int32(&interp_ceval_state->gil_drop_request)) {
-         /* Give another thread a chance */
-+        _PyRetrace_DeliverThreadYieldCallback(tstate, NULL);
-         if (_PyThreadState_SwapNoGIL(NULL) != tstate) {
-             Py_FatalError("tstate mix-up");
-         }
-@@ -1060,4 +1070,5 @@ _Py_HandlePending(PyThreadState *tstate)
-         if (_PyThreadState_SwapNoGIL(tstate) != NULL) {
-             Py_FatalError("orphan tstate");
-         }
-+        _PyRetrace_DeliverThreadResumeCallback(tstate, NULL);
-     }
 diff --git a/Python/ceval.c b/Python/ceval.c
-index 17191af..138f388 100644
+index c5686c0..c7829d0 100644
 --- a/Python/ceval.c
 +++ b/Python/ceval.c
-@@ -5,3 +5,4 @@
+@@ -5,2 +5,3 @@
  #include "Python.h"
 +#include "pycore_retrace.h"       // thread scheduling callbacks
  #include "pycore_abstract.h"      // _PyIndex_Check()
- #include "pycore_call.h"          // _PyObject_FastCallDictTstate()
-@@ -844,5 +845,9 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *frame, int
-      * until so desired.
+@@ -842,3 +843,7 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *frame, int
       */
 -    if (_Py_HandlePending(tstate) != 0) {
 +    _PyInterpreterFrame *retrace_callback_frame =
@@ -253,78 +110,112 @@ index 17191af..138f388 100644
 +    _PyRetrace_RestoreThreadCallbackFrame(tstate, retrace_callback_frame);
 +    if (retrace_pending_err != 0) {
          goto error;
+diff --git a/Python/ceval_gil.c b/Python/ceval_gil.c
+index c1ab588..aea2952 100644
+--- a/Python/ceval_gil.c
++++ b/Python/ceval_gil.c
+@@ -9,2 +9,3 @@
+ #include "pycore_pymem.h"         // _PyMem_IsPtrFreed()
++#include "pycore_retrace.h"       // thread scheduling callbacks
+ 
+@@ -413,5 +414,8 @@ take_gil(PyThreadState *tstate)
+ 
+-    if (tstate != (PyThreadState*)_Py_atomic_load_relaxed(&gil->last_holder)) {
++    PyThreadState *previous_holder =
++        (PyThreadState*)_Py_atomic_load_relaxed(&gil->last_holder);
++    if (tstate != previous_holder) {
+         _Py_atomic_store_relaxed(&gil->last_holder, (uintptr_t)tstate);
+         ++gil->switch_number;
++        _PyRetrace_NoteThreadResume(tstate);
+     }
+@@ -598,2 +602,3 @@ PyEval_AcquireLock(void)
+     take_gil(tstate);
++    _PyRetrace_DeliverThreadResumeCallback(tstate, NULL);
+ }
+@@ -608,2 +613,4 @@ PyEval_ReleaseLock(void)
+     struct _ceval_state *ceval = &tstate->interp->ceval;
++    (void)_PyRetrace_PinThreadCallbackFrame(
++        tstate, _PyRetrace_CurrentThreadFrame(tstate));
+     drop_gil(ceval, tstate);
+@@ -616,2 +623,3 @@ _PyEval_AcquireLock(PyThreadState *tstate)
+     take_gil(tstate);
++    _PyRetrace_DeliverThreadResumeCallback(tstate, NULL);
+ }
+@@ -625,2 +633,4 @@ _PyEval_ReleaseLock(PyInterpreterState *interp, PyThreadState *tstate)
+     struct _ceval_state *ceval = &interp->ceval;
++    (void)_PyRetrace_PinThreadCallbackFrame(
++        tstate, _PyRetrace_CurrentThreadFrame(tstate));
+     drop_gil(ceval, tstate);
+@@ -638,2 +648,3 @@ PyEval_AcquireThread(PyThreadState *tstate)
+     }
++    _PyRetrace_DeliverThreadResumeCallback(tstate, NULL);
+ }
+@@ -646,1 +657,3 @@ PyEval_ReleaseThread(PyThreadState *tstate)
++    (void)_PyRetrace_PinThreadCallbackFrame(
++        tstate, _PyRetrace_CurrentThreadFrame(tstate));
+     PyThreadState *new_tstate = _PyThreadState_SwapNoGIL(NULL);
+@@ -693,5 +705,7 @@ PyEval_SaveThread(void)
+ {
+-    PyThreadState *tstate = _PyThreadState_SwapNoGIL(NULL);
++    PyThreadState *tstate = _PyThreadState_GET();
+     _Py_EnsureTstateNotNULL(tstate);
+-
++    (void)_PyRetrace_PinThreadCallbackFrame(
++        tstate, _PyRetrace_CurrentThreadFrame(tstate));
++    tstate = _PyThreadState_SwapNoGIL(NULL);
+     struct _ceval_state *ceval = &tstate->interp->ceval;
+@@ -710,2 +724,3 @@ PyEval_RestoreThread(PyThreadState *tstate)
+     _PyThreadState_SwapNoGIL(tstate);
++    _PyRetrace_DeliverThreadResumeCallback(tstate, NULL);
+ }
+@@ -1050,2 +1066,3 @@ _Py_HandlePending(PyThreadState *tstate)
+         /* Give another thread a chance */
++        _PyRetrace_DeliverThreadYieldCallback(tstate, NULL);
+         if (_PyThreadState_SwapNoGIL(NULL) != tstate) {
+@@ -1062,2 +1079,3 @@ _Py_HandlePending(PyThreadState *tstate)
+         }
++        _PyRetrace_DeliverThreadResumeCallback(tstate, NULL);
      }
 diff --git a/Python/pystate.c b/Python/pystate.c
-index 6aed9ac..c8823e8 100644
+index 6aed9ac..463ab8c 100644
 --- a/Python/pystate.c
 +++ b/Python/pystate.c
-@@ -8,6 +8,7 @@
- #include "pycore_pyerrors.h"
- #include "pycore_pylifecycle.h"
+@@ -13,2 +13,3 @@
  #include "pycore_pymem.h"         // _PyMem_SetDefaultAllocator()
 +#include "pycore_retrace.h"       // thread-state helpers
  #include "pycore_pystate.h"
- #include "pycore_runtime_init.h"  // _PyRuntimeState_INIT
- #include "pycore_sysmodule.h"
-@@ -851,6 +851,9 @@ interpreter_clear(PyInterpreterState *interp, PyThreadState *tstate)
-     // XXX Make sure we properly deal with problematic finalizers.
-
+@@ -853,2 +854,5 @@ interpreter_clear(PyInterpreterState *interp, PyThreadState *tstate)
      Py_CLEAR(interp->audit_hooks);
 +    Py_CLEAR(interp->retrace.thread_start_callback);
 +    Py_CLEAR(interp->retrace.thread_yield_callback);
 +    Py_CLEAR(interp->retrace.thread_resume_callback);
-
-     for (int i = 0; i < _PY_MONITORING_UNGROUPED_EVENTS; i++) {
-         interp->monitors.tools[i] = 0;
-@@ -1363,6 +1365,7 @@ init_threadstate(PyThreadState *tstate,
-     tstate->datastack_top = NULL;
-     tstate->datastack_limit = NULL;
+ 
+@@ -1365,2 +1369,3 @@ init_threadstate(PyThreadState *tstate,
      tstate->what_event = -1;
 +    _PyRetrace_InitializeThreadState(interp, tstate);
-
-     tstate->_status.initialized = 1;
- }
-@@ -1558,5 +1561,6 @@ PyThreadState_Clear(PyThreadState *tstate)
-     Py_CLEAR(tstate->context);
--
-+    _PyRetrace_ClearThreadState(tstate);
-+
-     if (tstate->on_delete != NULL) {
-         tstate->on_delete(tstate->on_delete_data);
-     }
-@@ -1433,6 +1438,7 @@ new_threadstate(PyInterpreterState *interp)
-
-     init_threadstate(tstate, interp, id);
+ 
+@@ -1427,2 +1432,3 @@ new_threadstate(PyInterpreterState *interp)
      add_threadstate(interp, tstate, old_head);
 +    _PyRetrace_SeedThreadState(current_fast_get(runtime), tstate);
-
-     HEAD_UNLOCK(runtime);
-     if (!used_newtstate) {
-@@ -1819,6 +1825,6 @@ PyThreadState_SetAsyncExc(unsigned long id, PyObject *exc)
-      */
-     HEAD_LOCK(runtime);
+ 
+@@ -1557,2 +1563,3 @@ PyThreadState_Clear(PyThreadState *tstate)
+     Py_CLEAR(tstate->context);
++    _PyRetrace_ClearThreadState(tstate);
+ 
+@@ -1820,3 +1827,3 @@ PyThreadState_SetAsyncExc(unsigned long id, PyObject *exc)
      for (PyThreadState *tstate = interp->threads.head; tstate != NULL; tstate = tstate->next) {
 -        if (tstate->thread_id != id) {
 +        if (!_PyRetrace_ThreadMatchesAsyncExcId(interp, tstate, id)) {
              continue;
-         }
-@@ -2023,7 +2029,7 @@ _PyThread_CurrentFrames(void)
-             if (frame == NULL) {
-                 continue;
+@@ -2014,3 +2021,3 @@ _PyThread_CurrentFrames(void)
              }
 -            PyObject *id = PyLong_FromUnsignedLong(t->thread_id);
 +            PyObject *id = _PyRetrace_ThreadIdentObject(t);
              if (id == NULL) {
-                 goto fail;
-             }
-@@ -2086,7 +2092,7 @@ _PyThread_CurrentExceptions(void)
-             if (err_info == NULL) {
-                 continue;
+@@ -2077,3 +2084,3 @@ _PyThread_CurrentExceptions(void)
              }
 -            PyObject *id = PyLong_FromUnsignedLong(t->thread_id);
 +            PyObject *id = _PyRetrace_ThreadIdentObject(t);
              if (id == NULL) {
-                 goto fail;
-             }
---
+-- 
 2.50.1 (Apple Git-155)
