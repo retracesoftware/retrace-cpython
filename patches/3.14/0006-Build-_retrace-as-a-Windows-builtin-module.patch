@@ -1,0 +1,70 @@
+From 3ab398f5a042b26454d30055966db6047f721614 Mon Sep 17 00:00:00 2001
+From: nathan-retrace <nathan@retracesoftware.com>
+Date: Tue, 5 May 2026 22:29:50 +0100
+Subject: [PATCH 6/9] Build _retrace as a Windows builtin module
+
+---
+ PC/config.c                        | 2 ++
+ PCbuild/_freeze_module.vcxproj     | 1 +
+ PCbuild/pythoncore.vcxproj         | 1 +
+ PCbuild/pythoncore.vcxproj.filters | 3 +++
+ 4 files changed, 7 insertions(+)
+
+diff --git a/PC/config.c b/PC/config.c
+index 6ce2131c7b8..f22ffc36286 100644
+--- a/PC/config.c
++++ b/PC/config.c
+@@ -87,6 +87,7 @@ extern PyObject* PyInit__suggestions(void);
+
+ /* tools/freeze/makeconfig.py marker for additional "extern" */
+ /* -- ADDMODULE MARKER 1 -- */
++extern PyObject* PyInit__retrace(void);
+
+ extern PyObject* PyMarshal_Init(void);
+ extern PyObject* PyInit__imp(void);
+@@ -171,6 +172,7 @@ struct _inittab _PyImport_Inittab[] = {
+
+ /* tools/freeze/makeconfig.py marker for additional "_inittab" entries */
+ /* -- ADDMODULE MARKER 2 -- */
++    {"_retrace", PyInit__retrace},
+
+     /* This module "lives in" with marshal.c */
+     {"marshal", PyMarshal_Init},
+diff --git a/PCbuild/_freeze_module.vcxproj b/PCbuild/_freeze_module.vcxproj
+index 5ceddf759b8..b5739f3912a 100644
+--- a/PCbuild/_freeze_module.vcxproj
++++ b/PCbuild/_freeze_module.vcxproj
+@@ -103,6 +103,7 @@
+   <ItemGroup>
+     <ClCompile Include="..\Programs\_freeze_module.c" />
+     <ClCompile Include="..\PC\config_minimal.c" />
++    <ClCompile Include="..\Python\retrace_bootstrap.c" />
+   </ItemGroup>
+   <ItemGroup>
+     <ClCompile Include="..\Modules\atexitmodule.c" />
+diff --git a/PCbuild/pythoncore.vcxproj b/PCbuild/pythoncore.vcxproj
+index b911c938563..5d8cc1277fc 100644
+--- a/PCbuild/pythoncore.vcxproj
++++ b/PCbuild/pythoncore.vcxproj
+@@ -481,6 +481,7 @@
+     <ClCompile Include="..\Modules\_opcode.c" />
+     <ClCompile Include="..\Modules\_operator.c" />
+     <ClCompile Include="..\Modules\posixmodule.c" />
++    <ClCompile Include="..\Modules\retracemodule.c" />
+     <ClCompile Include="..\Modules\rotatingtree.c" />
+     <ClCompile Include="..\Modules\sha1module.c" />
+     <ClCompile Include="..\Modules\sha2module.c" />
+diff --git a/PCbuild/pythoncore.vcxproj.filters b/PCbuild/pythoncore.vcxproj.filters
+index 0e6d42cc959..5ef94c2e358 100644
+--- a/PCbuild/pythoncore.vcxproj.filters
++++ b/PCbuild/pythoncore.vcxproj.filters
+@@ -1073,6 +1073,9 @@
+     <ClCompile Include="..\Modules\posixmodule.c">
+       <Filter>Modules</Filter>
+     </ClCompile>
++    <ClCompile Include="..\Modules\retracemodule.c">
++      <Filter>Modules</Filter>
++    </ClCompile>
+     <ClCompile Include="..\Modules\rotatingtree.c">
+       <Filter>Modules</Filter>
+     </ClCompile>

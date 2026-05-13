@@ -20,6 +20,7 @@ build/src/cpython-3.12.13+retrace/python.exe tests/smoke/thread_handoff.py
 build/src/cpython-3.12.13+retrace/python.exe tests/smoke/thread_id_determinism.py
 build/src/cpython-3.12.13+retrace/python.exe tests/smoke/thread_probe_concurrency.py
 build/src/cpython-3.12.13+retrace/python.exe tests/smoke/thread_schedule_minimal.py
+build/src/cpython-3.12.13+retrace/python.exe tests/smoke/thread_schedule_primitives.py
 build/src/cpython-3.12.13+retrace/python.exe tests/smoke/thread_schedule_stress.py
 ```
 

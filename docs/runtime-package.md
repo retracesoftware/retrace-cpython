@@ -43,6 +43,10 @@ dynamic libraries. They intentionally avoid vendoring a full standard library.
 The launcher sets up the packaged executable so it can run with the matching
 Python environment.
 
+The wheel runtime payload is intentionally minimal: Python executable files and
+required CPython runtime libraries only. It must not include the standard
+library, tests, headers, static archives, or `ensurepip` bundles.
+
 The package version is the Retrace runtime package version. It is independent
 of the upstream CPython version embedded in a specific wheel. Wheel filenames
 carry the CPython build tag and platform tag.

@@ -33,7 +33,7 @@ version and platform.
 
 Release artifacts contain the patched Python executable and any required
 CPython runtime dynamic libraries. They do not include a full copy of the
-standard library.
+standard library, tests, headers, static archives, or `ensurepip` bundles.
 
 The patched executable can run against a vanilla installation of the same
 CPython version by setting `PYTHONHOME`. That keeps artifacts small while still

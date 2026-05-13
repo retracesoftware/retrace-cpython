@@ -1,0 +1,78 @@
+From 17808728452d15dce5505acc0d9d170a81fc63a6 Mon Sep 17 00:00:00 2001
+From: Retrace CPython Builder <retrace-cpython@retracesoftware.com>
+Date: Thu, 7 May 2026 09:50:42 +0100
+Subject: [PATCH 4/9] Add retrace call_at callback
+
+---
+ Python/ceval.c        |  2 +-
+ Python/ceval_macros.h | 19 ++++++++++++++++++-
+ Python/pystate.c      |  5 +++++
+ 3 files changed, 24 insertions(+), 2 deletions(-)
+
+diff --git a/Python/ceval.c b/Python/ceval.c
+index caae4f5df34..c883fe5fe7e 100644
+--- a/Python/ceval.c
++++ b/Python/ceval.c
+@@ -3,7 +3,7 @@
+ #define _PY_INTERPRETER
+
+ #include "Python.h"
+-#include "pycore_retrace.h"       // thread scheduling callbacks
++#include "pycore_retrace.h"       // retrace callbacks
+ #include "pycore_abstract.h"      // _PyIndex_Check()
+ #include "pycore_audit.h"         // _PySys_Audit()
+ #include "pycore_backoff.h"
+diff --git a/Python/ceval_macros.h b/Python/ceval_macros.h
+index 06d5a866c60..8296a6e25b0 100644
+--- a/Python/ceval_macros.h
++++ b/Python/ceval_macros.h
+@@ -59,15 +59,32 @@
+     #define USE_COMPUTED_GOTOS 0
+ #endif
+
++#define RETRACE_CALL_AT() \
++    do { \
++        PyInterpreterState *retrace_interp = tstate->interp; \
++        if (retrace_interp->retrace.call_at_armed && \
++            retrace_interp->retrace.call_at_thread_id == tstate->retrace.thread_id && \
++            _PyRetrace_FrameIsVisible(frame)) \
++        { \
++            _PyFrame_SetStackPointer(frame, stack_pointer); \
++            int retrace_err = _PyRetrace_CheckCallAt(tstate, frame); \
++            stack_pointer = _PyFrame_GetStackPointer(frame); \
++            if (retrace_err < 0) { \
++                JUMP_TO_LABEL(error); \
++            } \
++        } \
++    } while (0)
++
+ #ifdef Py_STATS
+ #define INSTRUCTION_STATS(op) \
+     do { \
+         OPCODE_EXE_INC(op); \
+         if (_Py_stats) _Py_stats->opcode_stats[lastopcode].pair_count[op]++; \
+         lastopcode = op; \
++        RETRACE_CALL_AT(); \
+     } while (0)
+ #else
+-#define INSTRUCTION_STATS(op) ((void)0)
++#define INSTRUCTION_STATS(op) RETRACE_CALL_AT()
+ #endif
+
+ #ifdef Py_STATS
+diff --git a/Python/pystate.c b/Python/pystate.c
+index c50014d3086..4ea05c080da 100644
+--- a/Python/pystate.c
++++ b/Python/pystate.c
+@@ -866,6 +866,11 @@ interpreter_clear(PyInterpreterState *interp, PyThreadState *tstate)
+     Py_CLEAR(interp->retrace.thread_start_callback);
+     Py_CLEAR(interp->retrace.thread_yield_callback);
+     Py_CLEAR(interp->retrace.thread_resume_callback);
++    _PyRetrace_ClearIdentityHashTable(interp);
++    interp->retrace.call_at_armed = 0;
++    Py_CLEAR(interp->retrace.call_at_coordinates);
++    Py_CLEAR(interp->retrace.call_at_callback);
++    Py_CLEAR(interp->retrace.call_at_overshoot_callback);
+
+     // gh-140257: Threads have already been cleared, but daemon threads may
+     // still access eval_breaker atomically via take_gil() right before they

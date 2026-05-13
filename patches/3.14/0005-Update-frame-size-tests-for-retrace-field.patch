@@ -1,0 +1,25 @@
+From 52af54aba87bdeb397bfb4a4d29b7d5af68bb850 Mon Sep 17 00:00:00 2001
+From: nathan-retrace <nathan@retracesoftware.com>
+Date: Tue, 5 May 2026 20:49:25 +0100
+Subject: [PATCH 5/9] Update frame size tests for retrace field
+
+---
+ Lib/test/test_sys.py | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/Lib/test/test_sys.py b/Lib/test/test_sys.py
+index 0db0369500a..8607b9395e5 100644
+--- a/Lib/test/test_sys.py
++++ b/Lib/test/test_sys.py
+@@ -1662,9 +1662,9 @@ def func():
+             return sys._getframe()
+         x = func()
+         if support.Py_GIL_DISABLED:
+-            INTERPRETER_FRAME = '9PihcP'
++            INTERPRETER_FRAME = '9PihcI7qP'
+         else:
+-            INTERPRETER_FRAME = '9PhcP'
++            INTERPRETER_FRAME = '9Phc5xI7qP'
+         check(x, size('3PiccPPP' + INTERPRETER_FRAME + 'P'))
+         # function
+         def func(): pass

@@ -1,0 +1,21 @@
+From 2bd40fc8416a03a9399e09a217a625a7dbe483b4 Mon Sep 17 00:00:00 2001
+From: Retrace CPython Builder <retrace-cpython@retracesoftware.com>
+Date: Thu, 7 May 2026 09:50:41 +0100
+Subject: [PATCH 2/9] Add _retrace coordinate module
+
+---
+ Modules/Setup.bootstrap.in | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/Modules/Setup.bootstrap.in b/Modules/Setup.bootstrap.in
+index aa4e60e2726..c948aecd9ad 100644
+--- a/Modules/Setup.bootstrap.in
++++ b/Modules/Setup.bootstrap.in
+@@ -33,6 +33,7 @@ _locale _localemodule.c
+ _operator _operator.c
+ _stat _stat.c
+ _symtable symtablemodule.c
++_retrace retracemodule.c
+
+ # for systems without $HOME env, used by site._getuserbase()
+ @MODULE_PWD_TRUE@pwd pwdmodule.c

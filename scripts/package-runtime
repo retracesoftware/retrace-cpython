@@ -6,40 +6,7 @@ import tarfile
 import zipfile
 from pathlib import Path
 
-
-EXECUTABLE_NAMES = {
-    "python",
-    "python.exe",
-}
-LIBRARY_PATTERNS = (
-    "python*.dll",
-    "vcruntime*.dll",
-    "libpython*.so",
-    "libpython*.so.*",
-    "libpython*.dylib",
-)
-
-
-def matches(name, patterns):
-    import fnmatch
-
-    return any(fnmatch.fnmatchcase(name, pattern) for pattern in patterns)
-
-
-def selected_files(root):
-    files = []
-    for path in root.rglob("*"):
-        if not path.is_file():
-            continue
-        name = path.name
-        if name in EXECUTABLE_NAMES or matches(name, LIBRARY_PATTERNS):
-            files.append(path)
-
-    executable_files = [p for p in files if p.name in EXECUTABLE_NAMES]
-    if not executable_files:
-        raise SystemExit(f"no Python executable found under {root}")
-
-    return sorted(set(files))
+from retrace_packaging import copy_runtime_files
 
 
 def make_archive(stage, archive):
@@ -78,13 +45,7 @@ def main():
         shutil.rmtree(package_root)
     package_root.mkdir(parents=True)
 
-    copied = []
-    for src in selected_files(runtime_root):
-        rel = src.relative_to(runtime_root)
-        dest = package_root / rel
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, dest)
-        copied.append(rel.as_posix())
+    copied = [rel.as_posix() for rel in copy_runtime_files(runtime_root, package_root)]
 
     dist_dir.mkdir(parents=True, exist_ok=True)
     suffix = ".zip" if platform.system() == "Windows" else ".tar.gz"

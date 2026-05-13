@@ -1,0 +1,29 @@
+python = ">=3.14.0,<3.15.0"
+probe_abi = "retrace_probe_abi_1"
+retrace_module = "builtin"
+
+verified_applies = [
+  "3.14.0",
+  "3.14.1",
+  "3.14.2",
+  "3.14.3",
+  "3.14.4",
+  "3.14.5",
+]
+
+verified_regression_tests = [
+  "3.14.5:tests/smoke/probe_capability.py",
+  "3.14.5:test_sys",
+]
+
+patches = [
+  "0001-Add-Retrace-coordinate-bias-to-interpreter-frames.patch",
+  "0002-Add-_retrace-coordinate-module.patch",
+  "0003-Add-retrace-thread-scheduling-callbacks.patch",
+  "0004-Add-retrace-call_at-callback.patch",
+  "0005-Update-frame-size-tests-for-retrace-field.patch",
+  "0006-Build-_retrace-as-a-Windows-builtin-module.patch",
+  "0007-Build-Windows-freeze-helper-with-Win8.1-API-target.patch",
+  "0008-Add-deterministic-retrace-pointer-hashes.patch",
+  "0009-Freeze-public-retrace-module.patch",
+]

@@ -10,6 +10,8 @@ import sys
 import zipfile
 from pathlib import Path
 
+from retrace_packaging import copy_runtime_files, is_python_executable_name
+
 
 PROJECT_NAME = "retracesoftware-cpython"
 WHEEL_DIST_NAME = "retracesoftware_cpython"
@@ -30,6 +32,7 @@ LAUNCHER = r'''"""Launcher for the packaged Retrace CPython executable."""
 from __future__ import annotations
 
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -38,13 +41,33 @@ def _runtime_root() -> Path:
     return Path(__file__).resolve().parent / "_runtime"
 
 
+def _is_python_executable_name(name: str) -> bool:
+    if name.endswith("-config"):
+        return False
+    return re.fullmatch(
+        r"(?:python(?:\.exe)?|python3|python\d+(?:\.\d+)?[a-z]*)",
+        name,
+    ) is not None
+
+
 def _find_executable() -> Path:
-    names = ("python.exe", "python")
     root = _runtime_root()
-    for name in names:
-        for path in root.rglob(name):
-            if path.is_file():
-                return path
+    candidates = [
+        path
+        for path in root.rglob("*")
+        if path.is_file() and _is_python_executable_name(path.name)
+    ]
+    if candidates:
+        return sorted(
+            candidates,
+            key=lambda path: (
+                path.name != "python.exe",
+                path.name != "python",
+                path.name != "python3",
+                len(path.parts),
+                str(path),
+            ),
+        )[0]
     raise RuntimeError(f"no packaged CPython executable found under {root}")
 
 
@@ -125,18 +148,10 @@ def write_text(path, content, mode=0o644):
 
 
 def copy_runtime(runtime_root, package_root):
-    copied = []
     runtime_dest = package_root / "_runtime"
-    for src in sorted(runtime_root.rglob("*")):
-        if not src.is_file():
-            continue
-        rel = src.relative_to(runtime_root)
-        dest = runtime_dest / rel
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, dest)
-        copied.append(dest)
-
-    executables = [path for path in copied if path.name in {"python", "python.exe"}]
+    relpaths = copy_runtime_files(runtime_root, runtime_dest)
+    copied = [runtime_dest / rel for rel in relpaths]
+    executables = [path for path in copied if is_python_executable_name(path.name)]
     if not executables:
         raise SystemExit(f"no Python executable found under {runtime_root}")
     return copied

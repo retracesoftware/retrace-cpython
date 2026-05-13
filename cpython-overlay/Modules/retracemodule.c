@@ -1,14 +1,26 @@
 #include "Python.h"
 
 #include "internal/pycore_frame.h"
+#if PY_VERSION_HEX >= 0x030D0000
+#  include "internal/pycore_pyerrors.h"
+#endif
 #include "internal/pycore_pystate.h"
 #include "internal/pycore_retrace.h"
+#if PY_VERSION_HEX >= 0x030D0000
+#  include "internal/pycore_time.h"
+#endif
 #if PY_VERSION_HEX < 0x030C0000
 #  include "internal/pycore_runtime.h"
 #endif
 #include "structmember.h"
 
 #include <stdint.h>
+
+#if PY_VERSION_HEX >= 0x030D0000
+typedef PyTime_t RetracePyTime;
+#else
+typedef _PyTime_t RetracePyTime;
+#endif
 
 #if PY_VERSION_HEX < 0x030C0000
 #  define RETRACE_HEAD_LOCK(runtime) \
@@ -143,10 +155,14 @@ retrace_thread_state_frame(PyThreadState *target_tstate)
     if (target_tstate->retrace.thread_callback_active) {
         return target_tstate->retrace.thread_callback_frame;
     }
+#if PY_VERSION_HEX >= 0x030D0000
+    return _PyRetrace_PyThreadStateCurrentFrame(target_tstate);
+#else
     if (target_tstate->cframe == NULL) {
         return NULL;
     }
     return target_tstate->cframe->current_frame;
+#endif
 }
 
 static int
@@ -711,7 +727,11 @@ retrace_enter_excluded(PyThreadState *tstate,
             frame = tstate->retrace.thread_callback_frame;
         }
         else {
+#if PY_VERSION_HEX >= 0x030D0000
+            frame = _PyRetrace_PyThreadStateCurrentFrame(tstate);
+#else
             frame = tstate->cframe == NULL ? NULL : tstate->cframe->current_frame;
+#endif
         }
         if (hide_current_frame && frame != NULL) {
             _PyRetrace_MarkFrameCallbackTransparent(frame);
@@ -1273,7 +1293,7 @@ retrace_thread_handoff_new(PyTypeObject *type,
     int has_timeout = 0;
     PY_TIMEOUT_T timeout_us = -1;
     if (timeout_obj != Py_None) {
-        _PyTime_t timeout;
+        RetracePyTime timeout;
         if (_PyTime_FromSecondsObject(
                 &timeout, timeout_obj, _PyTime_ROUND_TIMEOUT) < 0)
         {
@@ -1285,7 +1305,7 @@ retrace_thread_handoff_new(PyTypeObject *type,
             return NULL;
         }
 
-        _PyTime_t microseconds =
+        RetracePyTime microseconds =
             _PyTime_AsMicroseconds(timeout, _PyTime_ROUND_TIMEOUT);
         if (microseconds > PY_TIMEOUT_MAX) {
             PyErr_SetString(PyExc_OverflowError,
@@ -1563,7 +1583,9 @@ retrace_call_thread_callback(PyThreadState *tstate,
     }
 
     callback = Py_NewRef(callback);
-#if PY_VERSION_HEX >= 0x030C0000
+#if PY_VERSION_HEX >= 0x030D0000
+    PyObject *saved_exc = _PyErr_GetRaisedException(tstate);
+#elif PY_VERSION_HEX >= 0x030C0000
     PyObject *saved_exc = PyErr_GetRaisedException();
 #else
     PyObject *saved_type = NULL;
@@ -1593,7 +1615,9 @@ retrace_call_thread_callback(PyThreadState *tstate,
     tstate->retrace.thread_callback_frame = NULL;
 
     Py_DECREF(callback);
-#if PY_VERSION_HEX >= 0x030C0000
+#if PY_VERSION_HEX >= 0x030D0000
+    _PyErr_SetRaisedException(tstate, saved_exc);
+#elif PY_VERSION_HEX >= 0x030C0000
     PyErr_SetRaisedException(saved_exc);
 #else
     PyErr_Restore(saved_type, saved_value, saved_traceback);

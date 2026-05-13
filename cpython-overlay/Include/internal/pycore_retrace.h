@@ -9,7 +9,14 @@ extern "C" {
 #endif
 
 #include "pycore_frame.h"         // _PyFrame_RetraceCoordinate()
+#if PY_VERSION_HEX >= 0x030E0000
+#include "pycore_interpframe.h"   // _PyInterpreterFrame helpers
+#include "pycore_ceval.h"         // _Py_HandlePending()
+#endif
 #include "pycore_interp.h"        // PyInterpreterState
+#if PY_VERSION_HEX >= 0x030D0000
+#include "pycore_pyhash.h"        // _Py_HashPointerRaw()
+#endif
 #include "pycore_pystate.h"       // PyThreadState
 #include "pycore_retrace_identity_hash.h" // identity hash table
 #include "pycore_retrace_mixers.h" // _PyRetrace_Mix64()
@@ -102,11 +109,30 @@ _PyFrame_RetraceCoordinateJump(
     _Py_CODEUNIT *from,
     _Py_CODEUNIT *to)
 {
+#if PY_VERSION_HEX < 0x030D0000
     PyCodeObject *code = frame->f_code;
-    int from_offset = (int)(from - _PyCode_CODE(code));
-    int to_offset = (int)(to - _PyCode_CODE(code));
+    _Py_CODEUNIT *bytecode = _PyCode_CODE(code);
+#elif PY_VERSION_HEX < 0x030E0000
+    PyCodeObject *code = _PyFrame_GetCode(frame);
+    _Py_CODEUNIT *bytecode = _PyCode_CODE(code);
+#else
+    _Py_CODEUNIT *bytecode = _PyFrame_GetBytecode(frame);
+#endif
+    int from_offset = (int)(from - bytecode);
+    int to_offset = (int)(to - bytecode);
     frame->retrace.coordinate_bias += (int64_t)from_offset + 1 - to_offset;
 }
+
+#if PY_VERSION_HEX >= 0x030D0000
+static inline _PyInterpreterFrame *
+_PyRetrace_PyThreadStateCurrentFrame(PyThreadState *tstate)
+{
+    if (tstate == NULL) {
+        return NULL;
+    }
+    return tstate->current_frame;
+}
+#endif
 
 static inline int
 _PyRetrace_FrameIsCallbackTransparent(_PyInterpreterFrame *frame)
@@ -253,10 +279,14 @@ _PyRetrace_CurrentThreadFrame(PyThreadState *tstate)
     if (tstate->retrace.thread_callback_active) {
         return tstate->retrace.thread_callback_frame;
     }
+#if PY_VERSION_HEX >= 0x030D0000
+    return _PyRetrace_PyThreadStateCurrentFrame(tstate);
+#else
     if (tstate->cframe == NULL) {
         return NULL;
     }
     return tstate->cframe->current_frame;
+#endif
 }
 
 static inline _PyInterpreterFrame *
@@ -285,6 +315,18 @@ _PyRetrace_RestoreThreadCallbackFrame(
     }
     tstate->retrace.thread_pending_callback_frame = previous;
 }
+
+#if PY_VERSION_HEX >= 0x030E0000
+static inline int
+_PyRetrace_HandlePending(PyThreadState *tstate, _PyInterpreterFrame *frame)
+{
+    _PyInterpreterFrame *previous =
+        _PyRetrace_PinThreadCallbackFrame(tstate, frame);
+    int err = _Py_HandlePending(tstate);
+    _PyRetrace_RestoreThreadCallbackFrame(tstate, previous);
+    return err;
+}
+#endif
 
 static inline uint64_t
 _PyRetrace_FrameBaseCoordinateHash(

@@ -1,0 +1,117 @@
+From 979b748c50ffd4ed573fab6f0cfc89e40cd0843f Mon Sep 17 00:00:00 2001
+From: Retrace CPython Builder <retrace-cpython@retracesoftware.com>
+Date: Mon, 11 May 2026 00:00:00 +0100
+Subject: [PATCH 9/9] Freeze public retrace module
+
+---
+ Makefile.pre.in                        | 5 +++++
+ PCbuild/_freeze_module.vcxproj         | 6 ++++++
+ PCbuild/_freeze_module.vcxproj.filters | 3 +++
+ Python/frozen.c                        | 4 ++++
+ Tools/build/freeze_modules.py          | 3 +++
+ 5 files changed, 21 insertions(+)
+
+diff --git a/Makefile.pre.in b/Makefile.pre.in
+index da6d7c33156..7c4d47ee2f9 100644
+--- a/Makefile.pre.in
++++ b/Makefile.pre.in
+@@ -1725,6 +1725,7 @@ FROZEN_FILES_IN = \
+ 		Lib/importlib/util.py \
+ 		Lib/importlib/machinery.py \
+ 		Lib/runpy.py \
++		Lib/retrace.py \
+ 		Lib/__hello__.py \
+ 		Lib/__phello__/__init__.py \
+ 		Lib/__phello__/ham/__init__.py \
+@@ -1750,6 +1751,7 @@ FROZEN_FILES_OUT = \
+ 		Python/frozen_modules/importlib.util.h \
+ 		Python/frozen_modules/importlib.machinery.h \
+ 		Python/frozen_modules/runpy.h \
++		Python/frozen_modules/retrace.h \
+ 		Python/frozen_modules/__hello__.h \
+ 		Python/frozen_modules/__phello__.h \
+ 		Python/frozen_modules/__phello__.ham.h \
+@@ -1822,6 +1824,9 @@ Python/frozen_modules/importlib.machinery.h: Lib/importlib/machinery.py $(FREEZE
+ Python/frozen_modules/runpy.h: Lib/runpy.py $(FREEZE_MODULE_DEPS)
+ 	$(FREEZE_MODULE) runpy $(srcdir)/Lib/runpy.py Python/frozen_modules/runpy.h
+
++Python/frozen_modules/retrace.h: Lib/retrace.py $(FREEZE_MODULE_DEPS)
++	$(FREEZE_MODULE) retrace $(srcdir)/Lib/retrace.py Python/frozen_modules/retrace.h
++
+ Python/frozen_modules/__hello__.h: Lib/__hello__.py $(FREEZE_MODULE_DEPS)
+ 	$(FREEZE_MODULE) __hello__ $(srcdir)/Lib/__hello__.py Python/frozen_modules/__hello__.h
+
+diff --git a/PCbuild/_freeze_module.vcxproj b/PCbuild/_freeze_module.vcxproj
+index 7fab24efe52..4b301fba8a6 100644
+--- a/PCbuild/_freeze_module.vcxproj
++++ b/PCbuild/_freeze_module.vcxproj
+@@ -367,6 +367,11 @@
+       <IntFile>$(IntDir)runpy.g.h</IntFile>
+       <OutFile>$(GeneratedFrozenModulesDir)Python\frozen_modules\runpy.h</OutFile>
+     </None>
++    <None Include="..\Lib\retrace.py">
++      <ModName>retrace</ModName>
++      <IntFile>$(IntDir)retrace.g.h</IntFile>
++      <OutFile>$(GeneratedFrozenModulesDir)Python\frozen_modules\retrace.h</OutFile>
++    </None>
+     <None Include="..\Lib\__hello__.py">
+       <ModName>__hello__</ModName>
+       <IntFile>$(IntDir)__hello__.g.h</IntFile>
+@@ -426,6 +431,7 @@
+     <FrozenModule Include="$(GeneratedFrozenModulesDir)Python\frozen_modules\importlib.util.h" FrozenId="importlib.util" />
+     <FrozenModule Include="$(GeneratedFrozenModulesDir)Python\frozen_modules\importlib.machinery.h" FrozenId="importlib.machinery" />
+     <FrozenModule Include="$(GeneratedFrozenModulesDir)Python\frozen_modules\runpy.h" FrozenId="runpy" />
++    <FrozenModule Include="$(GeneratedFrozenModulesDir)Python\frozen_modules\retrace.h" FrozenId="retrace" />
+     <FrozenModule Include="$(GeneratedFrozenModulesDir)Python\frozen_modules\__hello__.h" FrozenId="__hello__" />
+     <FrozenModule Include="$(GeneratedFrozenModulesDir)Python\frozen_modules\__phello__.h" FrozenId="__phello__" />
+     <FrozenModule Include="$(GeneratedFrozenModulesDir)Python\frozen_modules\__phello__.ham.h" FrozenId="__phello__.ham" />
+diff --git a/PCbuild/_freeze_module.vcxproj.filters b/PCbuild/_freeze_module.vcxproj.filters
+index 332d466b1f7..3e43b11f186 100644
+--- a/PCbuild/_freeze_module.vcxproj.filters
++++ b/PCbuild/_freeze_module.vcxproj.filters
+@@ -561,6 +561,9 @@
+     <None Include="..\Lib\runpy.py">
+       <Filter>Python Files</Filter>
+     </None>
++    <None Include="..\Lib\retrace.py">
++      <Filter>Python Files</Filter>
++    </None>
+     <None Include="..\Lib\__hello__.py">
+       <Filter>Python Files</Filter>
+     </None>
+diff --git a/Python/frozen.c b/Python/frozen.c
+index 15d256b6743..076a808993e 100644
+--- a/Python/frozen.c
++++ b/Python/frozen.c
+@@ -58,6 +58,7 @@
+ #include "frozen_modules/importlib.util.h"
+ #include "frozen_modules/importlib.machinery.h"
+ #include "frozen_modules/runpy.h"
++#include "frozen_modules/retrace.h"
+ #include "frozen_modules/__hello__.h"
+ #include "frozen_modules/__phello__.h"
+ #include "frozen_modules/__phello__.ham.h"
+@@ -92,6 +93,9 @@ static const struct _frozen stdlib_modules[] = {
+     {"importlib.util", _Py_M__importlib_util, (int)sizeof(_Py_M__importlib_util), false},
+     {"importlib.machinery", _Py_M__importlib_machinery, (int)sizeof(_Py_M__importlib_machinery), false},
+     {"runpy", _Py_M__runpy, (int)sizeof(_Py_M__runpy), false},
++
++    /* retrace */
++    {"retrace", _Py_M__retrace, (int)sizeof(_Py_M__retrace), false},
+     {0, 0, 0} /* stdlib sentinel */
+ };
+ static const struct _frozen test_modules[] = {
+diff --git a/Tools/build/freeze_modules.py b/Tools/build/freeze_modules.py
+index 3c43f7e3bbe..8d1a7cc8ed1 100644
+--- a/Tools/build/freeze_modules.py
++++ b/Tools/build/freeze_modules.py
+@@ -71,6 +71,9 @@
+         "importlib.machinery",
+         "runpy",
+     ]),
++    ('retrace', [
++        'retrace',
++    ]),
+     (TESTS_SECTION, [
+         '__hello__',
+         '__hello__ : __hello_alias__',

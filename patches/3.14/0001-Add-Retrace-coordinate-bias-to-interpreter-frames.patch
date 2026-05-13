@@ -1,0 +1,140 @@
+From 0cc6b5dd2a1c024f776ea72c3b6747c8cf599859 Mon Sep 17 00:00:00 2001
+From: Retrace CPython Builder <retrace-cpython@retracesoftware.com>
+Date: Thu, 7 May 2026 09:50:41 +0100
+Subject: [PATCH 1/9] Add Retrace coordinate bias to interpreter frames
+
+---
+ Include/internal/pycore_interpframe.h         |  2 ++
+ Include/internal/pycore_interpframe_structs.h |  2 ++
+ Python/bytecodes.c                            |  1 +
+ Python/ceval.c                                |  6 ++++++
+ Python/ceval_macros.h                         | 10 ++++++++--
+ Python/generated_cases.c.h                    |  1 +
+ 6 files changed, 20 insertions(+), 2 deletions(-)
+
+diff --git a/Include/internal/pycore_interpframe.h b/Include/internal/pycore_interpframe.h
+index b5b729f141b..e941a746f18 100644
+--- a/Include/internal/pycore_interpframe.h
++++ b/Include/internal/pycore_interpframe.h
+@@ -150,2 +150,3 @@ static inline void _PyFrame_Copy(_PyInterpreterFrame *src, _PyInterpreterFrame *
+     assert(stacktop >= 0);
++    dest->retrace = src->retrace;
+     dest->stackpointer = dest->localsplus + stacktop;
+@@ -209,6 +210,7 @@ _PyFrame_Initialize(
+ #ifdef Py_DEBUG
+     frame->lltrace = 0;
+ #endif
++    _PyRetraceFrameState_Init(&frame->retrace);
+
+     for (int i = null_locals_from; i < code->co_nlocalsplus; i++) {
+         frame->localsplus[i] = PyStackRef_NULL;
+diff --git a/Include/internal/pycore_interpframe_structs.h b/Include/internal/pycore_interpframe_structs.h
+index 835b8e58194..95be2289ac7 100644
+--- a/Include/internal/pycore_interpframe_structs.h
++++ b/Include/internal/pycore_interpframe_structs.h
+@@ -12,6 +12,7 @@
+ #  error "this header requires Py_BUILD_CORE define"
+ #endif
+
++#include "cpython/retrace_state.h" // _PyRetraceFrameState
+ #include "pycore_structs.h"       // _PyStackRef
+ #include "pycore_typedefs.h"      // _PyInterpreterFrame
+
+@@ -49,6 +50,7 @@ struct _PyInterpreterFrame {
+ #else
+     uint8_t visited;
+ #endif
++    _PyRetraceFrameState retrace;
+     /* Locals and stack */
+     _PyStackRef localsplus[1];
+ };
+diff --git a/Python/bytecodes.c b/Python/bytecodes.c
+index 509a5a6e13f..c177ed0eebf 100644
+--- a/Python/bytecodes.c
++++ b/Python/bytecodes.c
+@@ -5511,6 +5511,7 @@ dummy_func(
+             if (too_deep) {
+                 goto exit_unwind;
+             }
++            _PyRetrace_ActivateFrame(tstate, frame);
+             next_instr = frame->instr_ptr;
+         #ifdef Py_DEBUG
+             int lltrace = maybe_lltrace_resume_frame(frame, GLOBALS());
+diff --git a/Python/ceval.c b/Python/ceval.c
+index 377b4644edd..09c373d251d 100644
+--- a/Python/ceval.c
++++ b/Python/ceval.c
+@@ -1192,9 +1192,14 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *frame, int
+ #ifdef Py_DEBUG
+     entry.frame.lltrace = 0;
+ #endif
++    _PyRetraceFrameState_Init(&entry.frame.retrace);
++    _PyFrame_RetraceResetCoordinateDepth(&entry.frame);
++    _PyFrame_RetraceInitializeLastCoordinate(&entry.frame);
+     /* Push frame */
+     entry.frame.previous = tstate->current_frame;
+     frame->previous = &entry.frame;
++    _PyFrame_RetraceResetCoordinateDepth(frame);
++    _PyFrame_RetraceResetLastCoordinate(frame);
+     tstate->current_frame = frame;
+     entry.frame.localsplus[0] = PyStackRef_NULL;
+ #ifdef _Py_TIER2
+@@ -1209,6 +1214,7 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *frame, int
+         if (_Py_EnterRecursivePy(tstate)) {
+             goto early_exit;
+         }
++        _PyRetrace_ActivateFrame(tstate, frame);
+ #ifdef Py_GIL_DISABLED
+         /* Load thread-local bytecode */
+         if (frame->tlbc_index != ((_PyThreadStateImpl *)tstate)->tlbc_index) {
+diff --git a/Python/ceval_macros.h b/Python/ceval_macros.h
+index 4a878d6dff4..06d5a866c60 100644
+--- a/Python/ceval_macros.h
++++ b/Python/ceval_macros.h
+@@ -206,12 +206,16 @@ GETITEM(PyObject *v, Py_ssize_t i) {
+         opcode = word.op.code; \
+         oparg = word.op.arg; \
+     } while (0)
+-
+ /* JUMPBY makes the generator identify the instruction as a jump. SKIP_OVER is
+  * for advancing to the next instruction, taking into account cache entries
+  * and skipped instructions.
+  */
+-#define JUMPBY(x)       (next_instr += (x))
++#define JUMPBY(x) \
++    do { \
++        _Py_CODEUNIT *target = next_instr + (x); \
++        _PyFrame_RetraceCoordinateJump(frame, frame->instr_ptr, target); \
++        next_instr = target; \
++    } while (0)
+ #define SKIP_OVER(x)    (next_instr += (x))
+
+ #define STACK_LEVEL()     ((int)(stack_pointer - _PyFrame_Stackbase(frame)))
+@@ -320,6 +324,7 @@ GETITEM(PyObject *v, Py_ssize_t i) {
+ // for an exception handler, displaying the traceback, and so on
+ #define INSTRUMENTED_JUMP(src, dest, event) \
+ do { \
++    _Py_CODEUNIT *retrace_jump_src = (src); \
+     if (tstate->tracing) {\
+         next_instr = dest; \
+     } else { \
+@@ -331,6 +336,7 @@ do { \
+             JUMP_TO_LABEL(error); \
+         } \
+     } \
++    _PyFrame_RetraceCoordinateJump(frame, retrace_jump_src, next_instr); \
+ } while (0);
+
+
+diff --git a/Python/generated_cases.c.h b/Python/generated_cases.c.h
+index 9e825c529c9..d3868dde7ac 100644
+--- a/Python/generated_cases.c.h
++++ b/Python/generated_cases.c.h
+@@ -12508,6 +12508,7 @@ JUMP_TO_LABEL(error);
+             if (too_deep) {
+                 JUMP_TO_LABEL(exit_unwind);
+             }
++            _PyRetrace_ActivateFrame(tstate, frame);
+             next_instr = frame->instr_ptr;
+             #ifdef Py_DEBUG
+             int lltrace = maybe_lltrace_resume_frame(frame, GLOBALS());

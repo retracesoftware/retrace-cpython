@@ -7,6 +7,7 @@ Example:
 
 ```bash
 build/install/3.12.8+retrace/bin/python3 tests/smoke/probe_capability.py
+build/install/3.12.8+retrace/bin/python3 tests/smoke/coordinate_contracts.py
 build/install/3.12.8+retrace/bin/python3 tests/smoke/ctypes_thread_ident.py
 build/install/3.12.8+retrace/bin/python3 tests/smoke/coordinate_wrappers.py
 build/install/3.12.8+retrace/bin/python3 tests/smoke/retrace_public.py
@@ -15,6 +16,7 @@ build/install/3.12.8+retrace/bin/python3 tests/smoke/thread_id_determinism.py
 build/install/3.12.8+retrace/bin/python3 tests/smoke/thread_probe_concurrency.py
 build/install/3.12.8+retrace/bin/python3 tests/smoke/thread_schedule_fresh.py
 build/install/3.12.8+retrace/bin/python3 tests/smoke/thread_schedule_minimal.py
+build/install/3.12.8+retrace/bin/python3 tests/smoke/thread_schedule_primitives.py
 build/install/3.12.8+retrace/bin/python3 tests/smoke/thread_schedule_stress.py
 ```
 
@@ -24,6 +26,11 @@ the pinned application instruction boundary, not the Python frames entered by
 the callback itself. It also checks call_at hit, overshoot, and
 past-coordinate rejection behavior, plus the convention where an
 `retrace.include` wrapper runs visible application work under the pinned frame.
+
+`coordinate_contracts.py` keeps the public `retrace` coordinate semantics close
+to retrace-python: visible frame-pair shape, nested/repeated call coordinates,
+per-thread coordinate and delta isolation, `exclude`/`include` transparency,
+and `call_at` past, overshoot, and transparent callback behavior.
 
 `coordinate_wrappers.py` checks the public `_retrace.exclude` and
 `_retrace.include` decorators: hidden callable frames are omitted from
@@ -64,6 +71,12 @@ started thread, look ahead to arm any available yield point, then park in
 schedule and that each thread completes its expected work; exact event-order
 comparison is available for workloads whose side effects align with call_at
 boundaries.
+
+`thread_schedule_primitives.py` runs a shared multi-thread workload through the
+schedule controller while exercising an intentionally unlocked counter, a locked
+counter, a semaphore gate, a semaphore-backed bounded buffer, and a condition
+handoff. Critical sections are hidden from scheduler-control callbacks so replay
+does not park a thread while it owns the primitive under test.
 
 `thread_schedule_fresh.py` records and replays a small schedule sequentially in
 one process under `retrace.with_new_coordinates`, asserting that replay can use
