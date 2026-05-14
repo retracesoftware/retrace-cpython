@@ -168,7 +168,9 @@ id on two different threads has separate root ordinals.
 Thread creation inherits the creator's current space id, not the creator's
 space state. If a thread is started while execution is in the disabled space,
 the new thread begins in the disabled space with its own per-thread disabled
-space state.
+space state. The public thread id also carries that creation-space namespace:
+the top 16 bits are `(space_id & 0xffff)`, and the lower 48 bits are the
+deterministic hashed thread id.
 
 Querying coordinates for a space that has never been active on a thread returns
 `None`. Querying a space that exists for the thread but currently has no active
@@ -232,6 +234,10 @@ include = root_space.wrap
 disable = disabled_space.run
 ```
 
+`space.wrap(fn)` returns a native callable wrapper. When the wrapper is called,
+it executes `fn` under `space` using the same dynamic-scope rules as
+`space.run(fn, *args, **kwargs)`.
+
 The `_retrace` API accepts `space_id=None` as the root-space default:
 
 ```python
@@ -245,6 +251,7 @@ _retrace.call_at(thread_id, coordinates, callback, overshoot=None,
                  space_id=None)
 _retrace.call_at(None, space_id=None)
 _retrace.run_in_space(space_id, callable, *args, **kwargs)
+_retrace.wrap_for_space(space_id, callable)
 ```
 
 At the C layer, thread state owns the active space, the ordinal slot, and the

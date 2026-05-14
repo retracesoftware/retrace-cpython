@@ -528,10 +528,13 @@ retrace_coordinates(PyObject *module, PyObject *args)
 typedef enum {
     RETRACE_CALL_EXCLUDE,
     RETRACE_CALL_INCLUDE,
+    RETRACE_CALL_SPACE,
 } RetraceCallWrapperMode;
 
 static PyObject *
-retrace_call_wrapper_new(PyObject *callable, RetraceCallWrapperMode mode);
+retrace_call_wrapper_new(PyObject *callable,
+                         RetraceCallWrapperMode mode,
+                         uint32_t space_id);
 
 static PyObject *
 retrace_callback_ref(PyObject *callback, const char *name, int allow_none)
@@ -852,6 +855,7 @@ typedef struct {
     PyObject *callable;
     vectorcallfunc vectorcall;
     RetraceCallWrapperMode mode;
+    uint32_t space_id;
 } RetraceCallWrapper;
 
 typedef struct {
@@ -951,6 +955,23 @@ retrace_leave_space(PyThreadState *tstate, RetraceSpaceScope *scope)
 }
 
 static PyObject *
+retrace_call_with_space_id(uint32_t space_id,
+                           PyObject *callable,
+                           PyObject *const *args,
+                           size_t nargsf,
+                           PyObject *kwnames)
+{
+    PyThreadState *tstate = _PyThreadState_GET();
+    RetraceSpaceScope scope;
+    if (retrace_enter_space(tstate, space_id, &scope) < 0) {
+        return NULL;
+    }
+    PyObject *result = PyObject_Vectorcall(callable, args, nargsf, kwnames);
+    retrace_leave_space(tstate, &scope);
+    return result;
+}
+
+static PyObject *
 retrace_call_with_mode(RetraceCallWrapperMode mode,
                        PyObject *callable,
                        PyObject *const *args,
@@ -958,20 +979,12 @@ retrace_call_with_mode(RetraceCallWrapperMode mode,
                        PyObject *kwnames,
                        int hide_current_frame)
 {
-    PyThreadState *tstate = _PyThreadState_GET();
-    PyObject *result;
     (void)hide_current_frame;
-
     uint32_t space_id = mode == RETRACE_CALL_EXCLUDE ?
         _PyFrame_RETRACE_SPACE_ID_DISABLED :
         _PyFrame_RETRACE_SPACE_ID_ROOT;
-    RetraceSpaceScope scope;
-    if (retrace_enter_space(tstate, space_id, &scope) < 0) {
-        return NULL;
-    }
-    result = PyObject_Vectorcall(callable, args, nargsf, kwnames);
-    retrace_leave_space(tstate, &scope);
-    return result;
+    return retrace_call_with_space_id(
+        space_id, callable, args, nargsf, kwnames);
 }
 
 static PyObject *
@@ -981,12 +994,18 @@ retrace_call_wrapper_vectorcall(PyObject *callable,
                                 PyObject *kwnames)
 {
     RetraceCallWrapper *self = (RetraceCallWrapper *)callable;
+    if (self->mode == RETRACE_CALL_SPACE) {
+        return retrace_call_with_space_id(
+            self->space_id, self->callable, args, nargsf, kwnames);
+    }
     return retrace_call_with_mode(
         self->mode, self->callable, args, nargsf, kwnames, 0);
 }
 
 static PyObject *
-retrace_call_wrapper_new(PyObject *callable, RetraceCallWrapperMode mode)
+retrace_call_wrapper_new(PyObject *callable,
+                         RetraceCallWrapperMode mode,
+                         uint32_t space_id)
 {
     if (!PyCallable_Check(callable)) {
         PyErr_SetString(PyExc_TypeError,
@@ -1002,6 +1021,7 @@ retrace_call_wrapper_new(PyObject *callable, RetraceCallWrapperMode mode)
     self->callable = Py_NewRef(callable);
     self->vectorcall = retrace_call_wrapper_vectorcall;
     self->mode = mode;
+    self->space_id = space_id;
     PyObject_GC_Track(self);
     return (PyObject *)self;
 }
@@ -1045,7 +1065,8 @@ retrace_call_wrapper_descr_get(PyObject *self_obj,
     if (bound == NULL) {
         return NULL;
     }
-    PyObject *wrapped = retrace_call_wrapper_new(bound, self->mode);
+    PyObject *wrapped = retrace_call_wrapper_new(
+        bound, self->mode, self->space_id);
     Py_DECREF(bound);
     return wrapped;
 }
@@ -1054,6 +1075,12 @@ static PyObject *
 retrace_call_wrapper_repr(PyObject *self_obj)
 {
     RetraceCallWrapper *self = (RetraceCallWrapper *)self_obj;
+    if (self->mode == RETRACE_CALL_SPACE) {
+        return PyUnicode_FromFormat(
+            "<_retrace.wrap_for_space wrapper space_id=%lu for %R>",
+            (unsigned long)self->space_id,
+            self->callable);
+    }
     const char *name =
         self->mode == RETRACE_CALL_EXCLUDE ? "exclude" : "include";
     return PyUnicode_FromFormat("<_retrace.%s wrapper for %R>",
@@ -1093,7 +1120,10 @@ PyDoc_STRVAR(retrace_exclude_doc,
 static PyObject *
 retrace_exclude(PyObject *module, PyObject *callable)
 {
-    return retrace_call_wrapper_new(callable, RETRACE_CALL_EXCLUDE);
+    return retrace_call_wrapper_new(
+        callable,
+        RETRACE_CALL_EXCLUDE,
+        _PyFrame_RETRACE_SPACE_ID_DISABLED);
 }
 
 PyDoc_STRVAR(retrace_include_doc,
@@ -1106,7 +1136,41 @@ PyDoc_STRVAR(retrace_include_doc,
 static PyObject *
 retrace_include(PyObject *module, PyObject *callable)
 {
-    return retrace_call_wrapper_new(callable, RETRACE_CALL_INCLUDE);
+    return retrace_call_wrapper_new(
+        callable,
+        RETRACE_CALL_INCLUDE,
+        _PyFrame_RETRACE_SPACE_ID_ROOT);
+}
+
+PyDoc_STRVAR(retrace_wrap_for_space_doc,
+"wrap_for_space($module, space_id, callable, /)\n"
+"--\n"
+"\n"
+"Return a callable wrapper that runs callable in the selected Retrace\n"
+"coordinate space. Intended for use as a decorator substrate.");
+
+static PyObject *
+retrace_wrap_for_space(PyObject *module,
+                       PyObject *const *args,
+                       Py_ssize_t nargs)
+{
+    if (nargs != 2) {
+        PyErr_SetString(PyExc_TypeError,
+                        "wrap_for_space expected 2 arguments");
+        return NULL;
+    }
+    uint32_t space_id;
+    if (retrace_space_id_from_object(args[0], &space_id) < 0) {
+        return NULL;
+    }
+    PyObject *callable = args[1];
+    if (!PyCallable_Check(callable)) {
+        PyErr_SetString(PyExc_TypeError,
+                        "wrap_for_space callable argument must be callable");
+        return NULL;
+    }
+    return retrace_call_wrapper_new(
+        callable, RETRACE_CALL_SPACE, space_id);
 }
 
 PyDoc_STRVAR(retrace_run_transparent_doc,
@@ -2105,6 +2169,8 @@ static PyMethodDef retrace_methods[] = {
      METH_VARARGS, retrace_get_thread_resume_callback_doc},
     {"exclude", retrace_exclude, METH_O, retrace_exclude_doc},
     {"include", retrace_include, METH_O, retrace_include_doc},
+    {"wrap_for_space", _PyCFunction_CAST(retrace_wrap_for_space),
+     METH_FASTCALL, retrace_wrap_for_space_doc},
     {"run_transparent", retrace_run_transparent, METH_O,
      retrace_run_transparent_doc},
     {"with_new_coordinates", _PyCFunction_CAST(retrace_with_new_coordinates),

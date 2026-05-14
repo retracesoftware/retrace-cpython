@@ -30,6 +30,7 @@ retrace.thread_delta()
 retrace.hash()
 retrace.exclude(callable)
 retrace.include(callable)
+retrace.CoordinateSpace().wrap(callable)
 retrace.with_new_coordinates(callable, *args, **kwargs)
 retrace.callbacks.thread_start = callback_or_none
 retrace.callbacks.set_thread_start(callback_or_none, space=None)
@@ -45,7 +46,8 @@ retrace.ThreadHandoff(timeout=None)
 ```
 
 The low-level builtin exposes native primitives under `_retrace`, including
-the callback get/set functions used by the public `retrace.callbacks` object.
+`wrap_for_space(space_id, callable)`, `run_in_space(...)`, and the callback
+get/set functions used by the public `retrace.callbacks` object.
 
 `coordinates()` returns a tuple of Python `int` values. Values are visible
 Python frame execution coordinates, oldest frame first and current frame last.
@@ -223,11 +225,14 @@ suspended at one bytecode offset. Ordinary child calls do not bump or bias the
 parent coordinate.
 
 `PyThreadState` stores a 64-bit Retrace thread id and records CPython's native
-`_thread.start_new_thread()` ident for bridge lookups.
-The main thread id is derived from `RETRACE_ROOT_SEED`, defaulting to
-the literal string `retrace`. New child thread ids are mixed from the creator's
-thread id plus parent cursor, then checked against active Retrace thread ids
-and remixed on the vanishingly unlikely collision path.
+`_thread.start_new_thread()` ident for bridge lookups. The public id layout is
+space-aware: the top 16 bits are `(space_id & 0xffff)`, and the lower 48 bits
+are the deterministic hashed thread id. The main thread id is derived from
+`RETRACE_ROOT_SEED`, defaulting to the literal string `retrace`, in root space
+so its top 16 bits are zero. New child thread ids are mixed from the creator's
+thread id plus parent cursor, then scoped to the space inherited by the new
+thread. Active-id collision retries remix only the lower 48 hash bits while
+preserving the space prefix.
 `PyThreadState` also stores an internal root activation counter in
 `tstate->retrace.root_coordinate`. If a visible frame starts without a visible
 Python parent, activation assigns the frame's current call ordinal from that

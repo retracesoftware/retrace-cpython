@@ -46,12 +46,7 @@ class CoordinateSpace:
     def wrap(self, callable, /):
         if not _is_callable(callable):
             raise TypeError("space wrapper argument must be callable")
-
-        def wrapped(*args, **kwargs):
-            return self.run(callable, *args, **kwargs)
-
-        wrapped.__wrapped__ = callable
-        return wrapped
+        return _retrace.wrap_for_space(self._id, callable)
 
     def call_at(self, thread_id, coordinates=_MISSING, callback=_MISSING,
                 overshoot_callback=None, /):

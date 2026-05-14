@@ -10,10 +10,35 @@ import _thread
 
 
 PROBE_MODULE = "_retrace"
+THREAD_ID_SPACE_SHIFT = 48
+THREAD_ID_HASH_MASK = (1 << THREAD_ID_SPACE_SHIFT) - 1
+THREAD_ID_SPACE_MASK = (1 << 16) - 1
 
 
 def is_u64(value) -> bool:
     return type(value) is int and 0 < value < 2**64
+
+
+def thread_id_space(thread_id: int) -> int:
+    return thread_id >> THREAD_ID_SPACE_SHIFT
+
+
+def thread_id_hash(thread_id: int) -> int:
+    return thread_id & THREAD_ID_HASH_MASK
+
+
+def child_thread_id() -> int:
+    ids = []
+    ready = threading.Event()
+
+    def worker() -> None:
+        ids.append(_thread.get_ident())
+        ready.set()
+
+    started_id = _thread.start_new_thread(worker, ())
+    assert ready.wait(5)
+    assert ids == [started_id]
+    return ids[0]
 
 
 def advance_leaf_instruction(coordinates, delta: int):
@@ -434,6 +459,8 @@ def check_thread_ids(module) -> None:
     main_id = _thread.get_ident()
     assert is_u64(main_id)
     assert main_id == _thread.get_ident()
+    assert thread_id_space(main_id) == 0
+    assert thread_id_hash(main_id) != 0
 
     worker_ids = []
 
@@ -450,6 +477,21 @@ def check_thread_ids(module) -> None:
     assert all(is_u64(item) for item in worker_ids)
     assert len(set(worker_ids)) == len(workers)
     assert main_id not in set(worker_ids)
+    assert all(thread_id_space(item) == 0 for item in worker_ids)
+    assert all(thread_id_hash(item) != 0 for item in worker_ids)
+
+    disabled_child_id = module.run_in_space(1, child_thread_id)
+    assert is_u64(disabled_child_id)
+    assert thread_id_space(disabled_child_id) == 1
+    assert thread_id_hash(disabled_child_id) != 0
+
+    space_id = module.allocate_space_id()
+    space_child_id = module.run_in_space(space_id, child_thread_id)
+    assert is_u64(space_child_id)
+    assert thread_id_space(space_child_id) == (
+        space_id & THREAD_ID_SPACE_MASK)
+    assert thread_id_hash(space_child_id) != 0
+    assert len({main_id, disabled_child_id, space_child_id}) == 3
 
 
 def check_ctypes_async_exc_bridge(module) -> None:

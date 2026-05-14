@@ -56,7 +56,9 @@ visible Python frame to the current frame. Each visible frame contributes:
 ```
 
 `thread_id` is the deterministic integer returned by `_thread.get_ident()`.
-Unknown thread ids raise `LookupError`. `drop` omits leading coordinate words.
+Its top 16 bits identify the thread's creation space as `(space_id & 0xffff)`,
+and its lower 48 bits are the deterministic thread hash. Unknown thread ids
+raise `LookupError`. `drop` omits leading coordinate words.
 
 ## Thread Deltas
 
@@ -94,6 +96,9 @@ def control_plane_helper():
 @retrace.include
 def application_visible_callback():
     ...
+
+space = retrace.CoordinateSpace()
+wrapped = space.wrap(workload)
 ```
 
 `exclude(callable)` returns a wrapper whose frames are transparent to
@@ -103,6 +108,11 @@ coordinates, deltas, and hashes. It is intended for Retrace control-plane code.
 coordinate space when called from transparent callback code.
 
 Both wrappers support decorator usage.
+
+`CoordinateSpace.wrap(callable)` returns the same kind of native wrapper for an
+explicit coordinate space. Calling the wrapper is equivalent to
+`space.run(callable, *args, **kwargs)`, but avoids creating a Python closure for
+each wrapped function.
 
 ## Fresh Coordinates
 

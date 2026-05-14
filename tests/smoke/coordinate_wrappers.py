@@ -5,6 +5,9 @@ import threading
 
 
 PROBE_MODULE = "_retrace"
+THREAD_ID_SPACE_SHIFT = 48
+THREAD_ID_HASH_MASK = (1 << THREAD_ID_SPACE_SHIFT) - 1
+THREAD_ID_SPACE_MASK = (1 << 16) - 1
 
 
 def require_wrappers(module):
@@ -283,14 +286,21 @@ def check_fresh_spaces_match(module):
     seen = {}
     samples = []
     for _ in range(12):
-        current = sample(module.allocate_space_id())
+        space_id = module.allocate_space_id()
+        current = sample(space_id)
         samples.append(current)
-        key = current[:2]
+        assert current[2] >> THREAD_ID_SPACE_SHIFT == (
+            space_id & THREAD_ID_SPACE_MASK)
+        assert current[2] & THREAD_ID_HASH_MASK != 0
+        key = (*current[:2], current[2] & THREAD_ID_HASH_MASK)
         previous = seen.get(key)
         if previous is None:
             seen[key] = current
             continue
-        assert previous == current, (previous, current)
+        assert previous[:2] == current[:2], (previous, current)
+        assert (previous[2] & THREAD_ID_HASH_MASK) == (
+            current[2] & THREAD_ID_HASH_MASK), (previous, current)
+        assert previous[2] != current[2], (previous, current)
         return
     raise AssertionError(samples)
 

@@ -65,6 +65,7 @@ retrace.thread_delta()
 retrace.hash()
 retrace.exclude(callable)
 retrace.include(callable)
+retrace.CoordinateSpace().wrap(callable)
 retrace.with_new_coordinates(callable, *args, **kwargs)
 retrace.callbacks.thread_start = callback_or_none
 retrace.callbacks.set_thread_start(callback_or_none, space=None)
@@ -167,6 +168,11 @@ starts with root ordinal `0`, and coordinate hashes use the default root hash.
 When the callable returns or raises, Retrace restores the parent thread's root
 ordinal and delta state. This helper is intended for same-process record/replay
 tests that need literal thread ids and coordinate roots.
+
+`CoordinateSpace().wrap(callable)` returns a native callable wrapper that runs
+the callable in that coordinate space whenever the wrapper is called. The
+module-level `exclude` and `include` decorators are implemented as wrappers for
+the disabled and root spaces.
 
 `ThreadHandoff(timeout=None)` creates a replay handoff gate. `handoff.start()`
 registers the current stable `_thread.get_ident()` id, then parks that thread
@@ -396,12 +402,11 @@ typedef struct {
 
 `thread_id` is the deterministic 64-bit Retrace identity exposed through
 Python's thread-ident APIs, and `cpython_thread_ident` records CPython's native
-`_thread.start_new_thread()` ident for bridge lookups. The main thread id is
-derived from `RETRACE_ROOT_SEED`, defaulting to the literal string `retrace`.
-New child thread ids are mixed from the creator's thread id plus parent cursor,
-then checked against active Retrace thread ids and remixed on the vanishingly
-unlikely collision path. The root fields track C-originated frame activations
-and delta initialization. The callback fields track pending/resident callback
+`_thread.start_new_thread()` ident for bridge lookups. The top 16 bits of
+`thread_id` hold `(space_id & 0xffff)` for the space inherited at thread
+creation; the lower 48 bits hold the deterministic hashed id. The root fields
+track C-originated frame activations and delta initialization. The callback
+fields track pending/resident callback
 delivery, pin the application frame observed by callback code, and prevent
 recursive callback delivery.
 

@@ -224,6 +224,51 @@ def check_coordinate_spaces(public):
     assert len(root_from_disabled) >= 2
 
 
+def check_space_wrappers(public, native):
+    space = public.CoordinateSpace()
+    calls = []
+
+    def leaf(left, right=0):
+        space_coordinates = space.coordinates()
+        root_coordinates = public.coordinates()
+        assert type(space_coordinates) is tuple
+        assert len(space_coordinates) >= 2
+        assert len(space_coordinates) % 2 == 0
+        assert type(root_coordinates) is tuple
+        assert len(root_coordinates) >= 2
+        calls.append((space_coordinates, root_coordinates))
+        return left + right
+
+    wrapped = space.wrap(leaf)
+    assert inspect.unwrap(wrapped) is leaf
+    assert wrapped(2, right=3) == 5
+    assert space.coordinates() == ()
+
+    native_wrapped = native.wrap_for_space(space.id, leaf)
+    assert inspect.unwrap(native_wrapped) is leaf
+    assert native_wrapped(4, right=5) == 9
+
+    class Holder:
+        @space.wrap
+        def method(self, value):
+            return self, value, space.coordinates()
+
+    holder = Holder()
+    owner, value, method_coordinates = holder.method(11)
+    assert owner is holder
+    assert value == 11
+    assert type(method_coordinates) is tuple
+    assert len(method_coordinates) >= 2
+    assert len(calls) == 2
+
+    try:
+        native.wrap_for_space(space.id, object())
+    except TypeError:
+        pass
+    else:
+        raise AssertionError("wrap_for_space accepted a non-callable")
+
+
 def main() -> int:
     public, native = require_modules()
     if public is None:
@@ -254,11 +299,13 @@ def main() -> int:
 
     check_callback_registration(public, native)
     check_coordinate_spaces(public)
+    check_space_wrappers(public, native)
     check_call_at_include(public)
     check_call_at_overshoot(public)
 
     print("retrace_module=available")
     print("retrace_callback_wrapping=available")
+    print("space_wrapping=available")
     print("call_at_include=available")
     return 0
 

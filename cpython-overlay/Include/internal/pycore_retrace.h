@@ -29,6 +29,9 @@ extern "C" {
 #define _PY_RETRACE_CALL_ORDINAL_HASH_TAG (UINT64_C(1) << 63)
 #define _PY_RETRACE_COORDINATE_HASH_MASK \
     (_PY_RETRACE_CALL_ORDINAL_HASH_TAG - UINT64_C(1))
+#define _PY_RETRACE_THREAD_ID_SPACE_SHIFT 48
+#define _PY_RETRACE_THREAD_ID_SPACE_MASK UINT64_C(0xffff)
+#define _PY_RETRACE_THREAD_ID_HASH_MASK UINT64_C(0x0000ffffffffffff)
 
 static inline uint64_t
 _PyRetrace_NormalizeCoordinateHash(uint64_t hash)
@@ -52,6 +55,29 @@ _PyRetrace_NormalizeThreadId(uint64_t thread_id)
 {
     thread_id = _PyRetrace_NormalizeCoordinateHash(thread_id);
     return thread_id == 0 ? UINT64_C(1) : thread_id;
+}
+
+static inline uint64_t
+_PyRetrace_ThreadIdSpaceBits(uint32_t space_id)
+{
+    return ((uint64_t)space_id) & _PY_RETRACE_THREAD_ID_SPACE_MASK;
+}
+
+static inline uint64_t
+_PyRetrace_ComposeThreadId(uint32_t space_id, uint64_t thread_hash)
+{
+    uint64_t hash_bits =
+        _PyRetrace_NormalizeCoordinateHash(thread_hash) &
+        _PY_RETRACE_THREAD_ID_HASH_MASK;
+    if (hash_bits == 0) {
+        hash_bits = 1;
+    }
+
+    uint64_t thread_id =
+        (_PyRetrace_ThreadIdSpaceBits(space_id) <<
+         _PY_RETRACE_THREAD_ID_SPACE_SHIFT) |
+        hash_bits;
+    return _PyRetrace_NormalizeThreadId(thread_id);
 }
 
 static inline uint64_t
@@ -501,7 +527,8 @@ _PyRetrace_RootThreadIdSeed(void)
     uint64_t hash = _PyRetrace_InitialRootCoordinateHash();
     hash = _PyRetrace_MixBytes(hash, domain, sizeof(domain) - 1);
     hash = _PyRetrace_MixBytes(hash, seed, strlen(seed));
-    return _PyRetrace_NormalizeThreadId(hash);
+    return _PyRetrace_ComposeThreadId(
+        _PyFrame_RETRACE_SPACE_ID_ROOT, hash);
 }
 
 static inline uint64_t
@@ -547,13 +574,14 @@ static inline uint64_t
 _PyRetrace_UniqueThreadId(
     PyInterpreterState *interp,
     PyThreadState *skip,
+    uint32_t space_id,
     uint64_t thread_id)
 {
-    thread_id = _PyRetrace_NormalizeThreadId(thread_id);
+    thread_id = _PyRetrace_ComposeThreadId(space_id, thread_id);
     uint64_t retry = UINT64_C(0x9e3779b97f4a7c15);
     while (_PyRetrace_ThreadIdIsActive(interp, skip, thread_id)) {
-        thread_id = _PyRetrace_NormalizeThreadId(
-            _PyRetrace_Mix64(thread_id, retry));
+        thread_id = _PyRetrace_ComposeThreadId(
+            space_id, _PyRetrace_Mix64(thread_id, retry));
         retry += UINT64_C(0x9e3779b97f4a7c15);
     }
     return thread_id;
@@ -640,14 +668,17 @@ _PyRetrace_SeedThreadState(PyThreadState *parent, PyThreadState *child)
     child->retrace.thread_started = parent == NULL;
     child->retrace.thread_start_pending = 0;
     child->retrace.thread_resume_pending = 0;
-    child->retrace.thread_id =
-        _PyRetrace_UniqueThreadId(
-            child->interp, child, _PyRetrace_ThreadIdSeed(parent));
-    child->retrace.root_space.root_coordinate_hash = child->retrace.thread_id;
     uint32_t inherited_space_id =
         parent == NULL || parent->retrace.current_space == NULL ?
         _PyFrame_RETRACE_SPACE_ID_ROOT :
         parent->retrace.current_space->space_id;
+    child->retrace.thread_id =
+        _PyRetrace_UniqueThreadId(
+            child->interp,
+            child,
+            inherited_space_id,
+            _PyRetrace_ThreadIdSeed(parent));
+    child->retrace.root_space.root_coordinate_hash = child->retrace.thread_id;
     child->retrace.inherited_space_id = inherited_space_id;
     (void)_PyRetrace_SetCurrentSpaceById(child, inherited_space_id);
 }
