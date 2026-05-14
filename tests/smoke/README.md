@@ -58,7 +58,8 @@ across interpreter runs with the same Retrace root seed.
 call_at callbacks fire only on the requested thread, overshoot callbacks are
 delivered for both post-arm and already-past coordinates, `thread_delta()`
 state is isolated per thread, start callbacks delivered before the first thread
-frame see an empty cursor, and scheduler callback thread ids are visible through
+frame see an empty cursor, thread callback space filters match the active or
+inherited space, and scheduler callback thread ids are visible through
 `threading._active` or `threading._limbo`.
 
 `thread_schedule.py` contains reusable capture/replay support for the schedule

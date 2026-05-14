@@ -424,7 +424,13 @@ _PyRetrace_RootCoordinateHash(
         return _PyRetrace_SpaceRootCoordinateHash(
             tstate, _PyFrame_RETRACE_SPACE_ID_ROOT);
     }
-    return _PyRetrace_NormalizeCoordinateHash(space->root_coordinate_hash);
+    uint64_t hash =
+        _PyRetrace_NormalizeCoordinateHash(space->root_coordinate_hash);
+    if (space->root_call_ordinal != 0) {
+        hash = _PyRetrace_MixFrameCoordinateHash(
+            hash, 0, space->root_call_ordinal);
+    }
+    return hash;
 }
 
 static inline uint64_t
@@ -597,6 +603,28 @@ _PyRetrace_ClearThreadState(PyThreadState *tstate)
     tstate->retrace.last_space = root;
     tstate->retrace.current_space = root;
     tstate->retrace.call_ordinal_ptr = &root->root_call_ordinal;
+}
+
+static inline void
+_PyRetrace_ClearSpaceCallbacks(PyInterpreterState *interp)
+{
+    if (interp == NULL) {
+        return;
+    }
+    _PyRetraceSpaceCallbackState *entry = interp->retrace.space_callbacks;
+    while (entry != NULL) {
+        _PyRetraceSpaceCallbackState *next = entry->next;
+        Py_XDECREF(entry->thread_start_callback);
+        Py_XDECREF(entry->thread_yield_callback);
+        Py_XDECREF(entry->thread_resume_callback);
+        Py_XDECREF(entry->call_at_coordinates);
+        Py_XDECREF(entry->call_at_callback);
+        Py_XDECREF(entry->call_at_overshoot_callback);
+        PyMem_RawFree(entry);
+        entry = next;
+    }
+    interp->retrace.space_callbacks = NULL;
+    interp->retrace.call_at_extra_armed = 0;
 }
 
 static inline void

@@ -128,14 +128,12 @@ class ReplayScheduler:
         self.pause_current_thread()
 
     def run_deferred_pause(self):
-        tid = current_schedule_id()
-        if tid is None:
-            return
-        with self.lock:
-            if not self.deferred_pause:
-                return
-            self.deferred_pause = False
-        self.pause_current_thread()
+        while current_schedule_id() is not None:
+            with self.lock:
+                if not self.deferred_pause:
+                    return
+                self.deferred_pause = False
+            self.pause_current_thread()
 
     def replay_ident(self, tid):
         return self.thread_ids.get(str(tid), tid)
@@ -606,11 +604,32 @@ class FreshScheduleRecorder:
         self.previous_start = self.module.callbacks.thread_start
         self.previous_yield = self.module.callbacks.thread_yield
         self.previous_resume = self.module.callbacks.thread_resume
-        self.module.callbacks.thread_start = self.record_start
-        self.module.callbacks.thread_yield = self.record_yield
-        self.module.callbacks.thread_resume = self.record_resume
+        set_thread_start = getattr(
+            self.module.callbacks, "set_thread_start", None)
+        set_thread_yield = getattr(
+            self.module.callbacks, "set_thread_yield", None)
+        set_thread_resume = getattr(
+            self.module.callbacks, "set_thread_resume", None)
+        if set_thread_start is not None and self.space is not self.module:
+            set_thread_start(self.record_start, self.space)
+            set_thread_yield(self.record_yield, self.space)
+            set_thread_resume(self.record_resume, self.space)
+        else:
+            self.module.callbacks.thread_start = self.record_start
+            self.module.callbacks.thread_yield = self.record_yield
+            self.module.callbacks.thread_resume = self.record_resume
 
     def close(self):
+        set_thread_start = getattr(
+            self.module.callbacks, "set_thread_start", None)
+        set_thread_yield = getattr(
+            self.module.callbacks, "set_thread_yield", None)
+        set_thread_resume = getattr(
+            self.module.callbacks, "set_thread_resume", None)
+        if set_thread_start is not None and self.space is not self.module:
+            set_thread_start(None, self.space)
+            set_thread_yield(None, self.space)
+            set_thread_resume(None, self.space)
         self.module.callbacks.thread_start = self.previous_start
         self.module.callbacks.thread_yield = self.previous_yield
         self.module.callbacks.thread_resume = self.previous_resume
@@ -660,6 +679,8 @@ class FreshScheduleRecorder:
 class FreshScheduleReplay:
     def __init__(self, module, schedule, timeout, coordinate_space=None):
         self.module = module
+        self.space = (
+            coordinate_space if coordinate_space is not None else module)
         self.scheduler = ReplayScheduler(
             module,
             schedule,
@@ -679,16 +700,37 @@ class FreshScheduleReplay:
         self.previous_start = self.module.callbacks.thread_start
         self.previous_yield = self.module.callbacks.thread_yield
         self.previous_resume = self.module.callbacks.thread_resume
-        self.module.callbacks.thread_start = self.replay_start
-        self.module.callbacks.thread_yield = None
-        self.module.callbacks.thread_resume = self.replay_resume
+        set_thread_start = getattr(
+            self.module.callbacks, "set_thread_start", None)
+        set_thread_yield = getattr(
+            self.module.callbacks, "set_thread_yield", None)
+        set_thread_resume = getattr(
+            self.module.callbacks, "set_thread_resume", None)
+        if set_thread_start is not None and self.space is not self.module:
+            set_thread_start(self.replay_start, self.space)
+            set_thread_yield(None, self.space)
+            set_thread_resume(self.replay_resume, self.space)
+        else:
+            self.module.callbacks.thread_start = self.replay_start
+            self.module.callbacks.thread_yield = None
+            self.module.callbacks.thread_resume = self.replay_resume
         self.scheduler.start()
 
     def close(self):
+        set_thread_start = getattr(
+            self.module.callbacks, "set_thread_start", None)
+        set_thread_yield = getattr(
+            self.module.callbacks, "set_thread_yield", None)
+        set_thread_resume = getattr(
+            self.module.callbacks, "set_thread_resume", None)
+        if set_thread_start is not None and self.space is not self.module:
+            set_thread_start(None, self.space)
+            set_thread_yield(None, self.space)
+            set_thread_resume(None, self.space)
         self.module.callbacks.thread_start = self.previous_start
         self.module.callbacks.thread_yield = self.previous_yield
         self.module.callbacks.thread_resume = self.previous_resume
-        self.module.call_at(None)
+        self.space.call_at(None)
         self.scheduler.close()
 
     def replay_start(self):

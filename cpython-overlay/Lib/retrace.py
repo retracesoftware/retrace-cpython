@@ -60,7 +60,7 @@ class CoordinateSpace:
                 raise TypeError(
                     "call_at(None) does not accept "
                     "overshoot_callback")
-            return _retrace.call_at(None)
+            return _retrace.call_at(None, self._id)
         if coordinates is _MISSING or callback is _MISSING:
             raise TypeError(
                 "call_at expects None or "
@@ -101,6 +101,27 @@ def _excluded_callback(callback, name: str, allow_none: bool):
 class _Callbacks:
     __slots__ = ()
 
+    def set_thread_start(self, callback, space=None, /):
+        """Set the thread-start callback for threads inheriting space."""
+        _retrace.set_thread_start_callback(
+            _excluded_callback(callback, "thread start", True),
+            _space_id(space),
+        )
+
+    def set_thread_yield(self, callback, space=None, /):
+        """Set the thread-yield callback for the selected space."""
+        _retrace.set_thread_yield_callback(
+            _excluded_callback(callback, "thread yield", True),
+            _space_id(space),
+        )
+
+    def set_thread_resume(self, callback, space=None, /):
+        """Set the thread-resume callback for the selected space."""
+        _retrace.set_thread_resume_callback(
+            _excluded_callback(callback, "thread resume", True),
+            _space_id(space),
+        )
+
     @property
     def thread_start(self):
         """Callback invoked once on a newly started Python thread."""
@@ -108,8 +129,7 @@ class _Callbacks:
 
     @thread_start.setter
     def thread_start(self, callback):
-        _retrace.set_thread_start_callback(
-            _excluded_callback(callback, "thread start", True))
+        self.set_thread_start(callback)
 
     @property
     def thread_yield(self):
@@ -118,8 +138,7 @@ class _Callbacks:
 
     @thread_yield.setter
     def thread_yield(self, callback):
-        _retrace.set_thread_yield_callback(
-            _excluded_callback(callback, "thread yield", True))
+        self.set_thread_yield(callback)
 
     @property
     def thread_resume(self):
@@ -128,11 +147,16 @@ class _Callbacks:
 
     @thread_resume.setter
     def thread_resume(self, callback):
-        _retrace.set_thread_resume_callback(
-            _excluded_callback(callback, "thread resume", True))
+        self.set_thread_resume(callback)
 
 
 callbacks = _Callbacks()
+
+
+def _space_id(space):
+    if isinstance(space, CoordinateSpace):
+        return space.id
+    return space
 
 
 def call_at(thread_id, coordinates=_MISSING, callback=_MISSING,

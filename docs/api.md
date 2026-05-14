@@ -132,8 +132,11 @@ def on_resume():
     ...
 
 retrace.callbacks.thread_start = on_start
+retrace.callbacks.set_thread_start(on_start, space=None)
 retrace.callbacks.thread_yield = on_yield
+retrace.callbacks.set_thread_yield(on_yield, space=None)
 retrace.callbacks.thread_resume = on_resume
+retrace.callbacks.set_thread_resume(on_resume, space=None)
 
 retrace.callbacks.thread_yield = None
 ```
@@ -142,13 +145,17 @@ Callbacks receive no arguments and run on the thread they describe. Use
 `_thread.get_ident()` inside the callback to read the deterministic thread id.
 
 `thread_start` runs after a new thread acquires the GIL and before its first
-Python frame runs. Coordinates observed inside it are `()`.
+Python frame runs. Coordinates observed inside it are `()`. The property setter
+registers for root-space thread creation. Use `set_thread_start(callback,
+space)` to register for threads that inherit another coordinate space.
 
 `thread_yield` runs before the eval loop drops the GIL for a Python-level switch
-request.
+request in root space. Use `set_thread_yield(callback, space)` to register for
+another coordinate space.
 
 `thread_resume` runs after a thread reacquires the GIL and before application
-bytecode resumes.
+bytecode resumes in root space. Use `set_thread_resume(callback, space)` to
+register for another coordinate space.
 
 Scheduling callbacks are coordinate-transparent. Coordinates, deltas, and
 hashes observed inside them describe the application boundary that caused the
@@ -168,15 +175,16 @@ retrace.call_at(None)
 ```
 
 `call_at(thread_id, coordinates, callback, overshoot_callback=None)` arms one
-coordinate callback per interpreter. When the selected thread reaches the exact
-coordinate tuple, CPython clears the target and calls `callback()` on that
-thread.
+root-space coordinate callback. `CoordinateSpace.call_at(...)` arms the target
+for that space. When the selected thread reaches the exact coordinate tuple,
+CPython clears the target and calls `callback()` on that thread.
 
 If the thread passes the target coordinate without hitting it exactly, CPython
 clears the target and calls `overshoot_callback()` when supplied. If the target
 coordinate is already in the past when arming, `call_at` raises `ValueError`.
 
-`call_at(None)` clears the armed target.
+`call_at(None)` clears the root target. `CoordinateSpace.call_at(None)` clears
+that space's target.
 
 ## ThreadHandoff
 

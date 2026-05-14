@@ -129,6 +129,147 @@ def check_thread_start_callback_before_first_frame_is_empty(module):
     assert not early_resumes, early_resumes
 
 
+def check_thread_start_callback_space_filter(module):
+    old_interval = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+
+    space_id = module.allocate_space_id()
+    hits = []
+    errors = []
+
+    def start_callback():
+        try:
+            hits.append(_thread.get_ident())
+        except BaseException as exc:
+            errors.append(("start callback", repr(exc)))
+
+    def start_worker(launcher):
+        done = _thread.allocate_lock()
+        done.acquire()
+
+        def worker():
+            try:
+                time.sleep(0)
+            except BaseException as exc:
+                errors.append(("worker", repr(exc)))
+            finally:
+                done.release()
+
+        ident = launcher(worker)
+        assert done.acquire(timeout=5.0), "worker did not finish"
+        return ident
+
+    def start_root(worker):
+        return _thread.start_new_thread(worker, ())
+
+    def start_in_space(worker):
+        def launch():
+            return _thread.start_new_thread(worker, ())
+
+        return module.run_in_space(space_id, launch)
+
+    try:
+        module.set_thread_start_callback(start_callback, None)
+        root_ident = start_worker(start_root)
+        space_ident = start_worker(start_in_space)
+        assert root_ident in hits, (root_ident, hits)
+        assert space_ident not in hits, (space_ident, hits)
+
+        hits.clear()
+        module.set_thread_start_callback(None)
+        module.set_thread_start_callback(start_callback, space_id)
+        root_ident = start_worker(start_root)
+        space_ident = start_worker(start_in_space)
+        assert root_ident not in hits, (root_ident, hits)
+        assert space_ident in hits, (space_ident, hits)
+    finally:
+        module.set_thread_start_callback(None)
+        module.set_thread_start_callback(None, space_id)
+        sys.setswitchinterval(old_interval)
+
+    assert not errors, errors
+
+
+def check_schedule_callback_space_filter(module):
+    old_interval = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+
+    space_id = module.allocate_space_id()
+    errors = []
+
+    def run_phase(callback_space_id, expected_label):
+        hits = []
+        worker_idents = {"root": set(), "space": set()}
+        ready = threading.Barrier(3)
+        stop = threading.Event()
+
+        def yield_callback():
+            try:
+                hits.append(("yield", _thread.get_ident()))
+            except BaseException as exc:
+                errors.append(("yield callback", repr(exc)))
+
+        def resume_callback():
+            try:
+                hits.append(("resume", _thread.get_ident()))
+            except BaseException as exc:
+                errors.append(("resume callback", repr(exc)))
+
+        def worker(label):
+            try:
+                worker_idents[label].add(_thread.get_ident())
+                ready.wait()
+                run_busy_loop(stop)
+            except BaseException as exc:
+                errors.append(("worker", label, repr(exc)))
+
+        root_thread = threading.Thread(
+            target=worker, args=("root",), name="root-space-callback-filter")
+        space_thread = threading.Thread(
+            target=worker, args=("space",), name="extra-space-callback-filter")
+
+        try:
+            root_thread.start()
+            module.run_in_space(space_id, space_thread.start)
+            ready.wait()
+            module.set_thread_yield_callback(yield_callback, callback_space_id)
+            module.set_thread_resume_callback(resume_callback, callback_space_id)
+
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline:
+                hit_idents = {ident for _kind, ident in hits}
+                if worker_idents[expected_label] & hit_idents:
+                    break
+                time.sleep(0)
+        finally:
+            stop.set()
+            join_or_fail(root_thread)
+            join_or_fail(space_thread)
+            module.set_thread_yield_callback(None, callback_space_id)
+            module.set_thread_resume_callback(None, callback_space_id)
+
+        return worker_idents, hits
+
+    try:
+        worker_idents, hits = run_phase(None, "root")
+        hit_idents = {ident for _kind, ident in hits}
+        assert worker_idents["root"] & hit_idents, (worker_idents, hits)
+        assert not (worker_idents["space"] & hit_idents), (worker_idents, hits)
+
+        worker_idents, hits = run_phase(space_id, "space")
+        hit_idents = {ident for _kind, ident in hits}
+        assert not (worker_idents["root"] & hit_idents), (worker_idents, hits)
+        assert worker_idents["space"] & hit_idents, (worker_idents, hits)
+    finally:
+        module.set_thread_yield_callback(None)
+        module.set_thread_resume_callback(None)
+        module.set_thread_yield_callback(None, space_id)
+        module.set_thread_resume_callback(None, space_id)
+        sys.setswitchinterval(old_interval)
+
+    assert not errors, errors
+
+
 def check_call_at_hits_intended_thread(module):
     hits = []
     overshoots = []
@@ -372,11 +513,11 @@ def check_schedule_callback_identities(module):
         for index in range(2)
     ]
     try:
-        module.set_thread_yield_callback(yield_callback)
-        module.set_thread_resume_callback(resume_callback)
         for thread in threads:
             thread.start()
         ready.wait()
+        module.set_thread_yield_callback(yield_callback)
+        module.set_thread_resume_callback(resume_callback)
 
         deadline = time.monotonic() + 2.0
         while time.monotonic() < deadline and len(hits) < 10:
@@ -412,6 +553,8 @@ def main() -> int:
         "set_thread_start_callback",
         "set_thread_resume_callback",
         "set_thread_yield_callback",
+        "allocate_space_id",
+        "run_in_space",
         "thread_delta",
     )
     if not all(hasattr(module, name) for name in required):
@@ -422,6 +565,8 @@ def main() -> int:
     check_call_at_overshoot(module)
     check_call_at_past_overshoot(module)
     check_thread_start_callback_before_first_frame_is_empty(module)
+    check_thread_start_callback_space_filter(module)
+    check_schedule_callback_space_filter(module)
     check_thread_delta_is_per_thread(module)
     check_schedule_callback_identities(module)
 
@@ -430,6 +575,8 @@ def main() -> int:
     print("call_at_overshoot=available")
     print("call_at_past_overshoot=available")
     print("thread_start_callback_empty_bootstrap_cursor=available")
+    print("thread_start_callback_space_filter=available")
+    print("schedule_callback_space_filter=available")
     print("thread_delta_per_thread=available")
     print("schedule_callback_identity=available")
     return 0

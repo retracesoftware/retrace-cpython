@@ -258,14 +258,21 @@ def check_fresh_spaces_match(module):
             ids.append(_thread.get_ident())
 
         def body():
+            done = _thread.allocate_lock()
+            done.acquire()
+
+            def locked_worker():
+                try:
+                    worker()
+                finally:
+                    done.release()
+
             coords = module.coordinates(None, 0, space_id)
             coordinate_hash = module.hash(space_id)
-            thread = threading.Thread(target=worker,
-                                      name="fresh-space-match-thread")
-            thread.start()
-            thread.join(5.0)
-            assert not thread.is_alive()
+            ident = _thread.start_new_thread(locked_worker, ())
+            assert done.acquire(timeout=5.0)
             assert len(ids) == 1
+            assert ids[0] == ident
             return coords, coordinate_hash, ids[0]
 
         return module.run_in_space(space_id, body)
@@ -273,9 +280,19 @@ def check_fresh_spaces_match(module):
     for _ in range(4):
         sample(module.allocate_space_id())
 
-    first = sample(module.allocate_space_id())
-    second = sample(module.allocate_space_id())
-    assert first == second, (first, second)
+    seen = {}
+    samples = []
+    for _ in range(12):
+        current = sample(module.allocate_space_id())
+        samples.append(current)
+        key = current[:2]
+        previous = seen.get(key)
+        if previous is None:
+            seen[key] = current
+            continue
+        assert previous == current, (previous, current)
+        return
+    raise AssertionError(samples)
 
 
 def main() -> int:

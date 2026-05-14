@@ -26,15 +26,16 @@ diff --git a/Python/ceval_macros.h b/Python/ceval_macros.h
 index 83c25695c6a..f7341172549 100644
 --- a/Python/ceval_macros.h
 +++ b/Python/ceval_macros.h
-@@ -59,15 +59,32 @@
+@@ -59,15 +59,33 @@
      #define USE_COMPUTED_GOTOS 0
  #endif
 
 +#define RETRACE_CALL_AT() \
 +    do { \
 +        PyInterpreterState *retrace_interp = tstate->interp; \
-+        if (retrace_interp->retrace.call_at_armed && \
-+            retrace_interp->retrace.call_at_thread_id == tstate->retrace.thread_id && \
++        if (((retrace_interp->retrace.call_at_armed && \
++              retrace_interp->retrace.call_at_thread_id == tstate->retrace.thread_id) || \
++             retrace_interp->retrace.call_at_extra_armed) && \
 +            _PyRetrace_FrameIsVisible(frame)) \
 +        { \
 +            _PyFrame_SetStackPointer(frame, stack_pointer); \
@@ -64,10 +65,11 @@ diff --git a/Python/pystate.c b/Python/pystate.c
 index 330ec7418b7..d23675fcb78 100644
 --- a/Python/pystate.c
 +++ b/Python/pystate.c
-@@ -825,6 +825,11 @@ interpreter_clear(PyInterpreterState *interp, PyThreadState *tstate)
+@@ -825,6 +825,12 @@ interpreter_clear(PyInterpreterState *interp, PyThreadState *tstate)
      Py_CLEAR(interp->retrace.thread_start_callback);
      Py_CLEAR(interp->retrace.thread_yield_callback);
      Py_CLEAR(interp->retrace.thread_resume_callback);
++    _PyRetrace_ClearSpaceCallbacks(interp);
 +    _PyRetrace_ClearIdentityHashTable(interp);
 +    interp->retrace.call_at_armed = 0;
 +    Py_CLEAR(interp->retrace.call_at_coordinates);

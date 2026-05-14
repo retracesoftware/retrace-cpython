@@ -40,6 +40,13 @@ def check_callback_registration(public, native):
         public.callbacks.thread_start = None
         assert public.callbacks.thread_start is None
 
+        space = public.CoordinateSpace()
+        public.callbacks.set_thread_start(start_callback, space)
+        stored_start = native.get_thread_start_callback(space.id)
+        assert inspect.unwrap(stored_start) is start_callback
+        public.callbacks.set_thread_start(None, space)
+        assert native.get_thread_start_callback(space.id) is None
+
         public.callbacks.thread_yield = yield_callback
         stored_yield = native.get_thread_yield_callback()
         assert inspect.unwrap(stored_yield) is yield_callback
@@ -47,12 +54,24 @@ def check_callback_registration(public, native):
         public.callbacks.thread_yield = None
         assert public.callbacks.thread_yield is None
 
+        public.callbacks.set_thread_yield(yield_callback, space)
+        stored_yield = native.get_thread_yield_callback(space.id)
+        assert inspect.unwrap(stored_yield) is yield_callback
+        public.callbacks.set_thread_yield(None, space)
+        assert native.get_thread_yield_callback(space.id) is None
+
         public.callbacks.thread_resume = resume_callback
         stored_resume = native.get_thread_resume_callback()
         assert inspect.unwrap(stored_resume) is resume_callback
         assert public.callbacks.thread_resume is stored_resume
         public.callbacks.thread_resume = None
         assert public.callbacks.thread_resume is None
+
+        public.callbacks.set_thread_resume(resume_callback, space)
+        stored_resume = native.get_thread_resume_callback(space.id)
+        assert inspect.unwrap(stored_resume) is resume_callback
+        public.callbacks.set_thread_resume(None, space)
+        assert native.get_thread_resume_callback(space.id) is None
     finally:
         public.callbacks.thread_start = None
         public.callbacks.thread_yield = None

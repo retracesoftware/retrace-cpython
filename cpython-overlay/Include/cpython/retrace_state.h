@@ -13,6 +13,7 @@
 typedef struct _object PyObject;
 typedef struct _ts PyThreadState;
 typedef struct _PyRetraceIdentityHashTable _PyRetraceIdentityHashTable;
+typedef struct _PyRetraceSpaceCallbackState _PyRetraceSpaceCallbackState;
 typedef struct _PyRetraceThreadSpaceState _PyRetraceThreadSpaceState;
 struct _PyInterpreterFrame;
 
@@ -55,6 +56,19 @@ struct _PyRetraceThreadSpaceState {
     _PyRetraceThreadSpaceState *next;
 };
 
+struct _PyRetraceSpaceCallbackState {
+    uint32_t space_id;
+    PyObject *thread_start_callback;
+    PyObject *thread_yield_callback;
+    PyObject *thread_resume_callback;
+    int call_at_armed;
+    uint64_t call_at_thread_id;
+    PyObject *call_at_coordinates;
+    PyObject *call_at_callback;
+    PyObject *call_at_overshoot_callback;
+    _PyRetraceSpaceCallbackState *next;
+};
+
 typedef struct {
     int thread_started;
     int thread_start_pending;
@@ -76,7 +90,9 @@ typedef struct {
     PyObject *thread_start_callback;
     PyObject *thread_yield_callback;
     PyObject *thread_resume_callback;
+    _PyRetraceSpaceCallbackState *space_callbacks;
     int call_at_armed;
+    int call_at_extra_armed;
     uint64_t call_at_thread_id;
     uint32_t call_at_space_id;
     PyObject *call_at_coordinates;

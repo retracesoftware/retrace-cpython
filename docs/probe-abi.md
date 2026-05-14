@@ -32,8 +32,11 @@ retrace.exclude(callable)
 retrace.include(callable)
 retrace.with_new_coordinates(callable, *args, **kwargs)
 retrace.callbacks.thread_start = callback_or_none
+retrace.callbacks.set_thread_start(callback_or_none, space=None)
 retrace.callbacks.thread_yield = callback_or_none
+retrace.callbacks.set_thread_yield(callback_or_none, space=None)
 retrace.callbacks.thread_resume = callback_or_none
+retrace.callbacks.set_thread_resume(callback_or_none, space=None)
 retrace.call_at(
     thread_id, coordinates, callback, overshoot_callback=None
 )
@@ -97,20 +100,27 @@ callback()
 
 The start callback runs once on a newly started thread after it acquires the GIL
 and before its first Python frame runs; coordinates observed inside it are `()`.
+The public property setter registers for root-space thread creation. Use
+`callbacks.set_thread_start(callback, space)` to target threads that inherit a
+different coordinate space.
 The yield callback runs on the current thread just before the eval loop drops
-the GIL in response to a Python-level switch request. The resume callback runs
-on the current thread after it has acquired the GIL and restored its current
-thread state, before application bytecode resumes. The current deterministic
+the GIL in response to a Python-level switch request in root space; use
+`callbacks.set_thread_yield(callback, space)` for another coordinate space. The
+resume callback runs on the current thread after it has acquired the GIL and
+restored its current thread state, before application bytecode resumes in root
+space; use `callbacks.set_thread_resume(callback, space)` for another
+coordinate space. The current deterministic
 thread id can be read with `_thread.get_ident()`. Callback return values are
 ignored. Thread scheduling callbacks are coordinate-transparent: coordinates,
 deltas, and hashes observed inside the callback describe the pinned application
 instruction boundary, not callback-local Python frames.
 
 `call_at(thread_id, coordinates, callback, overshoot_callback=None)` arms one
-coordinate callback for the current interpreter. `thread_id` is the integer
-Retrace thread id, `coordinates` is the full visible frame coordinate tuple
-returned by `coordinates()`, and `callback()` is called when that thread reaches
-the exact coordinate.
+root-space coordinate callback for the current interpreter. Supplying a
+`space_id` arms one callback for that coordinate space. `thread_id` is the
+integer Retrace thread id, `coordinates` is the full visible frame coordinate
+tuple returned by `coordinates()`, and `callback()` is called when that thread
+reaches the exact coordinate.
 Arming raises `ValueError` if `coordinates` is already in the past for that
 thread. If the thread passes the target without hitting it exactly, the optional
 `overshoot_callback()` is called. `call_at` callbacks run in a
@@ -118,7 +128,8 @@ coordinate-transparent scope. The public `retrace` module stores registered
 callbacks as `_retrace.exclude` wrappers. The callback runs on the thread that
 reached or passed the target. Calling a no-argument callable wrapped with
 `retrace.include` runs application-visible work under the target frame,
-then returns to the transparent callback. `call_at(None)` clears the armed
+then returns to the transparent callback. `call_at(None)` clears the armed root
+target, and `call_at(None, space_id)` clears a non-root target.
 callback.
 
 `ThreadHandoff(timeout=None)` creates a replay scheduling gate.
@@ -151,12 +162,14 @@ typedef struct {
 
     int (*set_thread_yield_callback)(
         void *userdata,
+        uint32_t space_id,
         void (*callback)(void *userdata,
                          PyInterpreterState *interp,
                          PyThreadState *thread,
                          uint64_t execution_coordinate));
     int (*set_thread_resume_callback)(
         void *userdata,
+        uint32_t space_id,
         void (*callback)(void *userdata,
                          PyInterpreterState *interp,
                          PyThreadState *thread,
@@ -304,13 +317,14 @@ Replay scheduling can arm a logical execution point:
 
 ```python
 _retrace.call_at(
-    thread_id, coordinates, callback, overshoot_callback=None
+    thread_id, coordinates, callback, overshoot_callback=None, space_id=None
 )
 ```
 
-Only one `call_at` is armed per interpreter. The eval loop first checks a
-cheap armed flag, then the current thread id, then frame visibility. It only
-compares the full root-first frame coordinate tuple after those checks match.
+One `call_at` can be armed per coordinate space. The eval loop first checks the
+root armed flag and current thread id, or the rare non-root armed flag, then
+frame visibility. It only compares the full root-first frame coordinate tuple
+after those checks match.
 
 When the target is reached, CPython clears it before invoking
 `callback()`. If the current coordinate has passed the target, CPython clears

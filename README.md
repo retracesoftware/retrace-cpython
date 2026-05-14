@@ -67,8 +67,11 @@ retrace.exclude(callable)
 retrace.include(callable)
 retrace.with_new_coordinates(callable, *args, **kwargs)
 retrace.callbacks.thread_start = callback_or_none
+retrace.callbacks.set_thread_start(callback_or_none, space=None)
 retrace.callbacks.thread_yield = callback_or_none
+retrace.callbacks.set_thread_yield(callback_or_none, space=None)
 retrace.callbacks.thread_resume = callback_or_none
+retrace.callbacks.set_thread_resume(callback_or_none, space=None)
 retrace.call_at(
     thread_id, coordinates, callback, overshoot_callback=None
 )
@@ -121,16 +124,21 @@ builtin substrate for capability probes and native-oriented tests.
 
 `callbacks.thread_start` stores a no-argument Python callback called once on a
 newly started thread after it acquires the GIL and before its first Python frame
-runs. Coordinates observed inside this callback are `()`. Assign `None` to
-clear it.
+runs. Coordinates observed inside this callback are `()`. By default, the
+callback applies only to threads created while their creator is in root space.
+Use `callbacks.set_thread_start(callback, space)` to target another coordinate
+space, or assign `None` to clear it.
 
 `callbacks.thread_yield` stores a no-argument Python callback called just before
-the eval loop drops the GIL for a Python-level switch request. Assign `None` to
-clear it.
+the eval loop drops the GIL for a Python-level switch request in root space.
+Use `callbacks.set_thread_yield(callback, space)` to target another coordinate
+space, or assign `None` to clear the root callback.
 
 `callbacks.thread_resume` stores a no-argument Python callback called after a
 thread has acquired the GIL and restored its thread state, before application
-bytecode resumes. Assign `None` to clear it.
+bytecode resumes in root space. Use `callbacks.set_thread_resume(callback,
+space)` to target another coordinate space, or assign `None` to clear the root
+callback.
 
 `call_at(thread_id, coordinates, callback, overshoot_callback=None)` arms one
 coordinate callback per interpreter.
@@ -411,8 +419,11 @@ typedef struct {
     PyObject *thread_start_callback;
     PyObject *thread_yield_callback;
     PyObject *thread_resume_callback;
+    _PyRetraceSpaceCallbackState *space_callbacks;
     int call_at_armed;
+    int call_at_extra_armed;
     uint64_t call_at_thread_id;
+    uint32_t call_at_space_id;
     PyObject *call_at_coordinates;
     PyObject *call_at_callback;
     PyObject *call_at_overshoot_callback;
@@ -420,9 +431,12 @@ typedef struct {
 ```
 
 The identity hash table stores coordinate-derived synthetic object hashes. The
-thread callback pointers are the registered Python callbacks. The `call_at`
-fields hold one armed coordinate target, plus the exact-hit and overshoot
-callbacks.
+thread callback pointers are the root-space registered Python callbacks.
+Non-root callback registrations and non-root `call_at` targets live in
+`space_callbacks`, a linked list keyed by coordinate-space id. The root
+`call_at` fields hold one armed root-space coordinate target, plus the exact-hit
+and overshoot callbacks; `call_at_extra_armed` lets the eval loop notice the
+rare non-root target path without replacing the root fast path.
 
 No existing public object layout such as `PyObject`, `PyTypeObject`, or
 `PyFrameObject` is extended directly.
@@ -550,11 +564,12 @@ are skipped by coordinates, deltas, and coordinate hashes.
 
 ### call_at
 
-The eval loop checks a cheap armed flag, then the thread id, then frame
-visibility. Only after those match does it compare the full root-first frame
-coordinate tuple. Exact matches run the hit callback. If the current coordinate
-has passed the target without an exact match, the `call_at` is cleared and the
-optional overshoot callback runs instead. `call_at` callbacks are
+The eval loop checks a cheap root armed flag and root thread id, or the rare
+non-root armed flag, then frame visibility. Only after those match does it
+compare the full root-first frame coordinate tuple for the selected space.
+Exact matches run the hit callback. If the current coordinate has passed the
+target without an exact match, the `call_at` is cleared and the optional
+overshoot callback runs instead. `call_at` callbacks are
 coordinate-transparent; a no-argument callable wrapped with `retrace.include`
 runs visibly as a child of the target frame, then returns to the
 transparent callback. A callback may arm `call_at` for another thread and wait;
