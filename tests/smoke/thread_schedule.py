@@ -91,9 +91,11 @@ class ReplayScheduler:
         *,
         literal_coordinates=False,
         allow_current_before_future_start=False,
+        coordinate_space=None,
         timeout=None,
     ):
         self.module = module
+        self.space = coordinate_space if coordinate_space is not None else module
         self.schedule = schedule
         self.thread_ids = thread_ids
         self.thread_roots = thread_roots
@@ -109,9 +111,46 @@ class ReplayScheduler:
         self.armed = None
         self.started_threads = set()
         self.done = False
+        self.deferred_pause = False
+        self.recorded_start_tids = [
+            item[1] for item in schedule if item[0] == "start"]
+        self.recorded_start_index = 0
+
+    def lock_owned_by_current_thread(self):
+        is_owned = getattr(self.lock, "_is_owned", None)
+        return bool(is_owned is not None and is_owned())
+
+    def pause_or_defer_current_thread(self):
+        if self.lock_owned_by_current_thread():
+            debug("defer pause while scheduler lock is held")
+            self.deferred_pause = True
+            return
+        self.pause_current_thread()
+
+    def run_deferred_pause(self):
+        tid = current_schedule_id()
+        if tid is None:
+            return
+        with self.lock:
+            if not self.deferred_pause:
+                return
+            self.deferred_pause = False
+        self.pause_current_thread()
 
     def replay_ident(self, tid):
         return self.thread_ids.get(str(tid), tid)
+
+    def bind_next_recorded_start(self, ident):
+        with self.lock:
+            if self.recorded_start_index < len(self.recorded_start_tids):
+                tid = self.recorded_start_tids[self.recorded_start_index]
+                self.recorded_start_index += 1
+            else:
+                tid = ident
+            self.thread_ids[str(tid)] = ident
+            self.thread_ids.setdefault(str(ident), ident)
+            debug(f"bind start tid={tid!r} ident={ident!r}")
+            return tid
 
     def translate_cursor(self, tid, cursor):
         if self.literal_coordinates:
@@ -121,6 +160,8 @@ class ReplayScheduler:
         root = self.thread_roots.get(str(tid))
         if root is None:
             return None
+        if isinstance(root, tuple):
+            return (*root, *cursor[len(root):])
         return (root, *cursor[1:])
 
     def cursor_after_delta(self, tid, delta):
@@ -175,7 +216,7 @@ class ReplayScheduler:
             debug(f"call_at tid={tid!r} cursor={replay_cursor!r}")
             self.index += 1
             try:
-                self.module.call_at(
+                self.space.call_at(
                     self.replay_ident(tid),
                     replay_cursor,
                     self.on_call_at,
@@ -190,7 +231,7 @@ class ReplayScheduler:
         self.done = True
         self.current_tid = None
         debug("schedule done")
-        self.module.call_at(None)
+        self.space.call_at(None)
         self.handoff.close()
 
     def target_tid_locked(self):
@@ -245,7 +286,7 @@ class ReplayScheduler:
                 target_ident = self.replay_ident(target_tid)
                 debug(
                     f"wait tid={tid!r} target={target_tid!r} "
-                    f"cursor={tuple(self.module.coordinates())!r}"
+                    f"cursor={tuple(self.space.coordinates())!r}"
                 )
             self.handoff.to(target_ident)
 
@@ -288,6 +329,7 @@ class ReplayScheduler:
             self.started_threads.add(ident)
             self.arm_locked()
             self.condition.notify_all()
+        self.run_deferred_pause()
 
     def start_current_thread(self):
         with self.lock:
@@ -305,6 +347,7 @@ class ReplayScheduler:
             self.started_threads.add(ident)
             self.arm_locked()
             self.condition.notify_all()
+        self.run_deferred_pause()
 
     def run_until_done(self, timeout=None):
         deadline = None if timeout is None else time.monotonic() + timeout
@@ -343,12 +386,12 @@ class ReplayScheduler:
 
     def on_call_at(self):
         debug("call_at callback")
-        self.pause_current_thread()
+        self.pause_or_defer_current_thread()
         return None
 
     def on_overshoot(self):
         debug("overshoot callback")
-        self.pause_current_thread()
+        self.pause_or_defer_current_thread()
         return None
 
     def close(self):
@@ -377,7 +420,7 @@ class ThreadScheduleController:
         _thread_local.tid = tid
         ident = _thread.get_ident()
         _thread_local.schedule_id = ident
-        root = tuple(self.module.coordinates())[0]
+        root = tuple(self.module.coordinates())[:2]
         self.thread_ids[str(ident)] = ident
         self.thread_roots[str(tid)] = root
         self.thread_roots[str(ident)] = root
@@ -545,8 +588,9 @@ def _get_raw_thread_result(done, timeout):
 
 
 class FreshScheduleRecorder:
-    def __init__(self, module):
+    def __init__(self, module, coordinate_space=None):
         self.module = module
+        self.space = coordinate_space if coordinate_space is not None else module
         self.lock = threading.RLock()
         self.schedule = []
         self.scheduled_tid = None
@@ -594,7 +638,7 @@ class FreshScheduleRecorder:
             if self.scheduled_tid != ident:
                 self.scheduled_tid = ident
                 self.schedule.append(["resume", ident])
-            raw_delta = tuple(self.module.thread_delta())
+            raw_delta = tuple(self.space.thread_delta())
             raw_cursor = apply_delta(
                 self.record_cursors.setdefault(ident, []), raw_delta)
             call_at_stack = self.call_at_cursors.setdefault(ident, [])
@@ -614,7 +658,7 @@ class FreshScheduleRecorder:
 
 
 class FreshScheduleReplay:
-    def __init__(self, module, schedule, timeout):
+    def __init__(self, module, schedule, timeout, coordinate_space=None):
         self.module = module
         self.scheduler = ReplayScheduler(
             module,
@@ -623,6 +667,7 @@ class FreshScheduleReplay:
             {},
             literal_coordinates=True,
             allow_current_before_future_start=True,
+            coordinate_space=coordinate_space,
             timeout=timeout,
         )
         self.previous_start = None
@@ -651,10 +696,11 @@ class FreshScheduleReplay:
         if self.skip_launcher_start:
             self.skip_launcher_start = False
             return
-        _thread_local.schedule_id = ident
+        schedule_id = self.scheduler.bind_next_recorded_start(ident)
+        _thread_local.schedule_id = schedule_id
         enter_schedule_control()
         try:
-            self.scheduler.note_thread_start(ident)
+            self.scheduler.note_thread_start(schedule_id)
             self.scheduler.start_current_thread()
         finally:
             exit_schedule_control()
@@ -691,11 +737,17 @@ def record_thread_schedule(
     *args,
     timeout=10.0,
     switch_interval=1e-6,
+    coordinate_space=None,
     **kwargs,
 ):
     """Run target under fresh coordinates and record target-created threads."""
-    runner = FreshScheduleRecorder(module)
-    return module.with_new_coordinates(
+    runner = FreshScheduleRecorder(module, coordinate_space)
+    run = (
+        coordinate_space.run
+        if coordinate_space is not None
+        else module.with_new_coordinates
+    )
+    return run(
         _run_fresh_thread_schedule,
         runner,
         target,
@@ -713,11 +765,17 @@ def replay_thread_schedule(
     *args,
     timeout=10.0,
     switch_interval=1e-6,
+    coordinate_space=None,
     **kwargs,
 ):
     """Replay target-created thread schedule under fresh coordinates."""
-    runner = FreshScheduleReplay(module, schedule, timeout)
-    return module.with_new_coordinates(
+    runner = FreshScheduleReplay(module, schedule, timeout, coordinate_space)
+    run = (
+        coordinate_space.run
+        if coordinate_space is not None
+        else module.with_new_coordinates
+    )
+    return run(
         _run_fresh_thread_schedule,
         runner,
         target,
@@ -732,12 +790,27 @@ def test_thread_schedule(retrace, function, args, kwargs):
     """Record and replay function, raising if replay returns a different value."""
     args = tuple(args)
     kwargs = dict(kwargs)
+    coordinate_space_type = getattr(retrace, "CoordinateSpace", None)
+    record_space = (
+        coordinate_space_type()
+        if coordinate_space_type is not None
+        else None
+    )
+    replay_space = (
+        coordinate_space_type()
+        if coordinate_space_type is not None
+        else None
+    )
     schedule, record_result = record_thread_schedule(
-        retrace, function, *args, **kwargs)
+        retrace, function, *args,
+        coordinate_space=record_space,
+        **kwargs)
     if not schedule:
         raise AssertionError("record did not capture any thread switches")
     replay_result = replay_thread_schedule(
-        retrace, schedule, function, *args, **kwargs)
+        retrace, schedule, function, *args,
+        coordinate_space=replay_space,
+        **kwargs)
     if replay_result != record_result:
         raise AssertionError(
             f"record result {record_result!r} != replay result "

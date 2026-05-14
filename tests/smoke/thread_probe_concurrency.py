@@ -20,6 +20,10 @@ def apply_delta(stack, delta):
     stack.extend(delta[1:])
 
 
+def advance_leaf_instruction(coordinates, delta):
+    return (*coordinates[:-2], coordinates[-2] + delta, 0)
+
+
 def run_busy_loop(stop, ready=None):
     value = 0
     if ready is not None:
@@ -48,8 +52,12 @@ def check_thread_start_callback_before_first_frame_is_empty(module):
             ident = _thread.get_ident()
             helper_coordinates = []
 
+            def root_coordinates():
+                coordinates = module.coordinates()
+                return None if coordinates is None else tuple(coordinates)
+
             def helper(depth):
-                helper_coordinates.append(tuple(module.coordinates()))
+                helper_coordinates.append(root_coordinates())
                 if depth:
                     helper(depth - 1)
 
@@ -57,8 +65,8 @@ def check_thread_start_callback_before_first_frame_is_empty(module):
             snapshot = {
                 "ident": ident,
                 "worker_entered": worker_entered,
-                "coordinates": tuple(module.coordinates()),
-                "delta": tuple(module.thread_delta()),
+                "coordinates": root_coordinates(),
+                "delta": module.thread_delta(),
                 "helper_coordinates": helper_coordinates,
             }
             start_hits.append(snapshot)
@@ -105,11 +113,11 @@ def check_thread_start_callback_before_first_frame_is_empty(module):
     assert child_hits, (child_ident, start_hits)
 
     first_child_hit = child_hits[0]
-    assert first_child_hit["coordinates"] == (), first_child_hit
-    assert first_child_hit["delta"] == (0,), first_child_hit
+    assert first_child_hit["coordinates"] is None, first_child_hit
+    assert first_child_hit["delta"] is None, first_child_hit
     assert first_child_hit["helper_coordinates"], first_child_hit
     assert all(
-        coordinates == ()
+        coordinates is None
         for coordinates in first_child_hit["helper_coordinates"]
     ), first_child_hit
     assert not first_child_hit["worker_entered"], first_child_hit
@@ -164,7 +172,7 @@ def check_call_at_hits_intended_thread(module):
         }
         target_ident = idents["target"]
         base = captured_coordinates["target"]
-        target = (*base[:-1], base[-1] + delta)
+        target = advance_leaf_instruction(base, delta)
 
         def hit_callback():
             hits.append(_thread.get_ident())
@@ -222,7 +230,7 @@ def check_call_at_overshoot(module):
 
     for delta in range(1, 1000):
         base = tuple(module.coordinates())
-        target = (*base[:-1], base[-1] + delta)
+        target = advance_leaf_instruction(base, delta)
         try:
             module.call_at(
                 _thread.get_ident(),
@@ -248,12 +256,12 @@ def check_call_at_past_overshoot(module):
 
     coordinates = tuple(module.coordinates())
     for _ in range(1000):
-        if coordinates[-1] > 0:
+        if coordinates[-2] > 0:
             break
         coordinates = tuple(module.coordinates())
-    assert coordinates[-1] > 0, coordinates
+    assert coordinates[-2] > 0, coordinates
 
-    past = (*coordinates[:-1], coordinates[-1] - 1)
+    past = (*coordinates[:-2], coordinates[-2] - 1, 0)
 
     def hit_callback():
         hits.append(_thread.get_ident())
@@ -296,12 +304,15 @@ def check_thread_delta_is_per_thread(module):
                 assert delta, delta
                 apply_delta(stack, delta)
                 live = tuple(module.coordinates())
-                assert tuple(stack[:-1]) == live[:-1], (
+                assert len(stack) == len(live), (
                     index,
                     stack,
                     live,
                     delta,
                 )
+                assert len(stack) % 2 == 0, (index, stack)
+                assert all(type(item) is int and 0 <= item < 2**64
+                           for item in stack), (index, stack)
                 time.sleep(0)
         except BaseException as exc:
             errors.append((index, repr(exc)))

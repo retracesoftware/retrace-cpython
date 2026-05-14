@@ -2,20 +2,91 @@
 
 from __future__ import annotations
 
+from builtins import callable as _is_callable
+
 import _retrace
 
 
 _MISSING = object()
 
 
-coordinates = _retrace.coordinates
-thread_delta = _retrace.thread_delta
-hash = _retrace.hash
-exclude = _retrace.exclude
-include = _retrace.include
-run_transparent = _retrace.run_transparent
-with_new_coordinates = _retrace.with_new_coordinates
 ThreadHandoff = _retrace.ThreadHandoff
+
+
+class CoordinateSpace:
+    """A per-thread Retrace coordinate space handle."""
+
+    __slots__ = ("_id",)
+
+    def __init__(self, space_id=_MISSING):
+        self._id = (
+            _retrace.allocate_space_id()
+            if space_id is _MISSING
+            else space_id
+        )
+
+    @property
+    def id(self):
+        return self._id
+
+    def coordinates(self, thread_id=None, drop=0):
+        return _retrace.coordinates(thread_id, drop, self._id)
+
+    def thread_delta(self):
+        return _retrace.thread_delta(self._id)
+
+    def hash(self):
+        return _retrace.hash(self._id)
+
+    def run(self, callable, /, *args, **kwargs):
+        if not _is_callable(callable):
+            raise TypeError("space.run argument must be callable")
+        return _retrace.run_in_space(self._id, callable, *args, **kwargs)
+
+    def wrap(self, callable, /):
+        if not _is_callable(callable):
+            raise TypeError("space wrapper argument must be callable")
+
+        def wrapped(*args, **kwargs):
+            return self.run(callable, *args, **kwargs)
+
+        wrapped.__wrapped__ = callable
+        return wrapped
+
+    def call_at(self, thread_id, coordinates=_MISSING, callback=_MISSING,
+                overshoot_callback=None, /):
+        if thread_id is None and coordinates is _MISSING and callback is _MISSING:
+            if overshoot_callback is not None:
+                raise TypeError(
+                    "call_at(None) does not accept "
+                    "overshoot_callback")
+            return _retrace.call_at(None)
+        if coordinates is _MISSING or callback is _MISSING:
+            raise TypeError(
+                "call_at expects None or "
+                "(thread_id, coordinates, callback[, overshoot_callback])")
+
+        hit_callback = _excluded_callback(callback, "call_at", False)
+        miss_callback = _excluded_callback(
+            overshoot_callback, "call_at overshoot", True)
+        return _retrace.call_at(
+            thread_id, coordinates, hit_callback, miss_callback, self._id)
+
+
+root_space = CoordinateSpace(None)
+disabled_space = CoordinateSpace(1)
+
+coordinates = root_space.coordinates
+thread_delta = root_space.thread_delta
+hash = root_space.hash
+exclude = disabled_space.wrap
+include = root_space.wrap
+disable = disabled_space.run
+run_transparent = disabled_space.run
+
+
+def with_new_coordinates(callable, /, *args, **kwargs):
+    return CoordinateSpace().run(callable, *args, **kwargs)
 
 
 def _excluded_callback(callback, name: str, allow_none: bool):
@@ -66,39 +137,22 @@ callbacks = _Callbacks()
 
 def call_at(thread_id, coordinates=_MISSING, callback=_MISSING,
             overshoot_callback=None, /):
-    """Arm or clear a coordinate callback.
-
-    Registered callbacks are wrapped with exclude(). Use include(callable)
-    inside a callback to run application-visible work under the target frame.
-    """
-    if thread_id is None and coordinates is _MISSING and callback is _MISSING:
-        if overshoot_callback is not None:
-            raise TypeError(
-                "call_at(None) does not accept "
-                "overshoot_callback")
-        return _retrace.call_at(None)
-    if coordinates is _MISSING or callback is _MISSING:
-        raise TypeError(
-            "call_at expects None or "
-            "(thread_id, coordinates, callback[, overshoot_callback])")
-
-    hit_callback = _excluded_callback(callback, "call_at", False)
-    miss_callback = _excluded_callback(
-        overshoot_callback, "call_at overshoot", True)
-    if miss_callback is None:
-        return _retrace.call_at(
-            thread_id, coordinates, hit_callback)
-    return _retrace.call_at(
-        thread_id, coordinates, hit_callback, miss_callback)
+    """Arm or clear a coordinate callback in root_space."""
+    return root_space.call_at(
+        thread_id, coordinates, callback, overshoot_callback)
 
 
 __all__ = [
     "ThreadHandoff",
     "callbacks",
     "coordinates",
+    "CoordinateSpace",
+    "disable",
+    "disabled_space",
     "exclude",
     "hash",
     "include",
+    "root_space",
     "run_transparent",
     "with_new_coordinates",
     "call_at",

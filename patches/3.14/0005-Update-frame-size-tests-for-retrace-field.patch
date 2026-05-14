@@ -16,10 +16,10 @@ index 0db0369500a..8607b9395e5 100644
          x = func()
          if support.Py_GIL_DISABLED:
 -            INTERPRETER_FRAME = '9PihcP'
-+            INTERPRETER_FRAME = '9PihcI7qP'
++            INTERPRETER_FRAME = '9PihcI7q2P'
          else:
 -            INTERPRETER_FRAME = '9PhcP'
-+            INTERPRETER_FRAME = '9Phc5xI7qP'
++            INTERPRETER_FRAME = '9Phc5xI7q2P'
          check(x, size('3PiccPPP' + INTERPRETER_FRAME + 'P'))
          # function
          def func(): pass

@@ -1,0 +1,111 @@
+From 8312635aaa678a6eed9b443b732f2e295deb3e4e Mon Sep 17 00:00:00 2001
+From: Retrace CPython Builder <retrace-cpython@retracesoftware.com>
+Date: Thu, 14 May 2026 14:06:39 +0100
+Subject: [PATCH] Add Retrace coordinate-space lifecycle hooks
+
+---
+ Include/internal/pycore_frame.h | 1 +
+ Python/ceval.c                  | 2 ++
+ Python/ceval_macros.h           | 9 ++++++++-
+ Python/generated_cases.c.h      | 3 +++
+ 4 files changed, 14 insertions(+), 1 deletion(-)
+
+diff --git a/Include/internal/pycore_frame.h b/Include/internal/pycore_frame.h
+index 54163a3..2a2dcdb 100644
+--- a/Include/internal/pycore_frame.h
++++ b/Include/internal/pycore_frame.h
+@@ -147,6 +147,7 @@ static inline void _PyFrame_Copy(_PyInterpreterFrame *src, _PyInterpreterFrame *
+     for (int i = 1; i < src->stacktop; i++) {
+         dest->localsplus[i] = src->localsplus[i];
+     }
++    _PyRetraceFrameState_Init(&dest->retrace);
+     // Don't leave a dangling pointer to the old frame when creating generators
+     // and coroutines:
+     dest->previous = NULL;
+diff --git a/Python/ceval.c b/Python/ceval.c
+index d3228f7..c2efd28 100644
+--- a/Python/ceval.c
++++ b/Python/ceval.c
+@@ -870,6 +870,7 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *frame, int
+ pop_1_error:
+     STACK_SHRINK(1);
+ error:
++        _PyRetrace_EndInstruction(tstate, frame);
+         /* Double-check exception status. */
+ #ifdef NDEBUG
+         if (!_PyErr_Occurred(tstate)) {
+@@ -1713,6 +1714,7 @@ clear_gen_frame(PyThreadState *tstate, _PyInterpreterFrame * frame)
+ void
+ _PyEval_FrameClearAndPop(PyThreadState *tstate, _PyInterpreterFrame * frame)
+ {
++    _PyRetrace_LeaveFrame(tstate, frame);
+     if (frame->owner == FRAME_OWNED_BY_THREAD) {
+         clear_thread_frame(tstate, frame);
+     }
+diff --git a/Python/ceval_macros.h b/Python/ceval_macros.h
+index f734117..e6f404d 100644
+--- a/Python/ceval_macros.h
++++ b/Python/ceval_macros.h
+@@ -82,9 +82,14 @@
+         if (_Py_stats) _Py_stats->opcode_stats[lastopcode].pair_count[op]++; \
+         lastopcode = op; \
+         RETRACE_CALL_AT(); \
++        _PyRetrace_BeginInstruction(tstate, frame, op); \
+     } while (0)
+ #else
+-#define INSTRUCTION_STATS(op) RETRACE_CALL_AT()
++#define INSTRUCTION_STATS(op) \
++    do { \
++        RETRACE_CALL_AT(); \
++        _PyRetrace_BeginInstruction(tstate, frame, op); \
++    } while (0)
+ #endif
+ 
+ #if USE_COMPUTED_GOTOS
+@@ -125,6 +130,7 @@ do { \
+ /* Do interpreter dispatch accounting for tracing and instrumentation */
+ #define DISPATCH() \
+     { \
++        _PyRetrace_EndInstruction(tstate, frame); \
+         NEXTOPARG(); \
+         PRE_DISPATCH_GOTO(); \
+         DISPATCH_GOTO(); \
+@@ -132,6 +138,7 @@ do { \
+ 
+ #define DISPATCH_SAME_OPARG() \
+     { \
++        _PyRetrace_EndInstruction(tstate, frame); \
+         opcode = next_instr->op.code; \
+         PRE_DISPATCH_GOTO(); \
+         DISPATCH_GOTO(); \
+diff --git a/Python/generated_cases.c.h b/Python/generated_cases.c.h
+index ad49bec..d315b20 100644
+--- a/Python/generated_cases.c.h
++++ b/Python/generated_cases.c.h
+@@ -3573,6 +3573,7 @@
+             gen->gi_exc_state.previous_item = NULL;
+             _Py_LeaveRecursiveCallPy(tstate);
+             _PyInterpreterFrame *gen_frame = frame;
++            _PyRetrace_SuspendFrame(tstate, gen_frame);
+             frame = tstate->current_frame = frame->previous;
+             gen_frame->previous = NULL;
+             _PyFrame_StackPush(frame, retval);
+@@ -5258,6 +5259,7 @@
+             _Py_LeaveRecursiveCallPy(tstate);
+             res = (PyObject *)gen;
+             _PyInterpreterFrame *prev = frame->previous;
++            _PyRetrace_LeaveFrame(tstate, frame);
+             _PyThreadState_PopFrame(tstate, frame);
+             frame = tstate->current_frame = prev;
+             LOAD_IP(frame->return_offset);
+@@ -6260,6 +6262,7 @@
+             gen->gi_exc_state.previous_item = NULL;
+             _Py_LeaveRecursiveCallPy(tstate);
+             _PyInterpreterFrame *gen_frame = frame;
++            _PyRetrace_SuspendFrame(tstate, gen_frame);
+             frame = tstate->current_frame = frame->previous;
+             gen_frame->previous = NULL;
+             /* We don't know which of these is relevant here, so keep them equal */
+-- 
+2.50.1 (Apple Git-155)
+

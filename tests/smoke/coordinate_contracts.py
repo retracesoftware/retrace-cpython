@@ -13,6 +13,10 @@ def assert_coordinates(value):
     assert all(type(item) is int for item in value)
 
 
+def advance_leaf_instruction(coordinates, delta):
+    return (*coordinates[:-2], coordinates[-2] + delta, 0)
+
+
 def apply_delta(previous, delta):
     common = delta[0]
     assert type(common) is int
@@ -60,7 +64,8 @@ def check_repeated_call_site_coordinates_are_unique(module):
 
     coordinates = caller()
     assert len(set(coordinates)) == len(coordinates)
-    assert all(len(item) == len(coordinates[0]) for item in coordinates)
+    assert all(len(item) >= 2 and len(item) % 2 == 0
+               for item in coordinates)
 
 
 def check_thread_coordinates_are_thread_local(module):
@@ -149,7 +154,8 @@ def check_exclude_and_include(module):
         return pinned, visible_coordinates, after
 
     pinned, visible_coordinates, after = hidden_with_include()
-    assert after == pinned
+    assert after[:-1] == pinned[:-1]
+    assert after[-1] >= pinned[-1]
     assert visible_coordinates[: len(pinned)] == pinned
     assert len(visible_coordinates) > len(pinned)
 
@@ -157,12 +163,12 @@ def check_exclude_and_include(module):
 def check_call_at_past_rejected(module):
     coordinates = tuple(module.coordinates())
     for _ in range(1000):
-        if coordinates[-1] > 0:
+        if coordinates[-2] > 0:
             break
         coordinates = tuple(module.coordinates())
-    assert coordinates[-1] > 0
+    assert coordinates[-2] > 0
 
-    past = (*coordinates[:-1], coordinates[-1] - 1)
+    past = (*coordinates[:-2], coordinates[-2] - 1, 0)
     try:
         module.call_at(_thread.get_ident(), past, lambda: None)
     except ValueError:
@@ -180,7 +186,7 @@ def check_call_at_overshoot(module):
         hits.clear()
         overshoots.clear()
         base = tuple(module.coordinates())
-        target = (*base[:-1], base[-1] + delta)
+        target = advance_leaf_instruction(base, delta)
         try:
             module.call_at(
                 _thread.get_ident(),
@@ -252,7 +258,7 @@ def check_call_at_callback_is_coordinate_transparent(module):
 
         last_target_id = idents["target"]
         base = tuple(module.coordinates(last_target_id))
-        target = (*base[:-1], base[-1] + delta)
+        target = advance_leaf_instruction(base, delta)
 
         try:
             module.call_at(last_target_id, target, callback, lambda: None)

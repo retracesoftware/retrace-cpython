@@ -1,0 +1,24 @@
+From 6fc5a39f0e3f9918152b53b594d700435371fd8f Mon Sep 17 00:00:00 2001
+From: Retrace CPython Builder <retrace-cpython@retracesoftware.com>
+Date: Thu, 14 May 2026 14:19:47 +0100
+Subject: [PATCH] Initialize Retrace trampoline frame state
+
+---
+ Include/internal/pycore_frame.h | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/Include/internal/pycore_frame.h b/Include/internal/pycore_frame.h
+index 2a2dcdb..cc31d7c 100644
+--- a/Include/internal/pycore_frame.h
++++ b/Include/internal/pycore_frame.h
+@@ -352,6 +352,7 @@ _PyFrame_PushTrampolineUnchecked(PyThreadState *tstate, PyCodeObject *code, int
+     frame->instr_ptr = _PyCode_CODE(code);
+     frame->owner = FRAME_OWNED_BY_THREAD;
+     frame->return_offset = 0;
++    _PyRetraceFrameState_Init(&frame->retrace);
+     return frame;
+ }
+ 
+-- 
+2.50.1 (Apple Git-155)
+

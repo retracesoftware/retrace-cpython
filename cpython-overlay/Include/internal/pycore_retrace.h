@@ -80,7 +80,7 @@ _PyRetrace_MixBytes(uint64_t hash, const void *data, size_t size)
 static inline void
 _PyFrame_RetraceResetCoordinateDepth(_PyInterpreterFrame *frame)
 {
-    frame->retrace.coordinate_depth = _PyFrame_RETRACE_COORDINATE_DEPTH_UNSET;
+    (void)frame;
 }
 
 static inline void
@@ -88,7 +88,9 @@ _PyFrame_RetraceInitializeLastCoordinate(_PyInterpreterFrame *frame)
 {
     frame->retrace.last_call_ordinal =
         _PyFrame_RETRACE_LAST_CALL_ORDINAL_UNSET;
-    frame->retrace.last_coordinate = _PyFrame_RETRACE_LAST_COORDINATE_UNSET;
+    frame->retrace.last_instruction_counter =
+        _PyFrame_RETRACE_LAST_INSTRUCTION_COUNTER_UNSET;
+    frame->retrace.last_delta_space = NULL;
 }
 
 static inline void
@@ -97,10 +99,10 @@ _PyFrame_RetraceResetLastCoordinate(_PyInterpreterFrame *frame)
     _PyFrame_RetraceInitializeLastCoordinate(frame);
 }
 
-static inline int64_t
+static inline uint64_t
 _PyFrame_RetraceCoordinate(_PyInterpreterFrame *frame)
 {
-    return frame->retrace.coordinate_bias + (int64_t)_PyInterpreterFrame_LASTI(frame);
+    return frame->retrace.instruction_counter;
 }
 
 static inline void
@@ -109,18 +111,9 @@ _PyFrame_RetraceCoordinateJump(
     _Py_CODEUNIT *from,
     _Py_CODEUNIT *to)
 {
-#if PY_VERSION_HEX < 0x030D0000
-    PyCodeObject *code = frame->f_code;
-    _Py_CODEUNIT *bytecode = _PyCode_CODE(code);
-#elif PY_VERSION_HEX < 0x030E0000
-    PyCodeObject *code = _PyFrame_GetCode(frame);
-    _Py_CODEUNIT *bytecode = _PyCode_CODE(code);
-#else
-    _Py_CODEUNIT *bytecode = _PyFrame_GetBytecode(frame);
-#endif
-    int from_offset = (int)(from - bytecode);
-    int to_offset = (int)(to - bytecode);
-    frame->retrace.coordinate_bias += (int64_t)from_offset + 1 - to_offset;
+    (void)frame;
+    (void)from;
+    (void)to;
 }
 
 #if PY_VERSION_HEX >= 0x030D0000
@@ -135,55 +128,20 @@ _PyRetrace_PyThreadStateCurrentFrame(PyThreadState *tstate)
 #endif
 
 static inline int
-_PyRetrace_FrameIsCallbackTransparent(_PyInterpreterFrame *frame)
-{
-    return frame != NULL &&
-           frame->retrace.current_call_ordinal ==
-               _PyFrame_RETRACE_CALL_ORDINAL_TRANSPARENT;
-}
-
-static inline int
-_PyRetrace_FrameIsFreshCoordinateParent(_PyInterpreterFrame *frame)
-{
-    return frame != NULL &&
-           frame->retrace.current_call_ordinal ==
-               _PyFrame_RETRACE_CALL_ORDINAL_FRESH_PARENT;
-}
-
-static inline void
-_PyRetrace_MarkFrameCallbackTransparent(_PyInterpreterFrame *frame)
-{
-    frame->retrace.current_call_ordinal =
-        _PyFrame_RETRACE_CALL_ORDINAL_TRANSPARENT;
-    frame->retrace.next_child_call_ordinal = 0;
-    frame->retrace.child_ordinal_coordinate =
-        _PyFrame_RETRACE_CHILD_ORDINAL_COORDINATE_UNSET;
-    frame->retrace.coordinate_hash =
-        _PyFrame_RETRACE_COORDINATE_HASH_UNSET;
-    _PyFrame_RetraceResetCoordinateDepth(frame);
-    _PyFrame_RetraceResetLastCoordinate(frame);
-}
-
-static inline int
 _PyRetrace_FrameIsVisible(_PyInterpreterFrame *frame)
 {
     return frame != NULL &&
 #if PY_VERSION_HEX >= 0x030C0000
            frame->owner != FRAME_OWNED_BY_CSTACK &&
 #endif
-           !_PyRetrace_FrameIsCallbackTransparent(frame) &&
-           !_PyRetrace_FrameIsFreshCoordinateParent(frame) &&
+           frame->retrace.space != NULL &&
            !_PyFrame_IsIncomplete(frame);
 }
 
 static inline uint64_t
 _PyRetrace_FrameCoordinate(_PyInterpreterFrame *frame)
 {
-    int64_t coordinate = _PyFrame_RetraceCoordinate(frame);
-    if (coordinate < 0) {
-        return 0;
-    }
-    return (uint64_t)coordinate;
+    return _PyFrame_RetraceCoordinate(frame);
 }
 
 static inline uint64_t
@@ -192,39 +150,171 @@ _PyRetrace_FrameCallOrdinal(_PyInterpreterFrame *frame)
     return frame->retrace.current_call_ordinal;
 }
 
+static inline uint32_t
+_PyRetrace_FrameSpaceId(_PyInterpreterFrame *frame)
+{
+    return frame->retrace.space == NULL ?
+        _PyFrame_RETRACE_SPACE_ID_ROOT : frame->retrace.space->space_id;
+}
+
+static inline void
+_PyRetrace_InitializeSpaceState(
+    _PyRetraceThreadSpaceState *space,
+    uint32_t space_id,
+    uint64_t root_hash)
+{
+    space->space_id = space_id;
+    space->seen = 0;
+    space->depth = 0;
+    space->root_call_ordinal = 0;
+    space->last_delta_root_call_ordinal =
+        _PyFrame_RETRACE_LAST_CALL_ORDINAL_UNSET;
+    space->root_coordinate_hash = root_hash;
+    space->next = space;
+}
+
+static inline uint64_t
+_PyRetrace_SpaceRootCoordinateHash(
+    PyThreadState *tstate,
+    uint32_t space_id)
+{
+    (void)space_id;
+    uint64_t hash = tstate == NULL || tstate->retrace.thread_id == 0 ?
+        _PyRetrace_InitialRootCoordinateHash() : tstate->retrace.thread_id;
+    return _PyRetrace_NormalizeCoordinateHash(hash);
+}
+
+static inline _PyRetraceThreadSpaceState *
+_PyRetrace_FindThreadSpace(PyThreadState *tstate, uint32_t space_id)
+{
+    if (tstate == NULL || tstate->retrace.last_space == NULL) {
+        return NULL;
+    }
+    _PyRetraceThreadSpaceState *first =
+        tstate->retrace.last_space->next;
+    for (_PyRetraceThreadSpaceState *space = first; ;
+         space = space->next)
+    {
+        if (space->space_id == space_id) {
+            return space;
+        }
+        if (space == tstate->retrace.last_space) {
+            break;
+        }
+    }
+    return NULL;
+}
+
+static inline int
+_PyRetrace_ThreadOwnsSpace(
+    PyThreadState *tstate,
+    _PyRetraceThreadSpaceState *candidate)
+{
+    if (candidate == NULL) {
+        return 1;
+    }
+    if (tstate == NULL || tstate->retrace.last_space == NULL) {
+        return 0;
+    }
+    _PyRetraceThreadSpaceState *first =
+        tstate->retrace.last_space->next;
+    for (_PyRetraceThreadSpaceState *space = first; ;
+         space = space->next)
+    {
+        if (space == candidate) {
+            return 1;
+        }
+        if (space == tstate->retrace.last_space) {
+            break;
+        }
+    }
+    return 0;
+}
+
+static inline _PyRetraceThreadSpaceState *
+_PyRetrace_GetThreadSpace(PyThreadState *tstate, uint32_t space_id)
+{
+    _PyRetraceThreadSpaceState *space =
+        _PyRetrace_FindThreadSpace(tstate, space_id);
+    if (space != NULL) {
+        return space;
+    }
+    if (tstate == NULL) {
+        return NULL;
+    }
+    space = PyMem_RawCalloc(1, sizeof(*space));
+    if (space == NULL) {
+        PyErr_NoMemory();
+        return NULL;
+    }
+    _PyRetrace_InitializeSpaceState(
+        space, space_id, _PyRetrace_SpaceRootCoordinateHash(tstate, space_id));
+    space->next = tstate->retrace.last_space->next;
+    tstate->retrace.last_space->next = space;
+    tstate->retrace.last_space = space;
+    return space;
+}
+
+static inline int
+_PyRetrace_SetCurrentSpaceById(PyThreadState *tstate, uint32_t space_id)
+{
+    if (tstate == NULL) {
+        return 0;
+    }
+    _PyRetraceThreadSpaceState *space =
+        _PyRetrace_GetThreadSpace(tstate, space_id);
+    if (space == NULL) {
+        return -1;
+    }
+    tstate->retrace.current_space = space;
+    tstate->retrace.inherited_space_id = space_id;
+    if (space->depth == 0) {
+        tstate->retrace.call_ordinal_ptr = &space->root_call_ordinal;
+    }
+    return 0;
+}
+
 static inline uint64_t
 _PyRetrace_MixFrameCoordinateHash(
     uint64_t hash,
-    uint64_t call_ordinal,
-    uint64_t coordinate)
+    uint64_t instruction_counter,
+    uint64_t call_ordinal)
 {
+    hash = _PyRetrace_NormalizeCoordinateHash(
+        _PyRetrace_Mix64(
+            hash, instruction_counter & _PY_RETRACE_COORDINATE_HASH_MASK));
     if (call_ordinal != 0) {
         hash = _PyRetrace_NormalizeCoordinateHash(
             _PyRetrace_Mix64(hash,
                              _PY_RETRACE_CALL_ORDINAL_HASH_TAG |
                              call_ordinal));
     }
-    return _PyRetrace_NormalizeCoordinateHash(
-        _PyRetrace_Mix64(hash, coordinate & _PY_RETRACE_COORDINATE_HASH_MASK));
+    return hash;
 }
 
-static inline uint64_t
-_PyRetrace_RootCoordinateHash(PyThreadState *tstate)
+static inline _PyRetraceThreadSpaceState *
+_PyRetrace_CurrentSpace(PyThreadState *tstate)
 {
     if (tstate == NULL) {
-        return _PyRetrace_InitialRootCoordinateHash();
+        return NULL;
     }
-    return _PyRetrace_NormalizeCoordinateHash(
-        tstate->retrace.root_coordinate_hash);
+    if (tstate->retrace.current_space == NULL ||
+        tstate->retrace.current_space->space_id !=
+            tstate->retrace.inherited_space_id)
+    {
+        if (_PyRetrace_SetCurrentSpaceById(
+                tstate, tstate->retrace.inherited_space_id) < 0)
+        {
+            return NULL;
+        }
+    }
+    return tstate->retrace.current_space;
 }
 
 static inline _PyInterpreterFrame *
 _PyRetrace_NearestVisibleFrame(_PyInterpreterFrame *frame)
 {
     while (frame != NULL) {
-        if (_PyRetrace_FrameIsFreshCoordinateParent(frame)) {
-            return NULL;
-        }
         if (_PyRetrace_FrameIsVisible(frame)) {
             return frame;
         }
@@ -233,40 +323,33 @@ _PyRetrace_NearestVisibleFrame(_PyInterpreterFrame *frame)
     return NULL;
 }
 
-static inline int
-_PyRetrace_FrameHasFreshCoordinateParent(_PyInterpreterFrame *frame)
+static inline _PyInterpreterFrame *
+_PyRetrace_NearestVisibleFrameInSpace(
+    _PyInterpreterFrame *frame,
+    _PyRetraceThreadSpaceState *space)
 {
-    for (_PyInterpreterFrame *parent = frame == NULL ? NULL : frame->previous;
-         parent != NULL;
-         parent = parent->previous)
-    {
-        if (_PyRetrace_FrameIsFreshCoordinateParent(parent)) {
-            return 1;
+    while (frame != NULL) {
+        if (_PyRetrace_FrameIsVisible(frame) &&
+            frame->retrace.space == space)
+        {
+            return frame;
         }
-        if (_PyRetrace_FrameIsVisible(parent)) {
-            return 0;
-        }
+        frame = frame->previous;
     }
+    return NULL;
+}
+
+static inline int
+_PyRetrace_FrameIsCallbackTransparent(_PyInterpreterFrame *frame)
+{
+    (void)frame;
     return 0;
 }
 
 static inline int
-_PyRetrace_FrameHasCallbackTransparentParent(_PyInterpreterFrame *frame)
+_PyRetrace_FrameIsFreshCoordinateParent(_PyInterpreterFrame *frame)
 {
-    for (_PyInterpreterFrame *parent = frame == NULL ? NULL : frame->previous;
-         parent != NULL;
-         parent = parent->previous)
-    {
-        if (_PyRetrace_FrameIsFreshCoordinateParent(parent)) {
-            return 0;
-        }
-        if (_PyRetrace_FrameIsCallbackTransparent(parent)) {
-            return 1;
-        }
-        if (_PyRetrace_FrameIsVisible(parent)) {
-            return 0;
-        }
-    }
+    (void)frame;
     return 0;
 }
 
@@ -276,7 +359,11 @@ _PyRetrace_CurrentThreadFrame(PyThreadState *tstate)
     if (tstate == NULL) {
         return NULL;
     }
-    if (tstate->retrace.thread_callback_active) {
+    if (tstate->retrace.thread_callback_active &&
+        (tstate->retrace.current_space == NULL ||
+         tstate->retrace.current_space->space_id !=
+            _PyFrame_RETRACE_SPACE_ID_ROOT))
+    {
         return tstate->retrace.thread_callback_frame;
     }
 #if PY_VERSION_HEX >= 0x030D0000
@@ -329,56 +416,33 @@ _PyRetrace_HandlePending(PyThreadState *tstate, _PyInterpreterFrame *frame)
 #endif
 
 static inline uint64_t
-_PyRetrace_FrameBaseCoordinateHash(
+_PyRetrace_RootCoordinateHash(
     PyThreadState *tstate,
-    _PyInterpreterFrame *frame);
-
-static inline uint64_t
-_PyRetrace_ComputeFrameBaseCoordinateHash(
-    PyThreadState *tstate,
-    _PyInterpreterFrame *frame)
+    _PyRetraceThreadSpaceState *space)
 {
-    _PyInterpreterFrame *parent =
-        _PyRetrace_NearestVisibleFrame(frame->previous);
-    if (parent == NULL) {
-        return _PyRetrace_RootCoordinateHash(tstate);
+    if (space == NULL) {
+        return _PyRetrace_SpaceRootCoordinateHash(
+            tstate, _PyFrame_RETRACE_SPACE_ID_ROOT);
     }
-
-    uint64_t parent_base =
-        _PyRetrace_FrameBaseCoordinateHash(tstate, parent);
-    return _PyRetrace_MixFrameCoordinateHash(
-        parent_base,
-        _PyRetrace_FrameCallOrdinal(parent),
-        _PyRetrace_FrameCoordinate(parent));
+    return _PyRetrace_NormalizeCoordinateHash(space->root_coordinate_hash);
 }
 
 static inline uint64_t
-_PyRetrace_FrameBaseCoordinateHash(
+_PyRetrace_FrameCoordinateHashInSpace(
     PyThreadState *tstate,
-    _PyInterpreterFrame *frame)
+    _PyInterpreterFrame *frame,
+    _PyRetraceThreadSpaceState *space)
 {
-    frame = _PyRetrace_NearestVisibleFrame(frame);
+    frame = _PyRetrace_NearestVisibleFrameInSpace(frame, space);
     if (frame == NULL) {
-        return _PyRetrace_RootCoordinateHash(tstate);
+        return _PyRetrace_RootCoordinateHash(tstate, space);
     }
-    if (frame->retrace.coordinate_hash !=
-        _PyFrame_RETRACE_COORDINATE_HASH_UNSET)
-    {
-        return frame->retrace.coordinate_hash;
-    }
-
-    frame->retrace.coordinate_hash =
-        _PyRetrace_ComputeFrameBaseCoordinateHash(tstate, frame);
-    return frame->retrace.coordinate_hash;
-}
-
-static inline void
-_PyRetrace_RefreshFrameBaseCoordinateHash(
-    PyThreadState *tstate,
-    _PyInterpreterFrame *frame)
-{
-    frame->retrace.coordinate_hash =
-        _PyRetrace_ComputeFrameBaseCoordinateHash(tstate, frame);
+    uint64_t hash = _PyRetrace_FrameCoordinateHashInSpace(
+        tstate, frame->previous, space);
+    return _PyRetrace_MixFrameCoordinateHash(
+        hash,
+        _PyRetrace_FrameCoordinate(frame),
+        _PyRetrace_FrameCallOrdinal(frame));
 }
 
 static inline uint64_t
@@ -388,12 +452,11 @@ _PyRetrace_FrameCoordinateHash(
 {
     frame = _PyRetrace_NearestVisibleFrame(frame);
     if (frame == NULL) {
-        return _PyRetrace_RootCoordinateHash(tstate);
+        _PyRetraceThreadSpaceState *space = _PyRetrace_CurrentSpace(tstate);
+        return _PyRetrace_RootCoordinateHash(tstate, space);
     }
-    return _PyRetrace_MixFrameCoordinateHash(
-        _PyRetrace_FrameBaseCoordinateHash(tstate, frame),
-        _PyRetrace_FrameCallOrdinal(frame),
-        _PyRetrace_FrameCoordinate(frame));
+    return _PyRetrace_FrameCoordinateHashInSpace(
+        tstate, frame, frame->retrace.space);
 }
 
 static inline uint64_t
@@ -406,17 +469,18 @@ _PyRetrace_CurrentCoordinateHash(PyThreadState *tstate)
 static inline void
 _PyRetrace_MixVisibleFrameCoordinates(
     uint64_t *hash,
-    _PyInterpreterFrame *frame)
+    _PyInterpreterFrame *frame,
+    _PyRetraceThreadSpaceState *space)
 {
-    frame = _PyRetrace_NearestVisibleFrame(frame);
+    frame = _PyRetrace_NearestVisibleFrameInSpace(frame, space);
     if (frame == NULL) {
         return;
     }
-    _PyRetrace_MixVisibleFrameCoordinates(hash, frame->previous);
+    _PyRetrace_MixVisibleFrameCoordinates(hash, frame->previous, space);
     *hash = _PyRetrace_MixFrameCoordinateHash(
         *hash,
-        _PyRetrace_FrameCallOrdinal(frame),
-        _PyRetrace_FrameCoordinate(frame));
+        _PyRetrace_FrameCoordinate(frame),
+        _PyRetrace_FrameCallOrdinal(frame));
 }
 
 static inline uint64_t
@@ -445,8 +509,10 @@ _PyRetrace_ThreadIdSeed(PyThreadState *parent)
     }
     else {
         hash = _PyRetrace_Mix64(hash, parent->retrace.thread_id);
+        _PyRetraceThreadSpaceState *space =
+            _PyRetrace_CurrentSpace(parent);
         _PyRetrace_MixVisibleFrameCoordinates(
-            &hash, _PyRetrace_CurrentThreadFrame(parent));
+            &hash, _PyRetrace_CurrentThreadFrame(parent), space);
     }
     return _PyRetrace_NormalizeThreadId(hash);
 }
@@ -500,15 +566,18 @@ _PyRetrace_InitializeThreadState(
     tstate->retrace.thread_started = 0;
     tstate->retrace.thread_start_pending = 0;
     tstate->retrace.thread_resume_pending = 0;
-    tstate->retrace.root_coordinate = 0;
-    tstate->retrace.last_root_coordinate = (uint64_t)-1;
-    tstate->retrace.root_coordinate_hash = _PyRetrace_InitialRootCoordinateHash();
+    _PyRetrace_InitializeSpaceState(
+        &tstate->retrace.root_space,
+        _PyFrame_RETRACE_SPACE_ID_ROOT,
+        _PyRetrace_InitialRootCoordinateHash());
+    tstate->retrace.current_space = &tstate->retrace.root_space;
+    tstate->retrace.last_space = &tstate->retrace.root_space;
+    tstate->retrace.call_ordinal_ptr =
+        &tstate->retrace.root_space.root_call_ordinal;
+    tstate->retrace.inherited_space_id = _PyFrame_RETRACE_SPACE_ID_ROOT;
     tstate->retrace.thread_callback_active = 0;
     tstate->retrace.thread_callback_frame = NULL;
     tstate->retrace.thread_pending_callback_frame = NULL;
-    tstate->retrace.thread_visible_callback_parent_frame = NULL;
-    tstate->retrace.coordinate_exclude_depth = 0;
-    tstate->retrace.coordinate_exclude_parent_frame = NULL;
 }
 
 static inline void
@@ -517,6 +586,17 @@ _PyRetrace_ClearThreadState(PyThreadState *tstate)
     if (tstate == NULL) {
         return;
     }
+    _PyRetraceThreadSpaceState *root = &tstate->retrace.root_space;
+    _PyRetraceThreadSpaceState *space = root->next;
+    while (space != NULL && space != root) {
+        _PyRetraceThreadSpaceState *next = space->next;
+        PyMem_RawFree(space);
+        space = next;
+    }
+    root->next = root;
+    tstate->retrace.last_space = root;
+    tstate->retrace.current_space = root;
+    tstate->retrace.call_ordinal_ptr = &root->root_call_ordinal;
 }
 
 static inline void
@@ -535,7 +615,13 @@ _PyRetrace_SeedThreadState(PyThreadState *parent, PyThreadState *child)
     child->retrace.thread_id =
         _PyRetrace_UniqueThreadId(
             child->interp, child, _PyRetrace_ThreadIdSeed(parent));
-    child->retrace.root_coordinate_hash = child->retrace.thread_id;
+    child->retrace.root_space.root_coordinate_hash = child->retrace.thread_id;
+    uint32_t inherited_space_id =
+        parent == NULL || parent->retrace.current_space == NULL ?
+        _PyFrame_RETRACE_SPACE_ID_ROOT :
+        parent->retrace.current_space->space_id;
+    child->retrace.inherited_space_id = inherited_space_id;
+    (void)_PyRetrace_SetCurrentSpaceById(child, inherited_space_id);
 }
 
 static inline void
@@ -702,54 +788,143 @@ _PyRetrace_DeleteObjectIdentityHash(PyObject *obj)
     (void)_PyRetrace_DeleteIdentityHash(tstate->interp, obj);
 }
 
-static inline void
+static inline int
 _PyRetrace_ActivateFrame(PyThreadState *tstate, _PyInterpreterFrame *frame)
 {
-    if (_PyRetrace_FrameIsCallbackTransparent(frame)) {
-        return;
+    if (frame == NULL) {
+        return 0;
     }
-    if (tstate != NULL && tstate->retrace.coordinate_exclude_depth > 0) {
-        _PyRetrace_MarkFrameCallbackTransparent(frame);
-        return;
-    }
-    if (tstate != NULL && tstate->retrace.thread_callback_active) {
-        if (frame != tstate->retrace.thread_callback_frame) {
-            _PyRetrace_MarkFrameCallbackTransparent(frame);
+    if (frame->retrace.space != NULL) {
+        if (_PyRetrace_ThreadOwnsSpace(tstate, frame->retrace.space)) {
+            return 0;
         }
+        _PyRetraceFrameState_Init(&frame->retrace);
+    }
+    _PyRetraceThreadSpaceState *space = _PyRetrace_CurrentSpace(tstate);
+    if (space == NULL) {
+        return -1;
+    }
+    uint64_t *ordinal_ptr = tstate == NULL ?
+        NULL : tstate->retrace.call_ordinal_ptr;
+    frame->retrace.space = space;
+    frame->retrace.current_call_ordinal =
+        ordinal_ptr == NULL ? 0 : *ordinal_ptr;
+    frame->retrace.previous_call_ordinal_ptr = ordinal_ptr;
+    frame->retrace.instruction_active = 0;
+    frame->retrace.instruction_may_activate_python = 0;
+    frame->retrace.coordinate_hash =
+        _PyFrame_RETRACE_COORDINATE_HASH_UNSET;
+    if (tstate != NULL) {
+        tstate->retrace.call_ordinal_ptr =
+            &frame->retrace.current_call_ordinal;
+    }
+    space->seen = 1;
+    if (space->depth != UINT32_MAX) {
+        space->depth++;
+    }
+    return 0;
+}
+
+static inline int
+_PyRetrace_OpcodeMayActivatePython(int opcode)
+{
+    (void)opcode;
+    return 1;
+}
+
+static inline void
+_PyRetrace_BeginInstruction(
+    PyThreadState *tstate,
+    _PyInterpreterFrame *frame,
+    int opcode)
+{
+    (void)tstate;
+    if (!_PyRetrace_FrameIsVisible(frame)) {
         return;
     }
-    _PyInterpreterFrame *parent =
-        _PyRetrace_NearestVisibleFrame(frame->previous);
-    int fresh_parent = _PyRetrace_FrameHasFreshCoordinateParent(frame);
-    if (parent == NULL && !fresh_parent && tstate != NULL) {
-        parent = _PyRetrace_NearestVisibleFrame(
-            tstate->retrace.thread_visible_callback_parent_frame);
-    }
-    if (parent == NULL && _PyRetrace_FrameHasCallbackTransparentParent(frame)) {
-        _PyRetrace_MarkFrameCallbackTransparent(frame);
+    frame->retrace.instruction_active = 1;
+    frame->retrace.instruction_may_activate_python =
+        _PyRetrace_OpcodeMayActivatePython(opcode) ? 1 : 0;
+}
+
+static inline void
+_PyRetrace_EndInstruction(PyThreadState *tstate, _PyInterpreterFrame *frame)
+{
+    (void)tstate;
+    if (!_PyRetrace_FrameIsVisible(frame) ||
+        !frame->retrace.instruction_active)
+    {
         return;
     }
-    if (parent != NULL) {
-        int64_t coordinate = _PyFrame_RetraceCoordinate(parent);
-        if (parent->retrace.child_ordinal_coordinate != coordinate) {
-            parent->retrace.child_ordinal_coordinate = coordinate;
-            parent->retrace.next_child_call_ordinal = 0;
-        }
-        frame->retrace.current_call_ordinal =
-            parent->retrace.next_child_call_ordinal++;
-    }
-    else if (fresh_parent) {
+    frame->retrace.instruction_active = 0;
+    frame->retrace.instruction_counter++;
+    if (frame->retrace.instruction_may_activate_python) {
         frame->retrace.current_call_ordinal = 0;
     }
-    else if (tstate != NULL) {
-        frame->retrace.current_call_ordinal =
-            tstate->retrace.root_coordinate++;
+    frame->retrace.instruction_may_activate_python = 0;
+    frame->retrace.coordinate_hash =
+        _PyFrame_RETRACE_COORDINATE_HASH_UNSET;
+}
+
+static inline void
+_PyRetrace_DeactivateFrame(PyThreadState *tstate, _PyInterpreterFrame *frame)
+{
+    if (frame == NULL || frame->retrace.space == NULL) {
+        return;
     }
-    else {
-        frame->retrace.current_call_ordinal = 0;
+    if (!_PyRetrace_ThreadOwnsSpace(tstate, frame->retrace.space)) {
+        _PyRetraceFrameState_Init(&frame->retrace);
+        return;
     }
-    _PyRetrace_RefreshFrameBaseCoordinateHash(tstate, frame);
-    _PyFrame_RetraceResetCoordinateDepth(frame);
+    uint64_t *previous = frame->retrace.previous_call_ordinal_ptr;
+    if (tstate != NULL &&
+        tstate->retrace.call_ordinal_ptr ==
+            &frame->retrace.current_call_ordinal)
+    {
+        tstate->retrace.call_ordinal_ptr = previous;
+    }
+    if (previous != NULL) {
+        ++*previous;
+    }
+    if (frame->retrace.space->depth > 0) {
+        frame->retrace.space->depth--;
+    }
+    frame->retrace.space = NULL;
+    frame->retrace.previous_call_ordinal_ptr = NULL;
+    frame->retrace.current_call_ordinal = 0;
+    frame->retrace.instruction_active = 0;
+    frame->retrace.instruction_may_activate_python = 0;
+    frame->retrace.coordinate_hash =
+        _PyFrame_RETRACE_COORDINATE_HASH_UNSET;
+    if (tstate != NULL && tstate->retrace.call_ordinal_ptr == NULL &&
+        tstate->retrace.current_space != NULL)
+    {
+        tstate->retrace.call_ordinal_ptr =
+            &tstate->retrace.current_space->root_call_ordinal;
+    }
+}
+
+static inline void
+_PyRetrace_LeaveFrame(PyThreadState *tstate, _PyInterpreterFrame *frame)
+{
+    _PyRetrace_EndInstruction(tstate, frame);
+    _PyRetrace_DeactivateFrame(tstate, frame);
+}
+
+static inline void
+_PyRetrace_SuspendFrame(PyThreadState *tstate, _PyInterpreterFrame *frame)
+{
+    _PyRetrace_EndInstruction(tstate, frame);
+    _PyRetrace_DeactivateFrame(tstate, frame);
+}
+
+static inline void
+_PyRetrace_CopyFrameStateForNewFrame(
+    _PyRetraceFrameState *dest,
+    const _PyRetraceFrameState *src)
+{
+    (void)src;
+    _PyRetraceFrameState_Init(dest);
 }
 
 PyAPI_FUNC(void) _PyRetrace_NoteThreadResume(PyThreadState *tstate);

@@ -85,6 +85,11 @@ def main() -> int:
 
     record = None
     for _ in range(10):
+        record_space = (
+            module.CoordinateSpace()
+            if hasattr(module, "CoordinateSpace")
+            else None
+        )
         schedule, result = record_thread_schedule(
             module,
             target,
@@ -93,6 +98,7 @@ def main() -> int:
             CONFIG.timeout,
             timeout=CONFIG.timeout,
             switch_interval=CONFIG.switch_interval,
+            coordinate_space=record_space,
         )
         if schedule:
             record = (schedule, result)
@@ -101,6 +107,11 @@ def main() -> int:
         raise AssertionError("record did not capture any thread switches")
 
     schedule, record_events = record
+    replay_space = (
+        module.CoordinateSpace()
+        if hasattr(module, "CoordinateSpace")
+        else None
+    )
     replay_events = replay_thread_schedule(
         module,
         schedule,
@@ -110,6 +121,7 @@ def main() -> int:
         CONFIG.timeout,
         timeout=CONFIG.timeout,
         switch_interval=CONFIG.switch_interval,
+        coordinate_space=replay_space,
     )
 
     assert_event_counts("record", record_events)

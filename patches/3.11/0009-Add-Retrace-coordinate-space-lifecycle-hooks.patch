@@ -1,0 +1,108 @@
+From 15025250bf0960bb84470e244f8b0091b99df2ad Mon Sep 17 00:00:00 2001
+From: Retrace CPython Builder <retrace-cpython@retracesoftware.com>
+Date: Thu, 14 May 2026 14:12:05 +0100
+Subject: [PATCH] Add Retrace coordinate-space lifecycle hooks
+
+---
+ Python/ceval.c | 10 ++++++++++
+ Python/frame.c |  1 +
+ 2 files changed, 11 insertions(+)
+
+diff --git a/Python/ceval.c b/Python/ceval.c
+index 4031a08..6584cc8 100644
+--- a/Python/ceval.c
++++ b/Python/ceval.c
+@@ -1332,12 +1332,14 @@ eval_frame_handle_pending(PyThreadState *tstate, _PyInterpreterFrame *frame)
+         _py_stats.opcode_stats[lastopcode].pair_count[op]++; \
+         lastopcode = op; \
+         RETRACE_CALL_AT(); \
++        _PyRetrace_BeginInstruction(tstate, frame, op); \
+     } while (0)
+ #else
+ #define INSTRUCTION_START(op) \
+     do { \
+         frame->prev_instr = next_instr++; \
+         RETRACE_CALL_AT(); \
++        _PyRetrace_BeginInstruction(tstate, frame, op); \
+     } while (0)
+ #endif
+ 
+@@ -1361,6 +1363,7 @@ eval_frame_handle_pending(PyThreadState *tstate, _PyInterpreterFrame *frame)
+ /* Do interpreter dispatch accounting for tracing and instrumentation */
+ #define DISPATCH() \
+     { \
++        _PyRetrace_EndInstruction(tstate, frame); \
+         NEXTOPARG(); \
+         PRE_DISPATCH_GOTO(); \
+         assert(cframe.use_tracing == 0 || cframe.use_tracing == 255); \
+@@ -1370,6 +1373,7 @@ eval_frame_handle_pending(PyThreadState *tstate, _PyInterpreterFrame *frame)
+ 
+ #define DISPATCH_SAME_OPARG() \
+     { \
++        _PyRetrace_EndInstruction(tstate, frame); \
+         opcode = _Py_OPCODE(*next_instr); \
+         PRE_DISPATCH_GOTO(); \
+         opcode |= cframe.use_tracing OR_DTRACE_LINE; \
+@@ -2478,6 +2482,7 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *frame, int
+             TRACE_FUNCTION_EXIT();
+             DTRACE_FUNCTION_EXIT();
+             _Py_LeaveRecursiveCallTstate(tstate);
++            _PyRetrace_LeaveFrame(tstate, frame);
+             if (!frame->is_entry) {
+                 // GH-99729: We need to unlink the frame *before* clearing it:
+                 _PyInterpreterFrame *dying = frame;
+@@ -2693,6 +2698,7 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *frame, int
+             TRACE_FUNCTION_EXIT();
+             DTRACE_FUNCTION_EXIT();
+             _Py_LeaveRecursiveCallTstate(tstate);
++            _PyRetrace_SuspendFrame(tstate, frame);
+             /* Restore previous cframe and return. */
+             tstate->cframe = cframe.previous;
+             tstate->cframe->use_tracing = cframe.use_tracing;
+@@ -5482,6 +5488,7 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *frame, int
+             gen->gi_frame_state = FRAME_CREATED;
+             gen_frame->owner = FRAME_OWNED_BY_GENERATOR;
+             _Py_LeaveRecursiveCallTstate(tstate);
++            _PyRetrace_LeaveFrame(tstate, frame);
+             if (!frame->is_entry) {
+                 _PyInterpreterFrame *prev = frame->previous;
+                 _PyThreadState_PopFrame(tstate, frame);
+@@ -5787,6 +5794,7 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *frame, int
+         }
+ 
+ error:
++        _PyRetrace_EndInstruction(tstate, frame);
+         call_shape.kwnames = NULL;
+         /* Double-check exception status. */
+ #ifdef NDEBUG
+@@ -5871,6 +5879,7 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *frame, int
+ exit_unwind:
+     assert(_PyErr_Occurred(tstate));
+     _Py_LeaveRecursiveCallTstate(tstate);
++    _PyRetrace_LeaveFrame(tstate, frame);
+     if (frame->is_entry) {
+         /* Restore previous cframe and exit */
+         tstate->cframe = cframe.previous;
+@@ -6449,6 +6458,7 @@ _PyEvalFramePushAndInit(PyThreadState *tstate, PyFunctionObject *func,
+ static void
+ _PyEvalFrameClearAndPop(PyThreadState *tstate, _PyInterpreterFrame * frame)
+ {
++    _PyRetrace_LeaveFrame(tstate, frame);
+     // Make sure that this is, indeed, the top frame. We can't check this in
+     // _PyThreadState_PopFrame, since f_code is already cleared at that point:
+     assert((PyObject **)frame + frame->f_code->co_nlocalsplus +
+diff --git a/Python/frame.c b/Python/frame.c
+index 3ea3a2c..aaafbb8 100644
+--- a/Python/frame.c
++++ b/Python/frame.c
+@@ -69,6 +69,7 @@ _PyFrame_Copy(_PyInterpreterFrame *src, _PyInterpreterFrame *dest)
+     assert(src->stacktop >= src->f_code->co_nlocalsplus);
+     Py_ssize_t size = ((char*)&src->localsplus[src->stacktop]) - (char *)src;
+     memcpy(dest, src, size);
++    _PyRetraceFrameState_Init(&dest->retrace);
+     // Don't leave a dangling pointer to the old frame when creating generators
+     // and coroutines:
+     dest->previous = NULL;
+-- 
+2.50.1 (Apple Git-155)
+

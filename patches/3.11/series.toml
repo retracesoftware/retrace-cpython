@@ -34,4 +34,5 @@ patches = [
   "0006-Build-retrace-as-a-Windows-builtin-module.patch",
   "0007-Add-deterministic-retrace-pointer-hashes.patch",
   "0008-Freeze-public-retrace-module.patch",
+  "0009-Add-Retrace-coordinate-space-lifecycle-hooks.patch",
 ]

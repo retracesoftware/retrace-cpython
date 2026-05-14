@@ -18,7 +18,7 @@ index b5b729f141b..e941a746f18 100644
 +++ b/Include/internal/pycore_interpframe.h
 @@ -150,2 +150,3 @@ static inline void _PyFrame_Copy(_PyInterpreterFrame *src, _PyInterpreterFrame *
      assert(stacktop >= 0);
-+    dest->retrace = src->retrace;
++    _PyRetraceFrameState_Init(&dest->retrace);
      dest->stackpointer = dest->localsplus + stacktop;
 @@ -209,6 +210,7 @@ _PyFrame_Initialize(
  #ifdef Py_DEBUG

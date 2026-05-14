@@ -33,4 +33,5 @@ patches = [
   "0007-Build-Windows-freeze-helper-with-Win8.1-API-target.patch",
   "0008-Add-deterministic-retrace-pointer-hashes.patch",
   "0009-Freeze-public-retrace-module.patch",
+  "0010-Add-Retrace-coordinate-space-lifecycle-hooks.patch",
 ]

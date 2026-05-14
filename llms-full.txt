@@ -256,6 +256,272 @@ When `timeout` is not `None`, parked waits raise `TimeoutError` after that many 
 
 `close()` wakes sleeping threads and causes future `start()` or `to()` calls to raise `RuntimeError`.
 
+# Coordinate Spaces
+
+This document describes the proposed coordinate-space model for Retrace execution coordinates. It is a design contract for the next native coordinate implementation, not a description of the current patched CPython ABI.
+
+## What Spaces Are
+
+A coordinate space is a named execution context for Retrace coordinates. Coordinates are not globally meaningful on their own. A coordinate is meaningful only with its thread and coordinate space:
+
+```
+(thread id, coordinate space, coordinate tuple)
+```
+
+The default application space is the root space. Existing module-level helpers are sugar over this root space:
+
+```
+retrace.coordinates() == retrace.root_space.coordinates()
+retrace.hash() == retrace.root_space.hash()
+retrace.thread_delta() == retrace.root_space.thread_delta()
+retrace.call_at(...) == retrace.root_space.call_at(...)
+```
+
+Other spaces are used for control-plane execution. For example, a disabled space can replace the older idea of suppressing coordinates:
+
+```
+retrace.disable(fn, *args, **kwargs)
+# equivalent to
+retrace.disabled_space.run(fn, *args, **kwargs)
+```
+
+At the public API level, a space is a Python object with methods such as `coordinates()`, `hash()`, `thread_delta()`, `call_at()`, and `run()`. At the native layer, public `space_id=None` means the root space. Non-root spaces use numeric ids allocated by the native module and wrapped by `retrace.py`.
+
+Spaces are dynamic execution contexts. A Python frame belongs to the space in which it is actively executing. Suspended generators and coroutines do not own a space while suspended; when resumed, they inherit the current space of the code that resumes them.
+
+## Contract
+
+Coordinates are root-to-leaf tuples of active frames in one space. Each active frame contributes two words:
+
+```
+(instruction_counter, call_ordinal)
+```
+
+A coordinate set names a dynamic Python execution point, not a source location. For every frame in the tuple, `instruction_counter` is the number of bytecode instructions whose execution has ended in that frame. This includes bytecodes that finish normally, return, yield, raise, transfer to an exception handler, or unwind the frame. The frame's current bytecode activation is therefore bytecode number `instruction_counter`.
+
+For the leaf frame at a `call_at` callback boundary, that bytecode has not started yet: the callback is running immediately before the evaluator executes bytecode number `instruction_counter`. For an ancestor frame, that bytecode is already in progress and has activated the next frame in the tuple. For a manual `coordinates()` call made through a C function, the leaf visible Python frame may also be in progress, because the call is sampled from inside the bytecode that invoked the C function.
+
+After bytecode number `instruction_counter` exits its opcode body, the frame moves to `instruction_counter + 1` before any next callback boundary or before the frame is detached. There is no separate "after this bytecode" coordinate other than the next bytecode activation.
+
+`call_ordinal` is initialized from the parent ordinal slot when a frame is entered or resumed. The parent slot is either the nearest active parent frame's `call_ordinal` or the thread-space `root_call_ordinal` when the frame is a root frame for that space. After activation, the same field is the child-activation counter for that frame's current bytecode instruction. If an instruction activates multiple direct Python frames before it finishes, the first child runs while the parent has `call_ordinal == 0`, the second child runs while the parent has `call_ordinal == 1`, and so on. The parent or space-root ordinal slot is incremented exactly once when the child frame returns, suspends, or unwinds.
+
+`instruction_counter` is not a bytecode offset, line number, or source position. It is an execution counter. Jumps do not bias or rebase it; they only affect which CPython bytecode will be executed next after the boundary.
+
+`call_ordinal` is reset to zero after a bytecode that could have activated Python finishes. Bytecodes that cannot activate Python do not need to reset it, because they cannot have changed it.
+
+The bytecode loop has two coordinate boundaries. Before each instruction, it checks callbacks for the active frame's current coordinate. After every bytecode activation exits its opcode body, including exception paths, it advances frame progress exactly once:
+
+```
+_PyRetrace_MaybeFireCallbacks(tstate, frame);
+/* execute one bytecode instruction, including any exception path */
+frame->retrace.instruction_counter++;
+if (opcode_may_activate_python) {
+    frame->retrace.call_ordinal = 0;
+}
+```
+
+`opcode_may_activate_python` is a patch-site classification, not necessarily a runtime helper. It means the opcode may call, resume, or otherwise enter Python while the current frame remains active. This includes explicit call opcodes, iterator and await/send paths, descriptor and attribute operations, subscripting, numeric/comparison/formatting protocols, imports, context-manager entry or exit, and other C API paths that can invoke Python callbacks. The exact opcode names are CPython-version-specific, so each release patch should make the reset at the least invasive version-specific injection points.
+
+Exception paths are not transparent to the counter. If an opcode raises and the same frame handles the exception, the instruction counter is incremented before the handler becomes the next observable boundary. If an opcode raises and the frame unwinds, the instruction counter is incremented before the frame is detached and its parent or space-root ordinal slot is incremented.
+
+Callbacks are observed at the before-next-instruction boundary. New frames start at boundary `(0, 0)`, so coordinate zero is observable and can be targeted. Resumed frames are checked at their current boundary before executing the next resumed instruction; resuming does not advance the instruction counter by itself.
+
+For example, if a parent frame is executing a `CALL`-like instruction at instruction counter `12` and that instruction invokes two Python callbacks, the callbacks are distinguished by the parent frame's ordinal:
+
+```
+first callback:  (..., (12, 0), (0, 0))
+second callback: (..., (12, 1), (0, 1))
+parent resumes before next instruction: (..., (13, 0))
+```
+
+For `call_at`, the target coordinate means "fire before the leaf bytecode activation starts". Intermediate C work is represented by the same bytecode activation coordinate, and if that C work activates Python frames, those frames appear as descendants below the frame whose bytecode is in progress.
+
+When a Python frame activation leaves its caller, the caller's active ordinal slot is incremented exactly once. This can happen for ordinary Python calls, generator suspension, coroutine suspension, or Python callbacks entered from C protocol or extension code. For ordinary direct Python calls, the increment is usually followed immediately by the caller completing its `CALL` instruction and resetting `call_ordinal` before the next callback boundary. For C-driven callbacks, such as `sorted(..., key=callback)` or descriptor/protocol callbacks, the parent can remain at one instruction while multiple child frames run, so the ordinal is observable and required.
+
+`space.run(fn, *args, **kwargs)` executes `fn` in that space on the current thread. If the target space already has an active frame on the current thread, new frames attach below the nearest active frame in that space. If the target space has no active frame on the thread, new frames use the thread-local root ordinal for that space.
+
+Spaces are sticky per thread. Once a thread uses a space, that thread keeps per-space state, including the root ordinal, until thread exit. The same space id on two different threads has separate root ordinals.
+
+Thread creation inherits the creator's current space id, not the creator's space state. If a thread is started while execution is in the disabled space, the new thread begins in the disabled space with its own per-thread disabled space state.
+
+Querying coordinates for a space that has never been active on a thread returns `None`. Querying a space that exists for the thread but currently has no active frame returns an empty tuple:
+
+```
+root_space.coordinates(thread) == None  # root never used on this thread
+root_space.coordinates(thread) == ()    # root exists but is at space root
+```
+
+Callbacks do not receive event objects. Code that needs another space captures the space handle as a closure:
+
+```
+root = retrace.root_space
+
+def callback():
+    app_coordinates = root.coordinates()
+    root.run(app_visible_work)
+```
+
+`root.run(...)` from a callback runs application-visible work under the nearest active root-space frame on the current thread. The callback body itself can run in a separate control space, while the captured root space still exposes the suspended application coordinate.
+
+`call_at` is scoped to a coordinate space. A root-space `call_at` target is not advanced by frames executing in the disabled space. A disabled-space target is independent from root-space targets. Module-level `retrace.call_at(...)` arms a target in the root space.
+
+## Implementation Sketch
+
+The native implementation should keep `_retrace` lean and put most public shape in `retrace.py`.
+
+This model should replace the existing coordinate-bias model across every supported patch stack in one migration: 3.11, 3.12, 3.13, and 3.14. Do not keep the old bias/sentinel coordinate semantics for older supported versions while newer versions use spaces.
+
+`retrace.py` should expose `CoordinateSpace` objects:
+
+```
+root_space = CoordinateSpace(None)
+disabled_space = CoordinateSpace("disabled")
+
+coordinates = root_space.coordinates
+hash = root_space.hash
+thread_delta = root_space.thread_delta
+call_at = root_space.call_at
+disable = disabled_space.run
+```
+
+The `_retrace` API can accept `space_id=None` as the root-space default:
+
+```
+_retrace.coordinates(thread_id=None, drop=0, *, space_id=None)
+_retrace.hash(thread_id=None, *, space_id=None)
+_retrace.thread_delta(thread_id=None, drop=0, *, space_id=None)
+_retrace.call_at(thread_id, coordinates, callback, overshoot=None, *,
+                 space_id=None)
+_retrace.run_in_space(callable, *args, space_id=None, **kwargs)
+```
+
+At the C layer, thread state owns the active space, the ordinal slot, and the per-thread list of spaces that have been used:
+
+```
+typedef struct _PyRetraceThreadSpaceState {
+    uint32_t space_id;
+    int seen;
+    uint32_t depth;
+    uint64_t root_call_ordinal;
+    uint64_t last_delta_root_call_ordinal; /* delta cache */
+    uint64_t root_coordinate_hash;         /* hash cache seed */
+    struct _PyRetraceThreadSpaceState *next;
+} _PyRetraceThreadSpaceState;
+
+typedef struct {
+    _PyRetraceThreadSpaceState root_space;  /* space id 0, inline fast path */
+    _PyRetraceThreadSpaceState *current_space;
+    _PyRetraceThreadSpaceState *last_space;
+    uint64_t *call_ordinal_ptr;
+} _PyRetraceThreadState;
+```
+
+`root_space` is inline because space id `0` is the common case and must be available without allocation. Spaces are stored as a circular linked list, with `root_space.next` initially pointing back to `root_space`:
+
+```
+tstate->retrace.root_space.next = &tstate->retrace.root_space;
+tstate->retrace.current_space = &tstate->retrace.root_space;
+tstate->retrace.last_space = &tstate->retrace.root_space;
+tstate->retrace.call_ordinal_ptr =
+    &tstate->retrace.root_space.root_call_ordinal;
+```
+
+`last_space` is both the lookup cache and a valid place to start iterating the circle. Space lookup starts at `last_space`, walks until it reaches the same node again, and creates a new node only if no matching `space_id` is found. New nodes can be inserted after `last_space`, then become the new `last_space`. Thread cleanup walks the circle from `root_space.next` and frees every allocated node except the inline root. This avoids a resizable table and keeps `_PyRetraceThreadSpaceState *` pointers stable for frames for the lifetime of the thread.
+
+If a new thread inherits a non-root current space id, its retrace thread state still starts with the inline root node, then resolves or creates the inherited space in that thread's circle. `current_space` and `call_ordinal_ptr` are initialized to that inherited space's root ordinal, so the thread begins in the same logical space but with independent per-thread coordinate state.
+
+Frame state should contain only durable frame progress plus activation-local context. Delta and hash support may add cache fields, but those fields are derived from the coordinate stream and must not define extra coordinate semantics:
+
+```
+typedef struct {
+    uint64_t instruction_counter;          /* persists across suspension */
+    _PyRetraceThreadSpaceState *space;     /* active only */
+    uint64_t call_ordinal;                 /* active only */
+    uint64_t *previous_call_ordinal_ptr;   /* active only */
+    uint64_t last_delta_instruction_counter;
+    uint64_t last_delta_call_ordinal;
+    uint64_t coordinate_hash;
+} _PyRetraceFrameState;
+```
+
+Suspended frames keep `instruction_counter`. Their `space`, `call_ordinal`, and `previous_call_ordinal_ptr` are cleared or treated as inactive. On resume, the frame is patched into the current thread and space.
+
+The bytecode-loop patch for each CPython release should follow this checklist:
+
+1. Fire retrace callbacks before executing the next bytecode instruction.
+1. Increment `instruction_counter` exactly once after every bytecode activation, including normal completion, return, yield, handled exceptions, and frame unwind.
+1. Reset `call_ordinal` to zero only after opcodes that may activate Python while the current frame remains active.
+1. Keep the reset after the opcode has completed all nested activations and before the next callback check.
+1. Initialize an entered or resumed frame's `call_ordinal` from the current parent or space-root ordinal pointer, then point the thread state's `call_ordinal_ptr` at the frame's own `call_ordinal`.
+1. Increment the saved parent or space-root ordinal slot exactly once when a frame returns, suspends, or unwinds.
+1. Do not use instruction bias, jump-specific coordinate adjustment, or transparent-frame sentinels.
+
+Frame enter or resume:
+
+```
+frame->retrace.space = tstate->retrace.current_space;
+frame->retrace.call_ordinal =
+    tstate->retrace.call_ordinal_ptr != NULL
+    ? *tstate->retrace.call_ordinal_ptr
+    : 0;
+frame->retrace.previous_call_ordinal_ptr =
+    tstate->retrace.call_ordinal_ptr;
+tstate->retrace.call_ordinal_ptr = &frame->retrace.call_ordinal;
+frame->retrace.space->seen = 1;
+frame->retrace.space->depth++;
+```
+
+Frame suspend, return, or unwind:
+
+```
+uint64_t *parent = frame->retrace.previous_call_ordinal_ptr;
+
+tstate->retrace.call_ordinal_ptr = parent;
+if (parent != NULL) {
+    ++*parent;
+}
+
+frame->retrace.space->depth--;
+frame->retrace.space = NULL;
+frame->retrace.call_ordinal = 0;
+frame->retrace.previous_call_ordinal_ptr = NULL;
+```
+
+`space.run(...)` resolves the target thread-space state, then chooses the ordinal slot for the dynamic run. If the target space has active frames on the current thread, it finds the nearest active frame in that space by walking the current interpreter frame chain and comparing the frame's active `space` pointer. If the target space has no active frame, it uses a local root ordinal slot initialized from `thread_space->root_call_ordinal` and writes it back after the call.
+
+```
+target = _PyRetrace_GetThreadSpace(tstate, space_id);
+parent = target->depth == 0 ? NULL :
+    _PyRetrace_NearestFrameInSpace(tstate_current_frame, target);
+
+uint64_t local_root_call_ordinal = target->root_call_ordinal;
+uint64_t *ordinal_ptr = parent != NULL
+    ? &parent->retrace.call_ordinal
+    : &local_root_call_ordinal;
+
+saved_space = tstate->retrace.current_space;
+saved_ordinal_ptr = tstate->retrace.call_ordinal_ptr;
+
+tstate->retrace.current_space = target;
+tstate->retrace.call_ordinal_ptr = ordinal_ptr;
+
+result = PyObject_Vectorcall(callable, args, nargsf, kwnames);
+
+if (parent == NULL) {
+    target->root_call_ordinal = local_root_call_ordinal;
+}
+tstate->retrace.call_ordinal_ptr = saved_ordinal_ptr;
+tstate->retrace.current_space = saved_space;
+```
+
+The local root ordinal pointer is safe because it is used only for the dynamic extent of `space.run(...)`. Frames that suspend inside the run must clear their activation-local ordinal pointer before control leaves the C stack frame. When those frames resume later, they receive a fresh parent ordinal pointer from the resumer's current space.
+
+Coordinate queries for a thread and space first resolve the thread-space state without creating it. If no state exists or `seen` is false, the result is `None`. Otherwise, the implementation walks the active interpreter frame chain and emits `(instruction_counter, call_ordinal)` for frames whose active `space` pointer matches the queried thread-space state. If there are no matching active frames, it returns `()`.
+
+`hash()` and `thread_delta()` are preserved features, not separate coordinate models. For a given `(thread, space)`, `hash()` hashes exactly the same root-to-leaf coordinate stream returned by `coordinates()`. `thread_delta()` also operates per `(thread, space)`: each `_PyRetraceThreadSpaceState` owns the root delta cache for that space, and frame cache fields remember only the last emitted coordinate words for the same active space. Querying or updating deltas for one space must not invalidate the delta stream for another space on the same thread.
+
+This design removes the need for coordinate bias, jump-specific coordinate adjustment, transparent-frame sentinels, child-ordinal reset fields, and space-specific behavior in C. Root and disabled become public-space conventions, while the native evaluator sees only numeric space ids and per-thread space state.
+
 # Probe ABI
 
 This document sketches the native probe contract exposed by patched CPython builds. The ABI is private to Retrace and should be versioned explicitly.

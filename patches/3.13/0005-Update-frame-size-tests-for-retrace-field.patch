@@ -16,7 +16,7 @@ index 786832d3e35..19eb312950f 100644
              return sys._getframe()
          x = func()
 -        check(x, size('3Pi2c2P7P2ic??2P'))
-+        check(x, size('3Pi2c2P7P2ic??8q2P'))
++        check(x, size('3Pi2c2P7P2ic??8q3P'))
          # function
          def func(): pass
          check(func, size('15Pi'))
@@ -25,7 +25,7 @@ index 786832d3e35..19eb312950f 100644
          # generator
          def get_gen(): yield 1
 -        check(get_gen(), size('PP4P4c7P2ic??2P'))
-+        check(get_gen(), size('PP4P4c7P2ic??8q2P'))
++        check(get_gen(), size('PP4P4c7P2ic??8q3P'))
          # iterator
          check(iter('abc'), size('lP'))
          # callable-iterator

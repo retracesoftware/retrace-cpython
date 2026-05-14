@@ -1,0 +1,98 @@
+From 11eeecc3f2a54456f3e4f7135c7d377f22f5adac Mon Sep 17 00:00:00 2001
+From: Retrace CPython Builder <retrace-cpython@retracesoftware.com>
+Date: Thu, 14 May 2026 14:08:56 +0100
+Subject: [PATCH] Add Retrace coordinate-space lifecycle hooks
+
+---
+ Python/ceval.c             | 1 +
+ Python/ceval_macros.h      | 9 ++++++++-
+ Python/generated_cases.c.h | 4 ++++
+ 3 files changed, 13 insertions(+), 1 deletion(-)
+
+diff --git a/Python/ceval.c b/Python/ceval.c
+index c883fe5..2654057 100644
+--- a/Python/ceval.c
++++ b/Python/ceval.c
+@@ -1962,6 +1962,7 @@ clear_gen_frame(PyThreadState *tstate, _PyInterpreterFrame * frame)
+ void
+ _PyEval_FrameClearAndPop(PyThreadState *tstate, _PyInterpreterFrame * frame)
+ {
++    _PyRetrace_LeaveFrame(tstate, frame);
+     if (frame->owner == FRAME_OWNED_BY_THREAD) {
+         clear_thread_frame(tstate, frame);
+     }
+diff --git a/Python/ceval_macros.h b/Python/ceval_macros.h
+index e1a3646..315b9f9 100644
+--- a/Python/ceval_macros.h
++++ b/Python/ceval_macros.h
+@@ -82,9 +82,14 @@
+         if (_Py_stats) _Py_stats->opcode_stats[lastopcode].pair_count[op]++; \
+         lastopcode = op; \
+         RETRACE_CALL_AT(); \
++        _PyRetrace_BeginInstruction(tstate, frame, op); \
+     } while (0)
+ #else
+-#define INSTRUCTION_STATS(op) RETRACE_CALL_AT()
++#define INSTRUCTION_STATS(op) \
++    do { \
++        RETRACE_CALL_AT(); \
++        _PyRetrace_BeginInstruction(tstate, frame, op); \
++    } while (0)
+ #endif
+ 
+ #ifdef Py_STATS
+@@ -178,6 +183,7 @@ do { \
+ #define DISPATCH() \
+     { \
+         assert(frame->stackpointer == NULL); \
++        _PyRetrace_EndInstruction(tstate, frame); \
+         NEXTOPARG(); \
+         PRE_DISPATCH_GOTO(); \
+         DISPATCH_GOTO(); \
+@@ -185,6 +191,7 @@ do { \
+ 
+ #define DISPATCH_SAME_OPARG() \
+     { \
++        _PyRetrace_EndInstruction(tstate, frame); \
+         opcode = next_instr->op.code; \
+         PRE_DISPATCH_GOTO(); \
+         DISPATCH_GOTO(); \
+diff --git a/Python/generated_cases.c.h b/Python/generated_cases.c.h
+index d77deec..013f045 100644
+--- a/Python/generated_cases.c.h
++++ b/Python/generated_cases.c.h
+@@ -7654,6 +7654,7 @@
+                 gen->gi_exc_state.previous_item = NULL;
+                 _Py_LeaveRecursiveCallPy(tstate);
+                 _PyInterpreterFrame *gen_frame = frame;
++                _PyRetrace_SuspendFrame(tstate, gen_frame);
+                 frame = tstate->current_frame = frame->previous;
+                 gen_frame->previous = NULL;
+                 assert(INLINE_CACHE_ENTRIES_SEND == INLINE_CACHE_ENTRIES_FOR_ITER);
+@@ -10585,6 +10586,7 @@
+             gen_frame->owner = FRAME_OWNED_BY_GENERATOR;
+             _Py_LeaveRecursiveCallPy(tstate);
+             _PyInterpreterFrame *prev = frame->previous;
++            _PyRetrace_LeaveFrame(tstate, frame);
+             _PyThreadState_PopFrame(tstate, frame);
+             frame = tstate->current_frame = prev;
+             LOAD_IP(frame->return_offset);
+@@ -12338,6 +12340,7 @@
+             gen->gi_exc_state.previous_item = NULL;
+             _Py_LeaveRecursiveCallPy(tstate);
+             _PyInterpreterFrame *gen_frame = frame;
++            _PyRetrace_SuspendFrame(tstate, gen_frame);
+             frame = tstate->current_frame = frame->previous;
+             gen_frame->previous = NULL;
+             assert(INLINE_CACHE_ENTRIES_SEND == INLINE_CACHE_ENTRIES_FOR_ITER);
+@@ -12400,6 +12403,7 @@ JUMP_TO_LABEL(error);
+ 
+         LABEL(error)
+         {
++            _PyRetrace_EndInstruction(tstate, frame);
+             #ifdef NDEBUG
+             if (!_PyErr_Occurred(tstate)) {
+                 _PyFrame_SetStackPointer(frame, stack_pointer);
+-- 
+2.50.1 (Apple Git-155)
+

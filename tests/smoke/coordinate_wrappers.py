@@ -149,30 +149,40 @@ def check_run_transparent(module):
         return before, inside, after
 
     before, inside, after = visible()
-    assert len(inside) == len(before) - 2
-    assert inside == after
+    assert len(inside) == len(before)
+    assert len(after) == len(before)
 
 
 def check_with_new_coordinates(module):
+    space_id = module.allocate_space_id()
+
     def leaf(label, *, scale):
-        return module.coordinates(), module.hash(), label, scale
+        return (
+            module.coordinates(None, 0, space_id),
+            module.hash(space_id),
+            module.coordinates(),
+            label,
+            scale,
+        )
 
     def parent():
         before = module.coordinates()
-        first = module.with_new_coordinates(leaf, "first", scale=2)
+        assert module.coordinates(None, 0, space_id) is None
+        first = module.run_in_space(space_id, leaf, "first", scale=2)
         middle = module.coordinates()
-        second = module.with_new_coordinates(leaf, "second", scale=3)
+        second = module.run_in_space(space_id, leaf, "second", scale=3)
         after = module.coordinates()
         return before, middle, after, first, second
 
     before, middle, after, first, second = parent()
-    first_coords, first_hash, first_label, first_scale = first
-    second_coords, second_hash, second_label, second_scale = second
+    first_coords, first_hash, first_root, first_label, first_scale = first
+    second_coords, second_hash, second_root, second_label, second_scale = second
 
     assert len(first_coords) == 2
-    assert first_coords[0] == 0
-    assert second_coords == first_coords
-    assert second_hash == first_hash
+    assert len(second_coords) == 2
+    assert first_hash != second_hash
+    assert len(first_root) == len(before)
+    assert len(second_root) == len(before)
     assert first_label == "first"
     assert first_scale == 2
     assert second_label == "second"
@@ -180,36 +190,37 @@ def check_with_new_coordinates(module):
     assert len(middle) == len(before)
     assert len(after) == len(before)
 
+    nested_space_id = module.allocate_space_id()
+
     def nested_parent():
-        parent_coords = module.coordinates()
+        parent_coords = module.coordinates(None, 0, nested_space_id)
 
         def child():
-            return module.coordinates()
+            return module.coordinates(None, 0, nested_space_id)
 
         return parent_coords, child()
 
-    root_coords, child_coords = module.with_new_coordinates(nested_parent)
+    root_coords, child_coords = module.run_in_space(
+        nested_space_id, nested_parent)
     assert len(root_coords) == 2
-    assert root_coords[0] == 0
     assert len(child_coords) == 4
-    assert child_coords[0] == 0
     assert child_coords[1] >= root_coords[1]
-    assert child_coords[2] == 0
 
 
 def check_with_new_coordinates_restores_after_exception(module):
     class Marker(Exception):
         pass
 
+    space_id = module.allocate_space_id()
+
     def raises():
-        coords = module.coordinates()
+        coords = module.coordinates(None, 0, space_id)
         assert len(coords) == 2
-        assert coords[0] == 0
         raise Marker
 
     before = module.coordinates()
     try:
-        module.with_new_coordinates(raises)
+        module.run_in_space(space_id, raises)
     except Marker:
         pass
     else:
@@ -235,7 +246,36 @@ def check_with_new_coordinates_thread_ids(module):
 
     first = module.with_new_coordinates(child_thread_id)
     second = module.with_new_coordinates(child_thread_id)
-    assert first == second
+    assert type(first) is int and first > 0
+    assert type(second) is int and second > 0
+
+
+def check_fresh_spaces_match(module):
+    def sample(space_id):
+        ids = []
+
+        def worker():
+            ids.append(_thread.get_ident())
+
+        def body():
+            coords = module.coordinates(None, 0, space_id)
+            coordinate_hash = module.hash(space_id)
+            thread = threading.Thread(target=worker,
+                                      name="fresh-space-match-thread")
+            thread.start()
+            thread.join(5.0)
+            assert not thread.is_alive()
+            assert len(ids) == 1
+            return coords, coordinate_hash, ids[0]
+
+        return module.run_in_space(space_id, body)
+
+    for _ in range(4):
+        sample(module.allocate_space_id())
+
+    first = sample(module.allocate_space_id())
+    second = sample(module.allocate_space_id())
+    assert first == second, (first, second)
 
 
 def main() -> int:
@@ -256,6 +296,7 @@ def main() -> int:
     check_with_new_coordinates(module)
     check_with_new_coordinates_restores_after_exception(module)
     check_with_new_coordinates_thread_ids(module)
+    check_fresh_spaces_match(module)
 
     print("_retrace_module=builtin")
     print("coordinate_wrappers=available")

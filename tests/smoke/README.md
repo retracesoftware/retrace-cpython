@@ -79,8 +79,10 @@ handoff. Critical sections are hidden from scheduler-control callbacks so replay
 does not park a thread while it owns the primitive under test.
 
 `thread_schedule_fresh.py` records and replays a small schedule sequentially in
-one process under `retrace.with_new_coordinates`, asserting that replay can use
-the recorded thread ids and coordinate roots literally. The helper-owned
-launcher thread stays outside the schedule; the schedule covers threads created
-by the target. It also exercises `test_thread_schedule(retrace, function, args,
-kwargs)`, which raises if record and replay return different values.
+one process under separate fresh `retrace.CoordinateSpace` instances. The
+helper-owned launcher thread stays outside the schedule; the schedule covers
+threads created by the target. Replay treats recorded thread ids as logical
+schedule ids and binds them to the public thread ids observed during replay,
+while still arming recorded coordinates in the replay space. It also exercises
+`test_thread_schedule(retrace, function, args, kwargs)`, which raises if record
+and replay return different values.

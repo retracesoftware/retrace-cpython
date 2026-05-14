@@ -19,6 +19,7 @@ handoff helpers.
 ## Public Interfaces
 
 - [Public API](https://retracesoftware.github.io/retrace-cpython/api/index.md): Public retrace and retracesoftware_cpython Python APIs.
+- [Coordinate Spaces](https://retracesoftware.github.io/retrace-cpython/coordinate-spaces/index.md): Proposed coordinate-space model and native implementation contract.
 - [Probe ABI](https://retracesoftware.github.io/retrace-cpython/probe-abi/index.md): Private native probe ABI and patched interpreter internals.
 
 ## Maintainers

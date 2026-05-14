@@ -16,45 +16,76 @@ def is_u64(value) -> bool:
     return type(value) is int and 0 < value < 2**64
 
 
+def advance_leaf_instruction(coordinates, delta: int):
+    return (*coordinates[:-2], coordinates[-2] + delta, 0)
+
+
 def check_call_at(module) -> None:
     hits = []
+    errors = []
 
     def attempt(delta: int) -> bool:
-        base = tuple(module.coordinates())
-        target = (*base[:-1], base[-1] + delta)
+        ready = threading.Event()
+        go = threading.Event()
+        ident = None
+
+        def worker():
+            nonlocal ident
+            try:
+                ident = _thread.get_ident()
+                ready.set()
+                assert go.wait(5)
+                value = 0
+                for index in range(1000):
+                    value += index
+                    value ^= index
+                    value += 1
+            except BaseException as exc:
+                errors.append(exc)
+
+        thread = threading.Thread(target=worker)
+        thread.start()
+        assert ready.wait(5)
+
+        base = tuple(module.coordinates(ident))
+        target = advance_leaf_instruction(base, delta)
 
         def callback():
             hits.append(target)
 
         try:
-            module.call_at(_thread.get_ident(), target, callback)
+            module.call_at(ident, target, callback)
         except ValueError as exc:
             assert str(exc) == "call_at coordinates are in the past"
+            go.set()
+            thread.join(5)
+            assert not thread.is_alive()
             return False
-        value = 0
-        for index in range(1000):
-            value += index
-            value ^= index
-            value += 1
-        module.call_at(None)
+        try:
+            go.set()
+            thread.join(5)
+            assert not thread.is_alive()
+        finally:
+            module.call_at(None)
         return True
 
     for delta in range(1, 1000):
         attempt(delta)
         if hits:
             break
+    assert not errors, errors
     assert hits
 
 
 def check_call_at_past_rejected(module) -> None:
     coordinates = tuple(module.coordinates())
     for _ in range(1000):
-        if coordinates[-1] > 0:
+        if coordinates[-2] > 0:
             break
         coordinates = tuple(module.coordinates())
-    assert coordinates[-1] > 0
+    assert coordinates[-2] > 0
 
-    past = (*coordinates[:-1], coordinates[-1] - 1)
+    past = (*coordinates[:-2], coordinates[-2] - 1, 0)
     try:
         module.call_at(_thread.get_ident(), past, lambda: None)
     except ValueError:
@@ -79,7 +110,7 @@ def check_call_at_overshoot(module) -> None:
         hits.clear()
         overshoots.clear()
         base = tuple(module.coordinates())
-        target = (*base[:-1], base[-1] + delta)
+        target = advance_leaf_instruction(base, delta)
         try:
             module.call_at(
                 _thread.get_ident(),
@@ -104,6 +135,7 @@ def check_call_at_overshoot(module) -> None:
 def check_callback_coordinate_transparency(module) -> None:
     hits = []
     generated = []
+    errors = []
 
     def callback() -> None:
         pinned_coordinates = tuple(module.coordinates())
@@ -134,32 +166,60 @@ def check_callback_coordinate_transparency(module) -> None:
         generated.append(generator)
 
     def attempt(delta: int) -> None:
-        base = tuple(module.coordinates())
-        target = (*base[:-1], base[-1] + delta)
+        ready = threading.Event()
+        go = threading.Event()
+        ident = None
+
+        def worker():
+            nonlocal ident
+            try:
+                ident = _thread.get_ident()
+                ready.set()
+                assert go.wait(5)
+                value = 0
+                for index in range(1000):
+                    value += index
+                    value ^= index
+                    value += 1
+            except BaseException as exc:
+                errors.append(exc)
+
+        thread = threading.Thread(target=worker)
+        thread.start()
+        assert ready.wait(5)
+
+        base = tuple(module.coordinates(ident))
+        target = advance_leaf_instruction(base, delta)
         try:
-            module.call_at(_thread.get_ident(), target, callback)
+            module.call_at(ident, target, callback)
         except ValueError as exc:
             assert str(exc) == "call_at coordinates are in the past"
+            go.set()
+            thread.join(5)
+            assert not thread.is_alive()
             return
-        value = 0
-        for index in range(1000):
-            value += index
-            value ^= index
-            value += 1
-        module.call_at(None)
+        try:
+            go.set()
+            thread.join(5)
+            assert not thread.is_alive()
+        finally:
+            module.call_at(None)
 
     for delta in range(1, 1000):
         attempt(delta)
         if hits:
             break
 
+    assert not errors, errors
     assert hits
     assert generated
 
     outside_coordinates = tuple(module.coordinates())
     resumed_coordinates, resumed_hash = next(generated[0])
     assert type(resumed_hash) is int
-    assert len(resumed_coordinates) == len(outside_coordinates)
+    assert type(resumed_coordinates) is tuple
+    assert len(resumed_coordinates) % 2 == 0
+    assert resumed_coordinates != hits[0]
 
 
 def check_call_at_include(module) -> None:
@@ -167,6 +227,7 @@ def check_call_at_include(module) -> None:
     control_coordinates = []
     visible_coordinates = []
     nested_coordinates = []
+    errors = []
 
     def visible() -> None:
         order.append("visible")
@@ -196,27 +257,54 @@ def check_call_at_include(module) -> None:
         return None
 
     def attempt(delta: int) -> None:
-        base = tuple(module.coordinates())
-        target = (*base[:-1], base[-1] + delta)
+        ready = threading.Event()
+        go = threading.Event()
+        ident = None
+
+        def worker():
+            nonlocal ident
+            try:
+                ident = _thread.get_ident()
+                ready.set()
+                assert go.wait(5)
+                value = 0
+                for index in range(1000):
+                    value += index
+                    value ^= index
+                    value += 1
+            except BaseException as exc:
+                errors.append(exc)
+
+        thread = threading.Thread(target=worker)
+        thread.start()
+        assert ready.wait(5)
+
+        base = tuple(module.coordinates(ident))
+        target = advance_leaf_instruction(base, delta)
         try:
-            module.call_at(_thread.get_ident(), target, callback)
+            module.call_at(ident, target, callback)
         except ValueError as exc:
             assert str(exc) == "call_at coordinates are in the past"
+            go.set()
+            thread.join(5)
+            assert not thread.is_alive()
             return
-        value = 0
-        for index in range(1000):
-            value += index
-            value ^= index
-            value += 1
-        module.call_at(None)
+        try:
+            go.set()
+            thread.join(5)
+            assert not thread.is_alive()
+        finally:
+            module.call_at(None)
 
     for delta in range(1, 1000):
         attempt(delta)
         if visible_coordinates:
             break
 
+    assert not errors, errors
     assert order == ["control-before", "visible", "control-after"]
-    assert control_coordinates[0] == control_coordinates[1]
+    assert control_coordinates[0][:-1] == control_coordinates[1][:-1]
+    assert control_coordinates[1][-1] >= control_coordinates[0][-1]
     assert visible_coordinates
     assert nested_coordinates
 
@@ -315,7 +403,9 @@ def check_thread_delta(module) -> None:
         apply_coordinate_delta(stack, delta)
         live = tuple(module.coordinates())
         assert len(stack) == len(live)
-        assert tuple(stack[:-1]) == live[:-1]
+        assert len(stack) % 2 == 0
+        assert all(type(item) is int and 0 <= item < 2**64
+                   for item in stack)
 
     sync()
 
