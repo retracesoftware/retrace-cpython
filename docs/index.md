@@ -35,6 +35,8 @@ capability checks and native-oriented tests.
   and runtime package.
 - [Runtime Package](runtime-package.md): how other projects should consume the
   PyPI wheel.
+- [Coordinate Structure](coordinate-structure.md): exact coordinate tuple
+  layout and parent-owned call ordinal semantics.
 - [Build And Release](build-release.md): local builds, docs generation, and
   release workflow.
 - [Patch And Overlay Model](patching.md): how CPython patches stay small.

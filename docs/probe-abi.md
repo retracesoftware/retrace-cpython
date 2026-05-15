@@ -29,8 +29,11 @@ retrace.coordinates(thread_id=None, drop=0)
 retrace.thread_delta()
 retrace.hash()
 retrace.exclude(callable)
+retrace.disable(callable)
 retrace.include(callable)
+retrace.enable(callable)
 retrace.CoordinateSpace().wrap(callable)
+retrace.run_disabled(callable, *args, **kwargs)
 retrace.with_new_coordinates(callable, *args, **kwargs)
 retrace.callbacks.thread_start = callback_or_none
 retrace.callbacks.set_thread_start(callback_or_none, space=None)
@@ -46,8 +49,9 @@ retrace.ThreadHandoff(timeout=None)
 ```
 
 The low-level builtin exposes native primitives under `_retrace`, including
-`wrap_for_space(space_id, callable)`, `run_in_space(...)`, and the callback
-get/set functions used by the public `retrace.callbacks` object.
+`disable(callable)`, `enable(callable)`, `wrap_for_space(space_id, callable)`,
+`run_in_space(...)`, and the callback get/set functions used by the public
+`retrace.callbacks` object.
 
 `coordinates()` returns a tuple of Python `int` values. Values are visible
 Python frame execution coordinates, oldest frame first and current frame last.
@@ -61,7 +65,7 @@ Use `coordinates(None, drop)` to drop coordinates for the current thread.
 
 `with_new_coordinates(callable, *args, **kwargs)` calls `callable` as the root
 of a fresh coordinate space. Outer frames are hidden, the first visible frame
-starts with root ordinal `0`, and the parent thread's root ordinal and delta
+starts with call ordinal `0`, and the parent thread's root ordinal and delta
 state are restored after the call returns or raises.
 
 `thread_delta()` returns a tuple for efficient current-thread deltas. The first
@@ -100,13 +104,15 @@ callbacks use the same signature:
 callback()
 ```
 
-The start callback runs once on a newly started thread after it acquires the GIL
-and before its first Python frame runs; coordinates observed inside it are `()`.
+The start callback runs once on a newly started thread after the threading
+bootstrap has published it and before the target continues; coordinates
+observed inside it are `()`.
 The public property setter registers for root-space thread creation. Use
 `callbacks.set_thread_start(callback, space)` to target threads that inherit a
 different coordinate space.
-The yield callback runs on the current thread just before the eval loop drops
-the GIL in response to a Python-level switch request in root space; use
+The yield callback runs on the current thread just before it drops the GIL,
+including Python-level switch requests and extension/C API releases such as
+`Py_BEGIN_ALLOW_THREADS`, in root space; use
 `callbacks.set_thread_yield(callback, space)` for another coordinate space. The
 resume callback runs on the current thread after it has acquired the GIL and
 restored its current thread state, before application bytecode resumes in root
@@ -207,22 +213,19 @@ logic rather than by hiding frames in CPython.
 The coordinate is an execution coordinate for one exact patched
 interpreter build. It is not a portable Python bytecode count.
 
-The 3.12 implementation stores a per-frame signed coordinate bias and computes
-the current coordinate as:
+The implementation stores a per-frame signed coordinate bias and computes the
+current coordinate as:
 
 ```text
 frame->retrace.coordinate_bias + f_lasti
 ```
 
-The bias is adjusted when bytecode dispatch jumps. The exported coordinate path
-is a pair stream: `(current_call_ordinal, frame_coordinate)` for each visible
-frame. A child frame receives the nearest visible parent's next child ordinal,
-and the parent resets that ordinal lazily when its logical instruction
-coordinate changes. That keeps fallthrough instructions free of extra
-coordinate writes, keeps inline cache entries invisible, and gives repeated
-C-driven callbacks distinct coordinate spaces even when the Python caller is
-suspended at one bytecode offset. Ordinary child calls do not bump or bias the
-parent coordinate.
+The bias is adjusted when bytecode dispatch jumps, including exception-handler
+transfers. The exported coordinate path is a pair stream:
+`(frame_coordinate, current_call_ordinal)` for each visible frame. A child frame
+saves a pointer to the nearest visible parent's active ordinal slot, starts its
+own ordinal at zero, and increments the parent slot when it returns, suspends,
+or unwinds. The parent resets that ordinal before each instruction starts.
 
 `PyThreadState` stores a 64-bit Retrace thread id and records CPython's native
 `_thread.start_new_thread()` ident for bridge lookups. The public id layout is
@@ -233,10 +236,10 @@ so its top 16 bits are zero. New child thread ids are mixed from the creator's
 thread id plus parent cursor, then scoped to the space inherited by the new
 thread. Active-id collision retries remix only the lower 48 hash bits while
 preserving the space prefix.
-`PyThreadState` also stores an internal root activation counter in
-`tstate->retrace.root_coordinate`. If a visible frame starts without a visible
-Python parent, activation assigns the frame's current call ordinal from that
-counter and increments it. This covers C-originated callbacks without exporting a
+`PyThreadState` also stores an internal root activation counter for each
+coordinate space. If a visible frame starts without a visible Python parent,
+activation saves that counter as the frame's parent ordinal slot and increments
+it when the frame exits. This covers C-originated callbacks without exporting a
 separate synthetic root word.
 
 Frames also carry a lazy visible-depth cache. Coordinate snapshot code computes
@@ -255,12 +258,11 @@ struct definitions live in `Include/cpython/retrace_state.h`, which is copied
 from the overlay, so adding Retrace-owned fields normally does not require
 rewriting each CPython-version patch.
 
-Frames carry `uint64_t` state slots at `frame->retrace.last_call_ordinal` and
-`frame->retrace.last_coordinate`. Those slots hold either the `thread_delta()`
-stream's remembered coordinate words or unset sentinels. Linking a frame into
-the active interpreter frame chain refreshes the unset state. The thread uses
-`tstate->retrace.last_root_coordinate` as the delta stream's thread-prefix
-initialization sentinel.
+Frames carry `uint64_t` state slots at `frame->retrace.delta.last_call_ordinal` and
+`frame->retrace.delta.last_instruction_counter`. Those slots hold either the
+`thread_delta()` stream's remembered coordinate words or unset sentinels.
+Linking a frame into the active interpreter frame chain refreshes the unset
+state. Each thread-space keeps its own root delta sentinel.
 
 Patched builds also maintain a fast 64-bit coordinate-location hash. Each
 thread's root hash seed is its Retrace thread id. Each visible frame caches only
@@ -283,13 +285,13 @@ THREAD_YIELD  thread-id, coordinate-delta
 THREAD_RESUME thread-id, coordinate-delta
 ```
 
-The start event describes a thread that acquired the GIL for the first time
-before its first Python frame exists; its cursor is empty. The yield event
-describes a thread reaching an eval-loop handoff point. The resume event
-describes a previously started thread that reacquired the GIL and is about to
-continue running Python bytecode. A newly started thread emits start, then later
-yield/resume events; it does not emit an initial resume. This avoids asking
-CPython to predict the next thread during yield.
+The start event describes a newly started thread after the threading bootstrap
+has published it and before the target continues; its cursor is empty. The yield
+event describes a thread reaching a GIL drop point, including extension/C API
+releases. The resume event describes a previously started thread that reacquired
+the GIL and is about to continue running Python bytecode. A newly started thread
+emits start, then later yield/resume events; it does not emit an initial resume.
+This avoids asking CPython to predict the next thread during yield.
 
 Reentrant delivery is suppressed only for the same thread while its callback is
 already active; other threads may run their own callbacks. Callback errors are

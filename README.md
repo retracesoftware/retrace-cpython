@@ -64,8 +64,11 @@ retrace.coordinates(thread_id=None, drop=0)
 retrace.thread_delta()
 retrace.hash()
 retrace.exclude(callable)
+retrace.disable(callable)
 retrace.include(callable)
+retrace.enable(callable)
 retrace.CoordinateSpace().wrap(callable)
+retrace.run_disabled(callable, *args, **kwargs)
 retrace.with_new_coordinates(callable, *args, **kwargs)
 retrace.callbacks.thread_start = callback_or_none
 retrace.callbacks.set_thread_start(callback_or_none, space=None)
@@ -124,15 +127,17 @@ registered callbacks with `retrace.exclude`. `_retrace` remains the lower-level
 builtin substrate for capability probes and native-oriented tests.
 
 `callbacks.thread_start` stores a no-argument Python callback called once on a
-newly started thread after it acquires the GIL and before its first Python frame
-runs. Coordinates observed inside this callback are `()`. By default, the
-callback applies only to threads created while their creator is in root space.
+newly started thread after the threading bootstrap has published it and before
+the target continues. Coordinates observed inside this callback are `()`. By
+default, the callback applies only to threads created while their creator is in
+root space.
 Use `callbacks.set_thread_start(callback, space)` to target another coordinate
 space, or assign `None` to clear it.
 
 `callbacks.thread_yield` stores a no-argument Python callback called just before
-the eval loop drops the GIL for a Python-level switch request in root space.
-Use `callbacks.set_thread_yield(callback, space)` to target another coordinate
+the current thread drops the GIL, including Python-level switch requests and
+extension/C API releases such as `Py_BEGIN_ALLOW_THREADS`, in root space. Use
+`callbacks.set_thread_yield(callback, space)` to target another coordinate
 space, or assign `None` to clear the root callback.
 
 `callbacks.thread_resume` stores a no-argument Python callback called after a
@@ -164,15 +169,18 @@ do not consume root activation counters or parent child-call ordinals.
 
 `with_new_coordinates(callable, *args, **kwargs)` calls `callable` as the root
 of a fresh coordinate space. Outer frames are hidden, the first visible frame
-starts with root ordinal `0`, and coordinate hashes use the default root hash.
+starts with call ordinal `0`, and coordinate hashes use the default root hash.
 When the callable returns or raises, Retrace restores the parent thread's root
 ordinal and delta state. This helper is intended for same-process record/replay
 tests that need literal thread ids and coordinate roots.
 
 `CoordinateSpace().wrap(callable)` returns a native callable wrapper that runs
 the callable in that coordinate space whenever the wrapper is called. The
-module-level `exclude` and `include` decorators are implemented as wrappers for
-the disabled and root spaces.
+module-level `exclude` and `disable` decorators are implemented as wrappers for
+the disabled space; `include` and `enable` are the corresponding root-space
+wrappers.
+`run_disabled(callable, *args, **kwargs)` is the immediate-run helper for
+executing a callable in the disabled space.
 
 `ThreadHandoff(timeout=None)` creates a replay handoff gate. `handoff.start()`
 registers the current stable `_thread.get_ident()` id, then parks that thread
@@ -353,25 +361,28 @@ where `_PyRetraceFrameState` is:
 
 ```c
 typedef struct {
-    uint32_t coordinate_depth;
+    uint64_t last_call_ordinal;
+    uint64_t last_instruction_counter;
+    _PyRetraceThreadSpaceState *last_delta_space;
+} _PyRetraceFrameDeltaState;
+
+typedef struct {
     int64_t coordinate_bias;
     uint64_t current_call_ordinal;
-    uint64_t next_child_call_ordinal;
-    int64_t child_ordinal_coordinate;
-    uint64_t last_call_ordinal;
-    uint64_t last_coordinate;
+    uint64_t *previous_call_ordinal_ptr;
+    _PyRetraceThreadSpaceState *space;
+    _PyRetraceFrameDeltaState delta;
     uint64_t coordinate_hash;
 } _PyRetraceFrameState;
 ```
 
-`coordinate_depth` is a lazy visible-frame depth cache. `coordinate_bias` is
-the running adjustment that makes `bias + f_lasti` a logical coordinate.
-`current_call_ordinal` is the frame's ordinal within the parent instruction.
-`next_child_call_ordinal` and `child_ordinal_coordinate` lazily assign child
-ordinals and reset that sequence when the parent advances to a new logical
-instruction. `last_call_ordinal` and `last_coordinate` are used by coordinate
-deltas. `coordinate_hash` caches the parent-coordinate hash prefix for the
-frame's current activation.
+`coordinate_bias` is the running adjustment that makes `bias + f_lasti` a
+logical coordinate and survives frame suspension. `current_call_ordinal` is the
+child-activation counter for the frame's current instruction.
+`previous_call_ordinal_ptr` points back to the parent or space-root ordinal slot
+while the frame is active. `space` records the active thread-local coordinate
+space. `delta` groups the coordinate-delta cache fields. `coordinate_hash`
+caches the frame coordinate hash contribution.
 
 `PyThreadState` gets:
 
@@ -461,44 +472,39 @@ fallthrough and branch paths without paying a per-opcode increment.
 The exported frame path is the pair stream:
 
 ```text
-(current_call_ordinal, frame_coordinate)
+(frame_coordinate, current_call_ordinal)
 ```
 
-For a child frame, `current_call_ordinal` is copied from the nearest visible
-parent's `next_child_call_ordinal`, then that parent counter is incremented. The
-parent counter is reset lazily the next time a child is activated after the
-parent's logical instruction coordinate changes. That gives repeated C-driven
-callbacks, such as `map(callback, values)` or
+For a child frame, `previous_call_ordinal_ptr` points at the nearest visible
+parent's active ordinal slot. When the child returns, suspends, or unwinds, that
+saved parent or space-root slot is incremented. The parent counter is reset
+before each parent instruction starts. That gives repeated C-driven callbacks,
+such as `map(callback, values)` or
 `sorted(values, key=lambda value: ...)`, distinct coordinate spaces even when
 their Python caller is parked at one bytecode offset. Ordinary child calls do
 not bump or bias the parent coordinate.
 
-The native layer does not hide ordinary Python frames. Retrace callback frames
-are the exception: they are marked with a transparent call-ordinal sentinel, and
-coordinate/hash walks skip them so callbacks observe the application coordinate
-that caused the callback.
+The native layer does not hide ordinary Python frames. Retrace callback delivery
+pins the application frame that caused the callback, so callbacks observe that
+application coordinate rather than their own callback implementation frames.
 
-Each thread has an internal root activation counter on `PyThreadState`. When a
-visible frame starts without a visible parent, activation assigns the frame's
-`current_call_ordinal` from that counter and increments it. The exported
-coordinate vector therefore stays as the visible frame path without a separate
-synthetic root word or thread-id prefix.
+Each thread-space has an internal root activation counter. When a visible frame
+starts without a visible parent in that space, activation saves that counter as
+the frame's parent slot. When the frame returns, suspends, or unwinds, Retrace
+writes the incremented value back to the space. The exported coordinate vector
+therefore stays as the visible frame path without a separate synthetic root word
+or thread-id prefix.
 
-`frame->retrace.coordinate_depth` is a lazy cache. Coordinate snapshot code
-computes a visible frame's depth from its parent only when needed, then stores
-the result in the frame. Frame activation resets the cache, so normal execution
+Coordinate snapshot code walks visible frames directly. Normal execution
 does not pay for depth maintenance.
 
-`frame->retrace.last_coordinate` holds either the delta stream's remembered
-coordinate or an unset sentinel. Normal frame initialization stores the unset
-sentinel, and linking a frame into the active chain refreshes it.
+`frame->retrace.delta` holds the delta stream's remembered instruction and call
+coordinate words, or unset sentinels. Normal frame initialization stores the
+unset sentinels, and linking a frame into the active chain refreshes them.
 
-`frame->retrace.coordinate_hash` stores the hash prefix inherited from the
-nearest visible parent, or from the thread id root hash.
-The current location hash is computed as
-`mix(mix(frame->retrace.coordinate_hash, current_call_ordinal),
-frame_coordinate)`, exposed as `_retrace.hash()`, so fallthrough and jumps do
-not have to invalidate the cached prefix.
+`frame->retrace.coordinate_hash` is a lazy cache slot for the frame coordinate
+hash contribution. The exported `_retrace.hash()` value is computed from the
+same visible frame coordinate stream returned by `_retrace.coordinates()`.
 
 ### Why Not A Global Bytecode Counter?
 
@@ -546,9 +552,10 @@ THREAD_RESUME
 
 Callbacks receive no thread ids. The callback is running on the thread it is
 describing, so callers can use `_thread.get_ident()`.
-`THREAD_START` describes a newly started thread that has acquired the GIL for
-the first time before its first Python frame exists; its cursor is empty.
-`THREAD_YIELD` describes a thread reaching an eval-loop handoff point.
+`THREAD_START` describes a newly started thread after the threading bootstrap
+has published it and before the target continues; its cursor is empty.
+`THREAD_YIELD` describes a thread reaching a GIL drop point, including
+extension/C API releases.
 `THREAD_RESUME` describes a previously started thread that reacquired the GIL
 and is about to continue running Python bytecode. A newly started thread emits
 start, then later yield/resume events; it does not emit an initial resume. This

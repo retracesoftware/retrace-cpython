@@ -462,9 +462,9 @@ class ThreadScheduleController:
             self.scheduler.close()
 
     def yield_until_turn(self):
-        run_transparent = getattr(self.module, "run_transparent", None)
-        if self.mode == "replay" and run_transparent is not None:
-            run_transparent(self.replay_yield_until_turn)
+        run_disabled = getattr(self.module, "run_disabled", None)
+        if self.mode == "replay" and run_disabled is not None:
+            run_disabled(self.replay_yield_until_turn)
         else:
             self.replay_yield_until_turn()
 

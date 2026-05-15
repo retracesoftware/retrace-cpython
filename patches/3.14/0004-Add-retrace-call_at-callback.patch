@@ -65,16 +65,16 @@ diff --git a/Python/pystate.c b/Python/pystate.c
 index c50014d3086..4ea05c080da 100644
 --- a/Python/pystate.c
 +++ b/Python/pystate.c
-@@ -866,6 +866,12 @@ interpreter_clear(PyInterpreterState *interp, PyThreadState *tstate)
+@@ -866,5 +866,11 @@ interpreter_clear(PyInterpreterState *interp, PyThreadState *tstate)
      Py_CLEAR(interp->retrace.thread_start_callback);
      Py_CLEAR(interp->retrace.thread_yield_callback);
      Py_CLEAR(interp->retrace.thread_resume_callback);
+-
 +    _PyRetrace_ClearSpaceCallbacks(interp);
 +    _PyRetrace_ClearIdentityHashTable(interp);
 +    interp->retrace.call_at_armed = 0;
 +    Py_CLEAR(interp->retrace.call_at_coordinates);
 +    Py_CLEAR(interp->retrace.call_at_callback);
 +    Py_CLEAR(interp->retrace.call_at_overshoot_callback);
-
-     // gh-140257: Threads have already been cleared, but daemon threads may
-     // still access eval_breaker atomically via take_gil() right before they
++
+     Py_CLEAR(interp->audit_hooks);

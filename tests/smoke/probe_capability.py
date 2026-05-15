@@ -590,6 +590,7 @@ def check_c_driven_callback_coordinates(module) -> None:
 def check_no_disable_api(module) -> None:
     assert not hasattr(module, "disable_for")
     assert not hasattr(module, "run_disabled")
+    assert not hasattr(module, "run_transparent")
     assert not hasattr(module, "enable_for")
     assert not hasattr(module, "thread_id")
     assert not hasattr(module, "thread_id_from_ident")

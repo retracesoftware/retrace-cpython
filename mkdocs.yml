@@ -7,6 +7,7 @@ site_dir: build/site
 nav:
   - Overview: index.md
   - Public API: api.md
+  - Coordinate Structure: coordinate-structure.md
   - Coordinate Spaces: coordinate-spaces.md
   - Runtime Package: runtime-package.md
   - Build And Release: build-release.md
@@ -32,6 +33,7 @@ plugins:
           - runtime-package.md: How to consume the PyPI wheel from other projects.
         Public Interfaces:
           - api.md: Public retrace and retracesoftware_cpython Python APIs.
+          - coordinate-structure.md: Exact coordinate tuple layout and call ordinal semantics.
           - coordinate-spaces.md: Proposed coordinate-space model and native implementation contract.
           - probe-abi.md: Private native probe ABI and patched interpreter internals.
         Maintainers:

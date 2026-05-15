@@ -20,14 +20,12 @@ index c6d5e163528..efec34531cf 100644
  #include "pycore_symtable.h"      // PySTEntry_Type
  #include "pycore_typeobject.h"    // _PyBufferWrapper_Type
  #include "pycore_typevarobject.h" // _PyTypeAlias_Type, _Py_initialize_generic
-@@ -2937,6 +2938,7 @@ _Py_Dealloc(PyObject *op)
- #endif
-     _PyReftracerTrack(op, PyRefTracer_DESTROY);
+@@ -2937,3 +2938,4 @@ _Py_Dealloc(PyObject *op)
      (*dealloc)(op);
+-
 +    _PyRetrace_DeleteObjectIdentityHash(op);
-
++
  #ifdef Py_DEBUG
-     // gh-89373: The tp_dealloc function must leave the current exception
 diff --git a/Python/pyhash.c b/Python/pyhash.c
 index 5263622ff31..bac9c47bc5c 100644
 --- a/Python/pyhash.c

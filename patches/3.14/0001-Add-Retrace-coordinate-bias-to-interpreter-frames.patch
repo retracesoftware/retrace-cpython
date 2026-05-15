@@ -7,10 +7,10 @@ Subject: [PATCH 1/9] Add Retrace coordinate bias to interpreter frames
  Include/internal/pycore_interpframe.h         |  2 ++
  Include/internal/pycore_interpframe_structs.h |  2 ++
  Python/bytecodes.c                            |  1 +
- Python/ceval.c                                |  6 ++++++
+ Python/ceval.c                                |  4 ++++
  Python/ceval_macros.h                         | 10 ++++++++--
  Python/generated_cases.c.h                    |  1 +
- 6 files changed, 20 insertions(+), 2 deletions(-)
+ 6 files changed, 18 insertions(+), 2 deletions(-)
 
 diff --git a/Include/internal/pycore_interpframe.h b/Include/internal/pycore_interpframe.h
 index b5b729f141b..e941a746f18 100644
@@ -64,22 +64,20 @@ diff --git a/Python/ceval.c b/Python/ceval.c
 index 377b4644edd..09c373d251d 100644
 --- a/Python/ceval.c
 +++ b/Python/ceval.c
-@@ -1192,9 +1192,14 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *frame, int
+@@ -1192,9 +1192,12 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *frame, int
  #ifdef Py_DEBUG
      entry.frame.lltrace = 0;
  #endif
 +    _PyRetraceFrameState_Init(&entry.frame.retrace);
-+    _PyFrame_RetraceResetCoordinateDepth(&entry.frame);
 +    _PyFrame_RetraceInitializeLastCoordinate(&entry.frame);
      /* Push frame */
      entry.frame.previous = tstate->current_frame;
      frame->previous = &entry.frame;
-+    _PyFrame_RetraceResetCoordinateDepth(frame);
 +    _PyFrame_RetraceResetLastCoordinate(frame);
      tstate->current_frame = frame;
      entry.frame.localsplus[0] = PyStackRef_NULL;
  #ifdef _Py_TIER2
-@@ -1209,6 +1214,7 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *frame, int
+@@ -1209,6 +1212,7 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *frame, int
          if (_Py_EnterRecursivePy(tstate)) {
              goto early_exit;
          }
@@ -130,6 +128,17 @@ diff --git a/Python/generated_cases.c.h b/Python/generated_cases.c.h
 index 9e825c529c9..d3868dde7ac 100644
 --- a/Python/generated_cases.c.h
 +++ b/Python/generated_cases.c.h
+@@ -12460,7 +12460,9 @@ JUMP_TO_LABEL(error);
+             }
+             PyObject *exc = _PyErr_GetRaisedException(tstate);
+             _PyFrame_StackPush(frame, PyStackRef_FromPyObjectSteal(exc));
+-            next_instr = _PyFrame_GetBytecode(frame) + handler;
++            _Py_CODEUNIT *target = _PyFrame_GetBytecode(frame) + handler;
++            _PyFrame_RetraceCoordinateJump(frame, frame->instr_ptr, target);
++            next_instr = target;
+             int err = monitor_handled(tstate, frame, next_instr, exc);
+             if (err < 0) {
+                 JUMP_TO_LABEL(exception_unwind);
 @@ -12508,6 +12508,7 @@ JUMP_TO_LABEL(error);
              if (too_deep) {
                  JUMP_TO_LABEL(exit_unwind);

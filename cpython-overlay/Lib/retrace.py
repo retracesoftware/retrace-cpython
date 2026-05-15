@@ -76,8 +76,9 @@ thread_delta = root_space.thread_delta
 hash = root_space.hash
 exclude = disabled_space.wrap
 include = root_space.wrap
-disable = disabled_space.run
-run_transparent = disabled_space.run
+disable = disabled_space.wrap
+enable = root_space.wrap
+run_disabled = disabled_space.run
 
 
 def with_new_coordinates(callable, /, *args, **kwargs):
@@ -168,11 +169,12 @@ __all__ = [
     "CoordinateSpace",
     "disable",
     "disabled_space",
+    "enable",
     "exclude",
     "hash",
     "include",
     "root_space",
-    "run_transparent",
+    "run_disabled",
     "with_new_coordinates",
     "call_at",
     "thread_delta",

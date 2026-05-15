@@ -132,36 +132,28 @@ index c1ab588..aea2952 100644
      take_gil(tstate);
 +    _PyRetrace_DeliverThreadResumeCallback(tstate, NULL);
  }
-@@ -608,2 +613,4 @@ PyEval_ReleaseLock(void)
+@@ -608,2 +613,3 @@ PyEval_ReleaseLock(void)
      struct _ceval_state *ceval = &tstate->interp->ceval;
-+    (void)_PyRetrace_PinThreadCallbackFrame(
-+        tstate, _PyRetrace_CurrentThreadFrame(tstate));
++    _PyRetrace_DeliverThreadYieldBeforeGilDrop(tstate);
      drop_gil(ceval, tstate);
 @@ -616,2 +623,3 @@ _PyEval_AcquireLock(PyThreadState *tstate)
      take_gil(tstate);
 +    _PyRetrace_DeliverThreadResumeCallback(tstate, NULL);
  }
-@@ -625,2 +633,4 @@ _PyEval_ReleaseLock(PyInterpreterState *interp, PyThreadState *tstate)
-     struct _ceval_state *ceval = &interp->ceval;
-+    (void)_PyRetrace_PinThreadCallbackFrame(
-+        tstate, _PyRetrace_CurrentThreadFrame(tstate));
-     drop_gil(ceval, tstate);
 @@ -638,2 +648,3 @@ PyEval_AcquireThread(PyThreadState *tstate)
      }
 +    _PyRetrace_DeliverThreadResumeCallback(tstate, NULL);
  }
-@@ -646,1 +657,3 @@ PyEval_ReleaseThread(PyThreadState *tstate)
-+    (void)_PyRetrace_PinThreadCallbackFrame(
-+        tstate, _PyRetrace_CurrentThreadFrame(tstate));
+@@ -646,1 +657,2 @@ PyEval_ReleaseThread(PyThreadState *tstate)
++    _PyRetrace_DeliverThreadYieldBeforeGilDrop(tstate);
      PyThreadState *new_tstate = _PyThreadState_SwapNoGIL(NULL);
-@@ -693,5 +705,7 @@ PyEval_SaveThread(void)
+@@ -693,5 +705,6 @@ PyEval_SaveThread(void)
  {
 -    PyThreadState *tstate = _PyThreadState_SwapNoGIL(NULL);
 +    PyThreadState *tstate = _PyThreadState_GET();
      _Py_EnsureTstateNotNULL(tstate);
 -
-+    (void)_PyRetrace_PinThreadCallbackFrame(
-+        tstate, _PyRetrace_CurrentThreadFrame(tstate));
++    _PyRetrace_DeliverThreadYieldBeforeGilDrop(tstate);
 +    tstate = _PyThreadState_SwapNoGIL(NULL);
      struct _ceval_state *ceval = &tstate->interp->ceval;
 @@ -710,2 +724,3 @@ PyEval_RestoreThread(PyThreadState *tstate)

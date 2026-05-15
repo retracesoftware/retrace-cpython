@@ -12,7 +12,13 @@ THREAD_ID_SPACE_MASK = (1 << 16) - 1
 
 def require_wrappers(module):
     missing = [
-        name for name in ("exclude", "include", "with_new_coordinates")
+        name for name in (
+            "disable",
+            "enable",
+            "exclude",
+            "include",
+            "with_new_coordinates",
+        )
         if not hasattr(module, name)
     ]
     if missing:
@@ -64,6 +70,52 @@ def check_include_decorator(module):
     assert len(hidden_coords) == len(before)
     assert len(included_coords) == len(before) + 2
     assert len(after_include) == len(before)
+    assert len(after) == len(before)
+
+
+def check_disable_enable_decorators(module):
+    calls = []
+
+    def child():
+        return module.coordinates()
+
+    @module.disable
+    def hidden(value):
+        calls.append(value)
+        return module.coordinates(), child(), value
+
+    assert calls == []
+    assert inspect.unwrap(hidden).__name__ == "hidden"
+
+    def visible():
+        before = module.coordinates()
+        hidden_coords, child_coords, value = hidden(17)
+        after = module.coordinates()
+        return before, hidden_coords, child_coords, value, after
+
+    before, hidden_coords, child_coords, value, after = visible()
+    assert value == 17
+    assert calls == [17]
+    assert len(hidden_coords) == len(before)
+    assert len(child_coords) == len(before)
+    assert len(after) == len(before)
+
+    @module.enable
+    def visible_leaf():
+        return module.coordinates()
+
+    @module.disable
+    def disabled_parent():
+        disabled_coords = module.coordinates()
+        enabled_coords = visible_leaf()
+        return disabled_coords, enabled_coords, module.coordinates()
+
+    before = module.coordinates()
+    disabled_coords, enabled_coords, after_enable = disabled_parent()
+    after = module.coordinates()
+    assert len(disabled_coords) == len(before)
+    assert len(enabled_coords) == len(before) + 2
+    assert len(after_enable) == len(before)
     assert len(after) == len(before)
 
 
@@ -138,22 +190,6 @@ def check_exception_restores_state(module):
         raise AssertionError("excluded callable did not raise")
     after = visible_len()
     assert after == before
-
-
-def check_run_transparent(module):
-    def visible():
-        before = module.coordinates()
-
-        def hidden():
-            return module.coordinates()
-
-        inside = module.run_transparent(hidden)
-        after = module.coordinates()
-        return before, inside, after
-
-    before, inside, after = visible()
-    assert len(inside) == len(before)
-    assert len(after) == len(before)
 
 
 def check_with_new_coordinates(module):
@@ -317,9 +353,9 @@ def main() -> int:
 
     check_exclude_decorator(module)
     check_include_decorator(module)
+    check_disable_enable_decorators(module)
     check_method_binding(module)
     check_exception_restores_state(module)
-    check_run_transparent(module)
     check_with_new_coordinates(module)
     check_with_new_coordinates_restores_after_exception(module)
     check_with_new_coordinates_thread_ids(module)
@@ -329,8 +365,9 @@ def main() -> int:
     print("coordinate_wrappers=available")
     print("coordinate_exclude=available")
     print("coordinate_include=available")
+    print("coordinate_disable=available")
+    print("coordinate_enable=available")
     print("coordinate_wrapper_methods=available")
-    print("run_transparent=available")
     print("with_new_coordinates=available")
     return 0
 

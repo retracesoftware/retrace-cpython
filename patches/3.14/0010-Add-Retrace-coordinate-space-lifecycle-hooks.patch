@@ -28,35 +28,19 @@ index e1a3646..315b9f9 100644
 @@ -82,9 +82,14 @@
          if (_Py_stats) _Py_stats->opcode_stats[lastopcode].pair_count[op]++; \
          lastopcode = op; \
-         RETRACE_CALL_AT(); \
 +        _PyRetrace_BeginInstruction(tstate, frame, op); \
+         RETRACE_CALL_AT(); \
      } while (0)
  #else
 -#define INSTRUCTION_STATS(op) RETRACE_CALL_AT()
 +#define INSTRUCTION_STATS(op) \
 +    do { \
-+        RETRACE_CALL_AT(); \
 +        _PyRetrace_BeginInstruction(tstate, frame, op); \
++        RETRACE_CALL_AT(); \
 +    } while (0)
  #endif
  
  #ifdef Py_STATS
-@@ -178,6 +183,7 @@ do { \
- #define DISPATCH() \
-     { \
-         assert(frame->stackpointer == NULL); \
-+        _PyRetrace_EndInstruction(tstate, frame); \
-         NEXTOPARG(); \
-         PRE_DISPATCH_GOTO(); \
-         DISPATCH_GOTO(); \
-@@ -185,6 +191,7 @@ do { \
- 
- #define DISPATCH_SAME_OPARG() \
-     { \
-+        _PyRetrace_EndInstruction(tstate, frame); \
-         opcode = next_instr->op.code; \
-         PRE_DISPATCH_GOTO(); \
-         DISPATCH_GOTO(); \
 diff --git a/Python/generated_cases.c.h b/Python/generated_cases.c.h
 index d77deec..013f045 100644
 --- a/Python/generated_cases.c.h
@@ -85,14 +69,5 @@ index d77deec..013f045 100644
              frame = tstate->current_frame = frame->previous;
              gen_frame->previous = NULL;
              assert(INLINE_CACHE_ENTRIES_SEND == INLINE_CACHE_ENTRIES_FOR_ITER);
-@@ -12400,6 +12403,7 @@ JUMP_TO_LABEL(error);
- 
-         LABEL(error)
-         {
-+            _PyRetrace_EndInstruction(tstate, frame);
-             #ifdef NDEBUG
-             if (!_PyErr_Occurred(tstate)) {
-                 _PyFrame_SetStackPointer(frame, stack_pointer);
 -- 
 2.50.1 (Apple Git-155)
-

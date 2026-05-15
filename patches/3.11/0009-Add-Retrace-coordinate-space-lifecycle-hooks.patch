@@ -15,34 +15,18 @@ index 4031a08..6584cc8 100644
 @@ -1332,12 +1332,14 @@ eval_frame_handle_pending(PyThreadState *tstate, _PyInterpreterFrame *frame)
          _py_stats.opcode_stats[lastopcode].pair_count[op]++; \
          lastopcode = op; \
-         RETRACE_CALL_AT(); \
 +        _PyRetrace_BeginInstruction(tstate, frame, op); \
+         RETRACE_CALL_AT(); \
      } while (0)
  #else
  #define INSTRUCTION_START(op) \
      do { \
          frame->prev_instr = next_instr++; \
-         RETRACE_CALL_AT(); \
 +        _PyRetrace_BeginInstruction(tstate, frame, op); \
+         RETRACE_CALL_AT(); \
      } while (0)
  #endif
  
-@@ -1361,6 +1363,7 @@ eval_frame_handle_pending(PyThreadState *tstate, _PyInterpreterFrame *frame)
- /* Do interpreter dispatch accounting for tracing and instrumentation */
- #define DISPATCH() \
-     { \
-+        _PyRetrace_EndInstruction(tstate, frame); \
-         NEXTOPARG(); \
-         PRE_DISPATCH_GOTO(); \
-         assert(cframe.use_tracing == 0 || cframe.use_tracing == 255); \
-@@ -1370,6 +1373,7 @@ eval_frame_handle_pending(PyThreadState *tstate, _PyInterpreterFrame *frame)
- 
- #define DISPATCH_SAME_OPARG() \
-     { \
-+        _PyRetrace_EndInstruction(tstate, frame); \
-         opcode = _Py_OPCODE(*next_instr); \
-         PRE_DISPATCH_GOTO(); \
-         opcode |= cframe.use_tracing OR_DTRACE_LINE; \
 @@ -2478,6 +2482,7 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *frame, int
              TRACE_FUNCTION_EXIT();
              DTRACE_FUNCTION_EXIT();
@@ -67,14 +51,6 @@ index 4031a08..6584cc8 100644
              if (!frame->is_entry) {
                  _PyInterpreterFrame *prev = frame->previous;
                  _PyThreadState_PopFrame(tstate, frame);
-@@ -5787,6 +5794,7 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *frame, int
-         }
- 
- error:
-+        _PyRetrace_EndInstruction(tstate, frame);
-         call_shape.kwnames = NULL;
-         /* Double-check exception status. */
- #ifdef NDEBUG
 @@ -5871,6 +5879,7 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *frame, int
  exit_unwind:
      assert(_PyErr_Occurred(tstate));
@@ -105,4 +81,3 @@ index 3ea3a2c..aaafbb8 100644
      dest->previous = NULL;
 -- 
 2.50.1 (Apple Git-155)
-

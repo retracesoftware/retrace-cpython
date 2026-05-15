@@ -34,7 +34,7 @@ def run_busy_loop(stop, ready=None):
     return value
 
 
-def check_thread_start_callback_before_first_frame_is_empty(module):
+def check_thread_start_callback_cursor_is_empty(module):
     old_interval = sys.getswitchinterval()
     sys.setswitchinterval(1e-6)
 
@@ -113,11 +113,11 @@ def check_thread_start_callback_before_first_frame_is_empty(module):
     assert child_hits, (child_ident, start_hits)
 
     first_child_hit = child_hits[0]
-    assert first_child_hit["coordinates"] is None, first_child_hit
-    assert first_child_hit["delta"] is None, first_child_hit
+    assert first_child_hit["coordinates"] == (), first_child_hit
+    assert first_child_hit["delta"] == (0,), first_child_hit
     assert first_child_hit["helper_coordinates"], first_child_hit
     assert all(
-        coordinates is None
+        coordinates == ()
         for coordinates in first_child_hit["helper_coordinates"]
     ), first_child_hit
     assert not first_child_hit["worker_entered"], first_child_hit
@@ -268,6 +268,56 @@ def check_schedule_callback_space_filter(module):
         sys.setswitchinterval(old_interval)
 
     assert not errors, errors
+
+
+def check_extension_gil_drop_callbacks(module):
+    events = []
+    errors = []
+    lock = threading.Lock()
+    done = threading.Event()
+    worker_idents = []
+
+    def note(kind):
+        try:
+            with lock:
+                events.append((kind, _thread.get_ident()))
+        except BaseException as exc:
+            errors.append((kind, repr(exc)))
+
+    def worker():
+        try:
+            worker_idents.append(_thread.get_ident())
+            note("before")
+            time.sleep(0)
+            note("after")
+        except BaseException as exc:
+            errors.append(("worker", repr(exc)))
+        finally:
+            done.set()
+
+    try:
+        module.set_thread_yield_callback(lambda: note("yield"))
+        module.set_thread_resume_callback(lambda: note("resume"))
+        _thread.start_new_thread(worker, ())
+        assert done.wait(5.0), "worker did not finish"
+    finally:
+        module.set_thread_yield_callback(None)
+        module.set_thread_resume_callback(None)
+
+    assert not errors, errors
+    assert worker_idents, events
+    child = worker_idents[0]
+    child_events = [kind for kind, ident in events if ident == child]
+    before_index = child_events.index("before")
+    after_index = child_events.index("after")
+    between = child_events[before_index + 1:after_index]
+    assert "yield" in between, (child, events, child_events)
+    yield_index = between.index("yield")
+    assert "resume" in between[yield_index + 1:], (
+        child,
+        events,
+        child_events,
+    )
 
 
 def check_call_at_hits_intended_thread(module):
@@ -532,7 +582,10 @@ def check_schedule_callback_identities(module):
 
     assert not errors, errors
     assert hits, "no scheduling callbacks observed"
-    unknown = [hit for hit in hits if not (hit[2] or hit[3])]
+    unknown = [
+        hit for hit in hits
+        if not (hit[2] or hit[3]) and hit[1] not in worker_idents
+    ]
     assert not unknown, unknown[:10]
     assert worker_idents & {ident for _kind, ident, _active, _limbo in hits}, (
         worker_idents,
@@ -564,9 +617,10 @@ def main() -> int:
     check_call_at_hits_intended_thread(module)
     check_call_at_overshoot(module)
     check_call_at_past_overshoot(module)
-    check_thread_start_callback_before_first_frame_is_empty(module)
+    check_thread_start_callback_cursor_is_empty(module)
     check_thread_start_callback_space_filter(module)
     check_schedule_callback_space_filter(module)
+    check_extension_gil_drop_callbacks(module)
     check_thread_delta_is_per_thread(module)
     check_schedule_callback_identities(module)
 
@@ -577,6 +631,7 @@ def main() -> int:
     print("thread_start_callback_empty_bootstrap_cursor=available")
     print("thread_start_callback_space_filter=available")
     print("schedule_callback_space_filter=available")
+    print("extension_gil_drop_callbacks=available")
     print("thread_delta_per_thread=available")
     print("schedule_callback_identity=available")
     return 0

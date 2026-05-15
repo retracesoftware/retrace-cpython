@@ -28,8 +28,14 @@ Other spaces are used for control-plane execution. For example, a disabled
 space can replace the older idea of suppressing coordinates:
 
 ```python
-retrace.disable(fn, *args, **kwargs)
-# equivalent to
+disabled_fn = retrace.disable(fn)
+# or
+@retrace.disable
+def control_plane_helper():
+    ...
+
+retrace.run_disabled(fn, *args, **kwargs)
+# equivalent immediate-run form:
 retrace.disabled_space.run(fn, *args, **kwargs)
 ```
 
@@ -58,11 +64,17 @@ frame contributes two words:
 ```
 
 A coordinate set names a dynamic Python execution point, not a source location.
-For every frame in the tuple, `instruction_counter` is the number of bytecode
-instructions whose execution has ended in that frame. This includes bytecodes
-that finish normally, return, yield, raise, transfer to an exception handler, or
-unwind the frame. The frame's current bytecode activation is therefore bytecode
-number `instruction_counter`.
+For every frame in the tuple, `instruction_counter` is the logical instruction
+coordinate computed from CPython's current instruction pointer plus a Retrace
+bias:
+
+```text
+frame->retrace.coordinate_bias + _PyInterpreterFrame_LASTI(frame)
+```
+
+The bias is adjusted at jump sites so branch targets receive the next logical
+coordinate after the jump rather than reusing the raw bytecode offset. Ordinary
+fallthrough execution does not write a separate counter.
 
 For the leaf frame at a `call_at` callback boundary, that bytecode has not
 started yet: the callback is running immediately before the evaluator executes
@@ -72,57 +84,48 @@ already in progress and has activated the next frame in the tuple. For a manual
 may also be in progress, because the call is sampled from inside the bytecode
 that invoked the C function.
 
-After bytecode number `instruction_counter` exits its opcode body, the frame
-moves to `instruction_counter + 1` before any next callback boundary or before
-the frame is detached. There is no separate "after this bytecode" coordinate
-other than the next bytecode activation.
+There is no separate "after this bytecode" coordinate. The next boundary is
+whatever CPython's instruction pointer names next, adjusted by the current
+Retrace bias.
 
-`call_ordinal` is initialized from the parent ordinal slot when a frame is
-entered or resumed. The parent slot is either the nearest active parent frame's
+`call_ordinal` is the child-activation counter for a frame's current bytecode
+instruction. When a frame is entered or resumed, it saves a pointer to the
+parent ordinal slot. The parent slot is either the nearest active parent frame's
 `call_ordinal` or the thread-space `root_call_ordinal` when the frame is a root
-frame for that space. After activation, the same field is the child-activation
-counter for that frame's current bytecode instruction. If an instruction
-activates multiple direct Python frames before it finishes, the first child runs
-while the parent has `call_ordinal == 0`, the second child runs while the parent
-has `call_ordinal == 1`, and so on. The parent or space-root ordinal slot is
-incremented exactly once when the child frame returns, suspends, or unwinds.
+frame for that space. A new frame starts its own `call_ordinal` at zero. If an
+instruction activates multiple direct Python frames before it finishes, the
+first child runs while the parent has `call_ordinal == 0`, the second child runs
+while the parent has `call_ordinal == 1`, and so on. The parent or space-root
+ordinal slot is incremented exactly once when the child frame returns, suspends,
+or unwinds.
 
-`instruction_counter` is not a bytecode offset, line number, or source
-position. It is an execution counter. Jumps do not bias or rebase it; they only
-affect which CPython bytecode will be executed next after the boundary.
+`instruction_counter` is not a line number or source position. It is local to
+one exact patched interpreter build and follows that build's instruction
+pointer layout plus Retrace's jump bias.
 
-`call_ordinal` is reset to zero after a bytecode that could have activated
-Python finishes. Bytecodes that cannot activate Python do not need to reset it,
-because they cannot have changed it.
+`call_ordinal` is reset to zero before each instruction starts. This preserves
+multiple child activations within one parent instruction, while starting each
+later instruction from ordinal zero.
 
-The bytecode loop has two coordinate boundaries. Before each instruction, it
-checks callbacks for the active frame's current coordinate. After every bytecode
-activation exits its opcode body, including exception paths, it advances frame
-progress exactly once:
+Before each instruction, the bytecode loop updates the active frame's ordinal
+state for the current biased instruction coordinate, then checks callbacks:
 
 ```c
+_PyRetrace_BeginInstruction(tstate, frame, opcode);
 _PyRetrace_MaybeFireCallbacks(tstate, frame);
-/* execute one bytecode instruction, including any exception path */
-frame->retrace.instruction_counter++;
-if (opcode_may_activate_python) {
-    frame->retrace.call_ordinal = 0;
-}
 ```
 
-`opcode_may_activate_python` is a patch-site classification, not necessarily a
-runtime helper. It means the opcode may call, resume, or otherwise enter Python
-while the current frame remains active. This includes explicit call opcodes,
-iterator and await/send paths, descriptor and attribute operations, subscripting,
-numeric/comparison/formatting protocols, imports, context-manager entry or exit,
-and other C API paths that can invoke Python callbacks. The exact opcode names
-are CPython-version-specific, so each release patch should make the reset at the
-least invasive version-specific injection points.
+Jump sites update the bias when they redirect `next_instr`:
 
-Exception paths are not transparent to the counter. If an opcode raises and the
-same frame handles the exception, the instruction counter is incremented before
-the handler becomes the next observable boundary. If an opcode raises and the
-frame unwinds, the instruction counter is incremented before the frame is
-detached and its parent or space-root ordinal slot is incremented.
+```c
+_PyFrame_RetraceCoordinateJump(frame, current_instr, target_instr);
+```
+
+Exception-handler transfers are jumps for this purpose. If an opcode raises and
+the same frame handles the exception, the transition to the handler must update
+the bias before the handler becomes the next observable boundary. If an opcode
+raises and the frame unwinds, the frame is detached and its parent or space-root
+ordinal slot is incremented.
 
 Callbacks are observed at the before-next-instruction boundary. New frames start
 at boundary `(0, 0)`, so coordinate zero is observable and can be targeted.
@@ -136,7 +139,7 @@ callbacks are distinguished by the parent frame's ordinal:
 
 ```text
 first callback:  (..., (12, 0), (0, 0))
-second callback: (..., (12, 1), (0, 1))
+second callback: (..., (12, 1), (0, 0))
 parent resumes before next instruction: (..., (13, 0))
 ```
 
@@ -214,10 +217,10 @@ target in the root space.
 The native implementation should keep `_retrace` lean and put most public
 shape in `retrace.py`.
 
-This model should replace the existing coordinate-bias model across every
-supported patch stack in one migration: 3.11, 3.12, 3.13, and 3.14. Do not keep
-the old bias/sentinel coordinate semantics for older supported versions while
-newer versions use spaces.
+This model should be consistent across every supported patch stack in one
+migration: 3.11, 3.12, 3.13, and 3.14. Do not keep one instruction-progress
+scheme for older supported versions while newer versions use the space-aware
+`coordinate_bias + f_lasti` contract.
 
 `retrace.py` exposes `CoordinateSpace` objects:
 
@@ -231,7 +234,9 @@ thread_delta = root_space.thread_delta
 call_at = root_space.call_at
 exclude = disabled_space.wrap
 include = root_space.wrap
-disable = disabled_space.run
+disable = disabled_space.wrap
+enable = root_space.wrap
+run_disabled = disabled_space.run
 ```
 
 `space.wrap(fn)` returns a native callable wrapper. When the wrapper is called,
@@ -314,54 +319,45 @@ semantics:
 
 ```c
 typedef struct {
-    uint64_t instruction_counter;          /* persists across suspension */
+    uint64_t last_call_ordinal;
+    uint64_t last_instruction_counter;
+    _PyRetraceThreadSpaceState *last_delta_space;
+} _PyRetraceFrameDeltaState;
+
+typedef struct {
+    int64_t coordinate_bias;               /* persists across suspension */
     _PyRetraceThreadSpaceState *space;     /* active only */
     uint64_t current_call_ordinal;         /* active only */
     uint64_t *previous_call_ordinal_ptr;   /* active only */
-    uint64_t last_instruction_counter;
-    uint64_t last_call_ordinal;
-    _PyRetraceThreadSpaceState *last_delta_space;
+    _PyRetraceFrameDeltaState delta;       /* thread_delta cache */
     uint64_t coordinate_hash;
-    unsigned char instruction_active;
-    unsigned char instruction_may_activate_python;
 } _PyRetraceFrameState;
 ```
 
-Suspended frames keep `instruction_counter`. Their `space`, `call_ordinal`, and
+Suspended frames keep `coordinate_bias`. Their `space`, `call_ordinal`, and
 `previous_call_ordinal_ptr` are cleared or treated as inactive. On resume, the
 frame is patched into the current thread and space.
 
 The bytecode-loop patch for each CPython release should follow this checklist:
 
-1. Fire retrace callbacks before executing the next bytecode instruction.
-2. Increment `instruction_counter` exactly once after every bytecode activation,
-   including normal completion, return, yield, handled exceptions, and frame
-   unwind.
-3. Reset `call_ordinal` to zero only after opcodes that may activate Python
-   while the current frame remains active.
-4. Keep the reset after the opcode has completed all nested activations and
-   before the next callback check.
-5. Initialize an entered or resumed frame's `call_ordinal` from the current
-   parent or space-root ordinal pointer, then point the thread state's
+1. Update the frame's instruction-start state before firing retrace callbacks
+   for the next bytecode instruction.
+2. Compute the frame coordinate as `coordinate_bias + f_lasti`.
+3. Adjust `coordinate_bias` at jumps, including exception-handler transfers, so
+   the target instruction receives the logical coordinate after the jump.
+4. Reset the active frame's `call_ordinal` to zero before the next callback
+   check for each instruction.
+5. Initialize an entered or resumed frame's `call_ordinal` to zero, save the
+   current parent or space-root ordinal pointer, then point the thread state's
    `call_ordinal_ptr` at the frame's own `call_ordinal`.
 6. Increment the saved parent or space-root ordinal slot exactly once when a
    frame returns, suspends, or unwinds.
-7. Do not use instruction bias, jump-specific coordinate adjustment, or
-   transparent-frame sentinels.
-
-The current overlay keeps this patch-site shape but conservatively classifies
-every opcode as "may activate Python". That is semantically correct because
-opcodes that cannot activate Python cannot make the ordinal non-zero; a later
-version can tighten the classification without changing the coordinate model.
 
 Frame enter or resume:
 
 ```c
 frame->retrace.space = tstate->retrace.current_space;
-frame->retrace.current_call_ordinal =
-    tstate->retrace.call_ordinal_ptr != NULL
-    ? *tstate->retrace.call_ordinal_ptr
-    : 0;
+frame->retrace.current_call_ordinal = 0;
 frame->retrace.previous_call_ordinal_ptr =
     tstate->retrace.call_ordinal_ptr;
 tstate->retrace.call_ordinal_ptr = &frame->retrace.current_call_ordinal;
@@ -440,8 +436,9 @@ emitted coordinate words for the same active space. Querying or updating deltas
 for one space must not invalidate the delta stream for another space on the
 same thread.
 
-This design removes the need for coordinate bias, jump-specific coordinate
-adjustment, transparent-frame sentinels, child-ordinal reset fields, and
-space-specific behavior in C. Root and disabled become public-space conventions,
-while the native evaluator sees only numeric space ids and per-thread space
-state.
+This design keeps coordinate bias as the only instruction-progress state on the
+frame. It removes the need for a separate per-opcode instruction counter,
+instruction-active guard, opcode classification table, transparent-frame
+sentinels, and space-specific behavior in C. Root and disabled become
+public-space conventions, while the native evaluator sees only numeric space ids
+and per-thread space state.

@@ -213,15 +213,66 @@ def check_coordinate_spaces(public):
 
     assert public.disabled_space.coordinates() is None
 
+    calls = []
+
     def disabled_leaf():
+        calls.append("disabled_leaf")
         return public.disabled_space.coordinates(), public.coordinates()
 
-    disabled_coordinates, root_from_disabled = public.disable(disabled_leaf)
+    disabled_wrapped = public.disable(disabled_leaf)
+    assert inspect.unwrap(disabled_wrapped) is disabled_leaf
+    assert calls == []
+    disabled_coordinates, root_from_disabled = disabled_wrapped()
+    assert calls == ["disabled_leaf"]
     assert type(disabled_coordinates) is tuple
     assert len(disabled_coordinates) >= 2
     assert len(disabled_coordinates) % 2 == 0
     assert type(root_from_disabled) is tuple
     assert len(root_from_disabled) >= 2
+
+    @public.disable
+    def decorated_disabled_leaf():
+        return public.disabled_space.coordinates(), public.coordinates()
+
+    decorated_disabled, decorated_root = decorated_disabled_leaf()
+    assert type(decorated_disabled) is tuple
+    assert len(decorated_disabled) >= 2
+    assert len(decorated_disabled) % 2 == 0
+    assert type(decorated_root) is tuple
+    assert len(decorated_root) >= 2
+
+    def immediate_disabled_leaf():
+        calls.append("immediate_disabled_leaf")
+        return public.disabled_space.coordinates(), public.coordinates()
+
+    immediate_disabled, immediate_root = public.run_disabled(
+        immediate_disabled_leaf)
+    assert calls[-1:] == ["immediate_disabled_leaf"]
+    assert type(immediate_disabled) is tuple
+    assert len(immediate_disabled) >= 2
+    assert len(immediate_disabled) % 2 == 0
+    assert type(immediate_root) is tuple
+    assert len(immediate_root) >= 2
+
+    @public.enable
+    def enabled_leaf():
+        return public.coordinates()
+
+    @public.disable
+    def disabled_parent():
+        disabled_before = public.coordinates()
+        enabled_coordinates = enabled_leaf()
+        disabled_after = public.coordinates()
+        return disabled_before, enabled_coordinates, disabled_after
+
+    before = public.coordinates()
+    disabled_before, enabled_coordinates, disabled_after = disabled_parent()
+    after = public.coordinates()
+    assert type(disabled_before) is tuple
+    assert len(disabled_before) >= 2
+    assert len(enabled_coordinates) == len(before) + 2
+    assert len(disabled_after) == len(disabled_before)
+    assert len(after) == len(before)
 
 
 def check_space_wrappers(public, native):
@@ -282,13 +333,23 @@ def main() -> int:
     assert public.exclude.__self__ is public.disabled_space
     assert public.include.__self__ is public.root_space
     assert public.disable.__self__ is public.disabled_space
+    assert public.enable.__self__ is public.root_space
+    assert public.run_disabled.__self__ is public.disabled_space
     assert public.call_at is not getattr(native, "call_at")
     assert public.ThreadHandoff is native.ThreadHandoff
+    assert hasattr(native, "disable")
+    assert hasattr(native, "enable")
+    assert not hasattr(native, "run_disabled")
+    assert not hasattr(native, "run_transparent")
     assert "call_at" in public.__all__
     assert "callbacks" in public.__all__
     assert "CoordinateSpace" in public.__all__
     assert "disable" in public.__all__
+    assert "enable" in public.__all__
+    assert "run_disabled" in public.__all__
+    assert "run_transparent" not in public.__all__
     assert "with_new_coordinates" in public.__all__
+    assert not hasattr(public, "run_transparent")
     assert not hasattr(public, "set_replay_checkpoint")
     assert not hasattr(public, "set_thread_start_callback")
     assert not hasattr(public, "get_thread_start_callback")

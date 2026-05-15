@@ -26,14 +26,6 @@ diff --git a/Python/ceval.c b/Python/ceval.c
 index d3228f7..c2efd28 100644
 --- a/Python/ceval.c
 +++ b/Python/ceval.c
-@@ -870,6 +870,7 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *frame, int
- pop_1_error:
-     STACK_SHRINK(1);
- error:
-+        _PyRetrace_EndInstruction(tstate, frame);
-         /* Double-check exception status. */
- #ifdef NDEBUG
-         if (!_PyErr_Occurred(tstate)) {
 @@ -1713,6 +1714,7 @@ clear_gen_frame(PyThreadState *tstate, _PyInterpreterFrame * frame)
  void
  _PyEval_FrameClearAndPop(PyThreadState *tstate, _PyInterpreterFrame * frame)
@@ -49,35 +41,19 @@ index f734117..e6f404d 100644
 @@ -82,9 +82,14 @@
          if (_Py_stats) _Py_stats->opcode_stats[lastopcode].pair_count[op]++; \
          lastopcode = op; \
-         RETRACE_CALL_AT(); \
 +        _PyRetrace_BeginInstruction(tstate, frame, op); \
+         RETRACE_CALL_AT(); \
      } while (0)
  #else
 -#define INSTRUCTION_STATS(op) RETRACE_CALL_AT()
 +#define INSTRUCTION_STATS(op) \
 +    do { \
-+        RETRACE_CALL_AT(); \
 +        _PyRetrace_BeginInstruction(tstate, frame, op); \
++        RETRACE_CALL_AT(); \
 +    } while (0)
  #endif
  
  #if USE_COMPUTED_GOTOS
-@@ -125,6 +130,7 @@ do { \
- /* Do interpreter dispatch accounting for tracing and instrumentation */
- #define DISPATCH() \
-     { \
-+        _PyRetrace_EndInstruction(tstate, frame); \
-         NEXTOPARG(); \
-         PRE_DISPATCH_GOTO(); \
-         DISPATCH_GOTO(); \
-@@ -132,6 +138,7 @@ do { \
- 
- #define DISPATCH_SAME_OPARG() \
-     { \
-+        _PyRetrace_EndInstruction(tstate, frame); \
-         opcode = next_instr->op.code; \
-         PRE_DISPATCH_GOTO(); \
-         DISPATCH_GOTO(); \
 diff --git a/Python/generated_cases.c.h b/Python/generated_cases.c.h
 index ad49bec..d315b20 100644
 --- a/Python/generated_cases.c.h
@@ -108,4 +84,3 @@ index ad49bec..d315b20 100644
              /* We don't know which of these is relevant here, so keep them equal */
 -- 
 2.50.1 (Apple Git-155)
-

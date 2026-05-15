@@ -5,8 +5,8 @@ Subject: [PATCH 1/6] Add Retrace coordinate bias to interpreter frames
 
 ---
  Include/internal/pycore_frame.h |  6 ++++++
- Python/ceval.c                  | 21 +++++++++++++++++++--
- 2 files changed, 25 insertions(+), 2 deletions(-)
+ Python/ceval.c                  | 20 ++++++++++++++++++--
+ 2 files changed, 24 insertions(+), 2 deletions(-)
 
 diff --git a/Include/internal/pycore_frame.h b/Include/internal/pycore_frame.h
 index 4866ea2..1e40ec5 100644
@@ -61,16 +61,15 @@ index 1ce6bbc..f1d1fed 100644
 
  // Skip from a PRECALL over a CALL to the next instruction:
  #define SKIP_CALL() \
-@@ -1664,6 +1674,8 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *frame, int
+@@ -1664,6 +1674,7 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *frame, int
      frame->is_entry = true;
      /* Push frame */
      frame->previous = prev_cframe->current_frame;
-+    _PyFrame_RetraceResetCoordinateDepth(frame);
 +    _PyFrame_RetraceResetLastCoordinate(frame);
      cframe.current_frame = frame;
 
      /* support for generator.throw() */
-@@ -1672,6 +1684,7 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *frame, int
+@@ -1672,6 +1683,7 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *frame, int
              tstate->recursion_remaining--;
              goto exit_unwind;
          }
@@ -78,7 +77,7 @@ index 1ce6bbc..f1d1fed 100644
          TRACE_FUNCTION_THROW_ENTRY();
          DTRACE_FUNCTION_ENTRY();
          goto resume_with_error;
-@@ -1712,6 +1725,7 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *frame, int
+@@ -1712,6 +1724,7 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *frame, int
          tstate->recursion_remaining--;
          goto exit_unwind;
      }
@@ -86,7 +85,7 @@ index 1ce6bbc..f1d1fed 100644
 
  resume_frame:
      SET_LOCALS_FROM_FRAME();
-@@ -5642,6 +5656,7 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *frame, int
+@@ -5642,6 +5655,7 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *frame, int
                      int err;
                      /* see maybe_call_line_trace()
                      for expository comments */
@@ -94,7 +93,7 @@ index 1ce6bbc..f1d1fed 100644
                      _PyFrame_SetStackPointer(frame, stack_pointer);
 
                      err = maybe_call_line_trace(tstate->c_tracefunc,
-@@ -5666,6 +5681,8 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *frame, int
+@@ -5666,6 +5680,8 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *frame, int
                      // Reload next_instr. Don't increment it, though, since
                      // we're going to re-dispatch to the "true" instruction now:
                      next_instr = frame->prev_instr;

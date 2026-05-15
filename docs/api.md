@@ -90,10 +90,12 @@ thread id. If unset, the literal string `retrace` is used.
 
 ```python
 @retrace.exclude
+@retrace.disable
 def control_plane_helper():
     ...
 
 @retrace.include
+@retrace.enable
 def application_visible_callback():
     ...
 
@@ -101,13 +103,16 @@ space = retrace.CoordinateSpace()
 wrapped = space.wrap(workload)
 ```
 
-`exclude(callable)` returns a wrapper whose frames are transparent to
-coordinates, deltas, and hashes. It is intended for Retrace control-plane code.
+`exclude(callable)` and `disable(callable)` return wrappers whose frames are
+transparent to coordinates, deltas, and hashes. They are intended for Retrace
+control-plane code.
 
-`include(callable)` returns a wrapper that re-enters application-visible
-coordinate space when called from transparent callback code.
+`include(callable)` and `enable(callable)` return wrappers that re-enter
+application-visible coordinate space when called from transparent callback code.
 
-Both wrappers support decorator usage.
+These wrappers support decorator usage. Use `run_disabled(callable, *args,
+**kwargs)` when a callable should be executed immediately in the disabled
+space.
 
 `CoordinateSpace.wrap(callable)` returns the same kind of native wrapper for an
 explicit coordinate space. Calling the wrapper is equivalent to
@@ -159,9 +164,10 @@ Python frame runs. Coordinates observed inside it are `()`. The property setter
 registers for root-space thread creation. Use `set_thread_start(callback,
 space)` to register for threads that inherit another coordinate space.
 
-`thread_yield` runs before the eval loop drops the GIL for a Python-level switch
-request in root space. Use `set_thread_yield(callback, space)` to register for
-another coordinate space.
+`thread_yield` runs before the current thread drops the GIL, including
+Python-level switch requests and extension/C API releases such as
+`Py_BEGIN_ALLOW_THREADS`, in root space. Use `set_thread_yield(callback, space)`
+to register for another coordinate space.
 
 `thread_resume` runs after a thread reacquires the GIL and before application
 bytecode resumes in root space. Use `set_thread_resume(callback, space)` to

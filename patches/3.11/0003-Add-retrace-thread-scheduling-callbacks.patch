@@ -106,32 +106,24 @@ index f1d1fed..be20bbf 100644
      take_gil(tstate);
 +    _PyRetrace_DeliverThreadResumeCallback(tstate, NULL);
  }
-@@ -425,2 +427,4 @@ PyEval_ReleaseLock(void)
+@@ -425,2 +427,3 @@ PyEval_ReleaseLock(void)
      struct _ceval_state *ceval2 = &tstate->interp->ceval;
-+    (void)_PyRetrace_PinThreadCallbackFrame(
-+        tstate, _PyRetrace_CurrentThreadFrame(tstate));
-     drop_gil(ceval, ceval2, tstate);
-@@ -433,2 +437,4 @@ _PyEval_ReleaseLock(PyThreadState *tstate)
-     struct _ceval_state *ceval2 = &tstate->interp->ceval;
-+    (void)_PyRetrace_PinThreadCallbackFrame(
-+        tstate, _PyRetrace_CurrentThreadFrame(tstate));
++    _PyRetrace_DeliverThreadYieldBeforeGilDrop(tstate);
      drop_gil(ceval, ceval2, tstate);
 @@ -447,2 +453,3 @@ PyEval_AcquireThread(PyThreadState *tstate)
      }
 +    _PyRetrace_DeliverThreadResumeCallback(tstate, NULL);
  }
-@@ -456,1 +463,3 @@ PyEval_ReleaseThread(PyThreadState *tstate)
-+    (void)_PyRetrace_PinThreadCallbackFrame(
-+        tstate, _PyRetrace_CurrentThreadFrame(tstate));
+@@ -456,1 +463,2 @@ PyEval_ReleaseThread(PyThreadState *tstate)
++    _PyRetrace_DeliverThreadYieldBeforeGilDrop(tstate);
      _PyRuntimeState *runtime = tstate->interp->runtime;
-@@ -505,5 +513,7 @@ PyEval_SaveThread(void)
+@@ -505,5 +513,6 @@ PyEval_SaveThread(void)
      _PyRuntimeState *runtime = &_PyRuntime;
 -    PyThreadState *tstate = _PyThreadState_Swap(&runtime->gilstate, NULL);
 +    PyThreadState *tstate = _PyRuntimeState_GetThreadState(runtime);
      _Py_EnsureTstateNotNULL(tstate);
 -
-+    (void)_PyRetrace_PinThreadCallbackFrame(
-+        tstate, _PyRetrace_CurrentThreadFrame(tstate));
++    _PyRetrace_DeliverThreadYieldBeforeGilDrop(tstate);
 +    tstate = _PyThreadState_Swap(&runtime->gilstate, NULL);
      struct _ceval_runtime_state *ceval = &runtime->ceval;
 @@ -524,2 +534,3 @@ PyEval_RestoreThread(PyThreadState *tstate)

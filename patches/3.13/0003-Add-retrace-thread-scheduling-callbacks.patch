@@ -231,40 +231,28 @@ index a1433e5b25f..4902440e01a 100644
  }
 
  // Function removed in the Python 3.13 API but kept in the stable ABI.
-@@ -583,6 +586,8 @@ PyEval_ReleaseLock(void)
+@@ -583,6 +586,7 @@ PyEval_ReleaseLock(void)
      /* This function must succeed when the current thread state is NULL.
         We therefore avoid PyThreadState_Get() which dumps a fatal error
         in debug mode. */
-+    (void)_PyRetrace_PinThreadCallbackFrame(
-+        tstate, _PyRetrace_CurrentThreadFrame(tstate));
++    _PyRetrace_DeliverThreadYieldBeforeGilDrop(tstate);
      drop_gil(tstate->interp, tstate, 0);
  }
 
-@@ -600,6 +606,8 @@ _PyEval_ReleaseLock(PyInterpreterState *interp,
- {
-     assert(tstate != NULL);
-     assert(tstate->interp == interp);
-+    (void)_PyRetrace_PinThreadCallbackFrame(
-+        tstate, _PyRetrace_CurrentThreadFrame(tstate));
-     drop_gil(interp, tstate, final_release);
- }
-
-@@ -614,6 +622,8 @@ void
+@@ -614,6 +622,7 @@ void
  PyEval_ReleaseThread(PyThreadState *tstate)
  {
      assert(_PyThreadState_CheckConsistency(tstate));
-+    (void)_PyRetrace_PinThreadCallbackFrame(
-+        tstate, _PyRetrace_CurrentThreadFrame(tstate));
++    _PyRetrace_DeliverThreadYieldBeforeGilDrop(tstate);
      _PyThreadState_Detach(tstate);
  }
 
-@@ -644,6 +654,9 @@ PyThreadState *
+@@ -644,6 +654,8 @@ PyThreadState *
  PyEval_SaveThread(void)
  {
      PyThreadState *tstate = _PyThreadState_GET();
 +    _Py_EnsureTstateNotNULL(tstate);
-+    (void)_PyRetrace_PinThreadCallbackFrame(
-+        tstate, _PyRetrace_CurrentThreadFrame(tstate));
++    _PyRetrace_DeliverThreadYieldBeforeGilDrop(tstate);
      _PyThreadState_Detach(tstate);
      return tstate;
  }
@@ -315,22 +303,15 @@ index 07c69b92d52..330ec7418b7 100644
 
      // At this time, all the threads should be cleared so we don't need atomic
      // operations for instrumentation_version or eval_breaker.
-@@ -1536,6 +1540,7 @@ init_threadstate(_PyThreadStateImpl *_tstate,
+@@ -1536,6 +1540,8 @@ init_threadstate(_PyThreadStateImpl *_tstate,
          // Start in the suspended state if there is an ongoing stop-the-world.
          tstate->state = _Py_THREAD_SUSPENDED;
      }
 +    _PyRetrace_InitializeThreadState(interp, tstate);
++    _PyRetrace_SeedThreadState(current_fast_get(), tstate);
 
      tstate->_status.initialized = 1;
  }
-@@ -1582,6 +1587,7 @@ new_threadstate(PyInterpreterState *interp, int whence)
-     // Add the new thread state to the interpreter.
-     PyThreadState *old_head = interp->threads.head;
-     add_threadstate(interp, (PyThreadState *)tstate, old_head);
-+    _PyRetrace_SeedThreadState(current_fast_get(), (PyThreadState *)tstate);
-
-     HEAD_UNLOCK(interp->runtime);
- #ifdef Py_GIL_DISABLED
 @@ -1741,6 +1747,7 @@ PyThreadState_Clear(PyThreadState *tstate)
      Py_CLEAR(tstate->async_gen_finalizer);
 

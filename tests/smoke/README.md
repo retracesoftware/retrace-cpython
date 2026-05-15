@@ -14,6 +14,7 @@ build/install/3.12.8+retrace/bin/python3 tests/smoke/retrace_public.py
 build/install/3.12.8+retrace/bin/python3 tests/smoke/thread_handoff.py
 build/install/3.12.8+retrace/bin/python3 tests/smoke/thread_id_determinism.py
 build/install/3.12.8+retrace/bin/python3 tests/smoke/thread_probe_concurrency.py
+build/install/3.12.8+retrace/bin/python3 tests/smoke/thread_start_handoff_contract.py
 build/install/3.12.8+retrace/bin/python3 tests/smoke/thread_schedule_fresh.py
 build/install/3.12.8+retrace/bin/python3 tests/smoke/thread_schedule_minimal.py
 build/install/3.12.8+retrace/bin/python3 tests/smoke/thread_schedule_primitives.py
@@ -61,6 +62,11 @@ state is isolated per thread, start callbacks delivered before the first thread
 frame see an empty cursor, thread callback space filters match the active or
 inherited space, and scheduler callback thread ids are visible through
 `threading._active` or `threading._limbo`.
+
+`thread_start_handoff_contract.py` is a focused public-`retrace` contract check
+for replay startup: a `thread_start` callback that parks in
+`ThreadHandoff.start()` must not keep the parent blocked inside
+`threading.Thread.start()`.
 
 `thread_schedule.py` contains reusable capture/replay support for the schedule
 tests. The scenario files own thread creation and workload shape, while the

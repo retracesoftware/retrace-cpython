@@ -5,9 +5,9 @@ Subject: [PATCH 1/7] Add Retrace coordinate bias to interpreter frames
 
 ---
  Include/internal/pycore_frame.h |  6 ++++++
- Python/ceval.c                  |  8 ++++++++
+ Python/ceval.c                  |  6 ++++++
  Python/ceval_macros.h           | 16 ++++++++++++++--
- 3 files changed, 28 insertions(+), 2 deletions(-)
+ 3 files changed, 26 insertions(+), 2 deletions(-)
 
 diff --git a/Include/internal/pycore_frame.h b/Include/internal/pycore_frame.h
 index 4d355b2..203693b 100644
@@ -41,22 +41,20 @@ diff --git a/Python/ceval.c b/Python/ceval.c
 index 3985b52..3ed202c 100644
 --- a/Python/ceval.c
 +++ b/Python/ceval.c
-@@ -701,9 +701,14 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *frame, int
+@@ -701,9 +701,12 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *frame, int
      entry_frame.stacktop = 0;
      entry_frame.owner = FRAME_OWNED_BY_CSTACK;
      entry_frame.return_offset = 0;
 +    _PyRetraceFrameState_Init(&entry_frame.retrace);
-+    _PyFrame_RetraceResetCoordinateDepth(&entry_frame);
 +    _PyFrame_RetraceInitializeLastCoordinate(&entry_frame);
      /* Push frame */
      entry_frame.previous = prev_cframe->current_frame;
      frame->previous = &entry_frame;
-+    _PyFrame_RetraceResetCoordinateDepth(frame);
 +    _PyFrame_RetraceResetLastCoordinate(frame);
      cframe.current_frame = frame;
 
      tstate->c_recursion_remaining -= (PY_EVAL_C_STACK_UNITS - 1);
-@@ -718,6 +723,7 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *frame, int
+@@ -718,6 +721,7 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *frame, int
          if (_Py_EnterRecursivePy(tstate)) {
              goto exit_unwind;
          }
@@ -64,7 +62,7 @@ index 3985b52..3ed202c 100644
          /* Because this avoids the RESUME,
           * we need to update instrumentation */
          _Py_Instrument(frame->f_code, tstate->interp);
-@@ -743,6 +749,7 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *frame, int
+@@ -743,6 +747,7 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *frame, int
      if (_Py_EnterRecursivePy(tstate)) {
          goto exit_unwind;
      }

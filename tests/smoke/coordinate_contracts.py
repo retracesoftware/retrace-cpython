@@ -10,7 +10,13 @@ def assert_coordinates(value):
     assert type(value) is tuple
     assert len(value) >= 2
     assert len(value) % 2 == 0
-    assert all(type(item) is int for item in value)
+    assert all(type(item) is int and 0 <= item < 2**64
+               for item in value)
+
+
+def frame_pairs(coordinates):
+    assert_coordinates(coordinates)
+    return tuple(zip(coordinates[0::2], coordinates[1::2]))
 
 
 def advance_leaf_instruction(coordinates, delta):
@@ -34,7 +40,12 @@ def busy_loop(iterations=1000):
 
 
 def check_coordinate_shape(module):
-    assert_coordinates(tuple(module.coordinates()))
+    coordinates = tuple(module.coordinates())
+    pairs = frame_pairs(coordinates)
+    assert len(pairs) >= 1
+    for instruction_coordinate, call_ordinal in pairs:
+        assert type(instruction_coordinate) is int
+        assert type(call_ordinal) is int
 
 
 def check_nested_call_adds_visible_frame_pair(module):
@@ -55,6 +66,21 @@ def check_nested_call_adds_visible_frame_pair(module):
     assert len(after) == len(before)
 
 
+def check_leaf_pair_order_is_instruction_then_call_ordinal(module):
+    def sample():
+        first = tuple(module.coordinates())
+        busy_loop(32)
+        second = tuple(module.coordinates())
+        return first, second
+
+    first, second = sample()
+    first_pairs = frame_pairs(first)
+    second_pairs = frame_pairs(second)
+    assert first_pairs[-1][1] == 0
+    assert second_pairs[-1][1] == 0
+    assert second_pairs[-1][0] >= first_pairs[-1][0]
+
+
 def check_repeated_call_site_coordinates_are_unique(module):
     def probe():
         return tuple(module.coordinates())
@@ -66,6 +92,50 @@ def check_repeated_call_site_coordinates_are_unique(module):
     assert len(set(coordinates)) == len(coordinates)
     assert all(len(item) >= 2 and len(item) % 2 == 0
                for item in coordinates)
+
+
+def check_parent_call_ordinal_counts_repeated_children(module):
+    coordinates = []
+
+    def probe(value):
+        coordinates.append(tuple(module.coordinates()))
+        return value
+
+    list(map(probe, range(3)))
+    assert len(coordinates) == 3
+    pairs = [frame_pairs(item) for item in coordinates]
+    assert all(len(item) >= 2 for item in pairs)
+    min_depth = min(len(item) for item in pairs)
+    ordinal_owner = None
+    for position in range(min_depth):
+        column = [item[position] for item in pairs]
+        if (
+            len({pair[0] for pair in column}) == 1
+            and [pair[1] for pair in column] == [0, 1, 2]
+        ):
+            ordinal_owner = position
+            break
+    assert ordinal_owner is not None, pairs
+    for item in pairs:
+        assert all(pair[1] == 0 for pair in item[ordinal_owner + 1:])
+    assert len(set(coordinates)) == len(coordinates)
+
+
+def check_call_ordinal_resets_after_parent_instruction(module):
+    captures = []
+
+    def probe(value):
+        captures.append(tuple(module.coordinates()))
+        return value
+
+    def caller():
+        list(map(probe, range(3)))
+        return tuple(module.coordinates())
+
+    after = caller()
+    assert len(captures) == 3
+    after_pairs = frame_pairs(after)
+    assert after_pairs[-1][1] == 0
 
 
 def check_thread_coordinates_are_thread_local(module):
@@ -305,7 +375,10 @@ def main() -> int:
 
     check_coordinate_shape(module)
     check_nested_call_adds_visible_frame_pair(module)
+    check_leaf_pair_order_is_instruction_then_call_ordinal(module)
     check_repeated_call_site_coordinates_are_unique(module)
+    check_parent_call_ordinal_counts_repeated_children(module)
+    check_call_ordinal_resets_after_parent_instruction(module)
     check_thread_coordinates_are_thread_local(module)
     check_thread_delta_is_isolated_per_thread(module)
     check_exclude_and_include(module)

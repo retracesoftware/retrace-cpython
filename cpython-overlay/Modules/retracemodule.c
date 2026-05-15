@@ -15,6 +15,7 @@
 #include "structmember.h"
 
 #include <stdint.h>
+#include <string.h>
 
 #if PY_VERSION_HEX >= 0x030D0000
 typedef PyTime_t RetracePyTime;
@@ -231,15 +232,15 @@ retrace_thread_delta(PyObject *module, PyObject *args)
 
         position -= 2;
         uint64_t instruction_counter = _PyRetrace_FrameCoordinate(scan);
-        if ((scan->retrace.last_delta_space != space ||
-             scan->retrace.last_instruction_counter != instruction_counter) &&
+        if ((scan->retrace.delta.last_delta_space != space ||
+             scan->retrace.delta.last_instruction_counter != instruction_counter) &&
             position < common_count)
         {
             common_count = position;
         }
         uint64_t call_ordinal = _PyRetrace_FrameCallOrdinal(scan);
-        if ((scan->retrace.last_delta_space != space ||
-             scan->retrace.last_call_ordinal != call_ordinal) &&
+        if ((scan->retrace.delta.last_delta_space != space ||
+             scan->retrace.delta.last_call_ordinal != call_ordinal) &&
             position + 1 < common_count)
         {
             common_count = position + 1;
@@ -270,9 +271,9 @@ retrace_thread_delta(PyObject *module, PyObject *args)
         if (position + 1 >= common_count) {
             delta[1 + position + 1 - common_count] = call_ordinal;
         }
-        scan->retrace.last_delta_space = space;
-        scan->retrace.last_instruction_counter = instruction_counter;
-        scan->retrace.last_call_ordinal = call_ordinal;
+        scan->retrace.delta.last_delta_space = space;
+        scan->retrace.delta.last_instruction_counter = instruction_counter;
+        scan->retrace.delta.last_call_ordinal = call_ordinal;
     }
     space->last_delta_root_call_ordinal = space->root_call_ordinal;
 
@@ -798,9 +799,10 @@ PyDoc_STRVAR(retrace_set_thread_start_callback_doc,
 "set_thread_start_callback($module, callback, space_id=None, /)\n"
 "--\n"
 "\n"
-"Set a Python callback invoked as callback() on a newly started thread before\n"
-"its first Python frame runs when the thread inherits the selected coordinate\n"
-"space. Callback frames are coordinate-transparent.");
+"Set a Python callback invoked as callback() on a newly started thread after\n"
+"the threading bootstrap has published it and before the target continues when\n"
+"the thread inherits the selected coordinate space. Callback frames are\n"
+"coordinate-transparent.");
 
 static PyObject *
 retrace_set_thread_start_callback(PyObject *module, PyObject *args)
@@ -1126,6 +1128,13 @@ retrace_exclude(PyObject *module, PyObject *callable)
         _PyFrame_RETRACE_SPACE_ID_DISABLED);
 }
 
+PyDoc_STRVAR(retrace_disable_doc,
+"disable($module, callable, /)\n"
+"--\n"
+"\n"
+"Return a callable wrapper that runs callable in the disabled Retrace\n"
+"coordinate space. Intended for use as a decorator.");
+
 PyDoc_STRVAR(retrace_include_doc,
 "include($module, callable, /)\n"
 "--\n"
@@ -1141,6 +1150,13 @@ retrace_include(PyObject *module, PyObject *callable)
         RETRACE_CALL_INCLUDE,
         _PyFrame_RETRACE_SPACE_ID_ROOT);
 }
+
+PyDoc_STRVAR(retrace_enable_doc,
+"enable($module, callable, /)\n"
+"--\n"
+"\n"
+"Return a callable wrapper that runs callable in the root Retrace coordinate\n"
+"space. Intended for use as a decorator.");
 
 PyDoc_STRVAR(retrace_wrap_for_space_doc,
 "wrap_for_space($module, space_id, callable, /)\n"
@@ -1173,12 +1189,6 @@ retrace_wrap_for_space(PyObject *module,
         callable, RETRACE_CALL_SPACE, space_id);
 }
 
-PyDoc_STRVAR(retrace_run_transparent_doc,
-"run_transparent($module, callable, /)\n"
-"--\n"
-"\n"
-"Call callable while keeping its Python frames out of Retrace coordinates.");
-
 PyDoc_STRVAR(retrace_allocate_space_id_doc,
 "allocate_space_id($module, /)\n"
 "--\n"
@@ -1190,19 +1200,6 @@ retrace_allocate_space_id(PyObject *module, PyObject *Py_UNUSED(ignored))
 {
     uint32_t space_id = retrace_allocate_dynamic_space_id();
     return PyLong_FromUnsignedLong((unsigned long)space_id);
-}
-
-static PyObject *
-retrace_run_transparent(PyObject *module, PyObject *callable)
-{
-    if (!PyCallable_Check(callable)) {
-        PyErr_SetString(PyExc_TypeError,
-                        "run_transparent argument must be callable");
-        return NULL;
-    }
-
-    return retrace_call_with_mode(
-        RETRACE_CALL_EXCLUDE, callable, NULL, 0, NULL, 1);
 }
 
 PyDoc_STRVAR(retrace_with_new_coordinates_doc,
@@ -1916,6 +1913,73 @@ retrace_thread_callback_space_id(PyThreadState *tstate,
         _PyFrame_RETRACE_SPACE_ID_ROOT : tstate->retrace.inherited_space_id;
 }
 
+static PyCodeObject *
+retrace_frame_code(_PyInterpreterFrame *frame)
+{
+    if (frame == NULL) {
+        return NULL;
+    }
+#if PY_VERSION_HEX >= 0x030D0000
+    return _PyFrame_GetCode(frame);
+#else
+    return frame->f_code;
+#endif
+}
+
+static int
+retrace_code_filename_ends_with(PyCodeObject *code, const char *suffix)
+{
+    if (code == NULL || suffix == NULL ||
+        !PyUnicode_Check(code->co_filename))
+    {
+        return 0;
+    }
+
+    Py_ssize_t filename_len = 0;
+    const char *filename =
+        PyUnicode_AsUTF8AndSize(code->co_filename, &filename_len);
+    if (filename == NULL) {
+        PyErr_Clear();
+        return 0;
+    }
+
+    Py_ssize_t suffix_len = (Py_ssize_t)strlen(suffix);
+    return filename_len >= suffix_len &&
+        memcmp(filename + filename_len - suffix_len,
+               suffix,
+               (size_t)suffix_len) == 0;
+}
+
+static int
+retrace_code_name_equals(PyCodeObject *code, const char *name)
+{
+    if (code == NULL || name == NULL || !PyUnicode_Check(code->co_name)) {
+        return 0;
+    }
+
+    Py_ssize_t code_name_len = 0;
+    const char *code_name =
+        PyUnicode_AsUTF8AndSize(code->co_name, &code_name_len);
+    if (code_name == NULL) {
+        PyErr_Clear();
+        return 0;
+    }
+
+    Py_ssize_t name_len = (Py_ssize_t)strlen(name);
+    return code_name_len == name_len &&
+        memcmp(code_name, name, (size_t)name_len) == 0;
+}
+
+static int
+retrace_frame_is_threading_bootstrap(_PyInterpreterFrame *frame)
+{
+    PyCodeObject *code = retrace_frame_code(frame);
+    if (!retrace_code_filename_ends_with(code, "threading.py")) {
+        return 0;
+    }
+    return !retrace_code_name_equals(code, "run");
+}
+
 void
 _PyRetrace_NoteThreadResume(PyThreadState *tstate)
 {
@@ -1961,15 +2025,21 @@ _PyRetrace_DeliverThreadResumeCallback(PyThreadState *tstate,
 
     PyInterpreterState *interp = tstate->interp;
     if (tstate->retrace.thread_start_pending) {
+        if (frame == NULL ||
+            retrace_frame_is_threading_bootstrap(frame))
+        {
+            return;
+        }
         PyObject *callback = retrace_get_thread_callback(
             interp,
             RETRACE_THREAD_CALLBACK_START,
             tstate->retrace.inherited_space_id);
-        tstate->retrace.thread_start_pending = 0;
         if (callback == NULL) {
+            tstate->retrace.thread_start_pending = 0;
             tstate->retrace.thread_pending_callback_frame = NULL;
             return;
         }
+        tstate->retrace.thread_start_pending = 0;
         retrace_call_thread_callback(tstate, callback, NULL, 0);
         tstate->retrace.thread_pending_callback_frame = NULL;
         return;
@@ -2009,6 +2079,10 @@ _PyRetrace_DeliverThreadYieldCallback(PyThreadState *tstate,
         tstate->retrace.thread_callback_active)
     {
         return;
+    }
+
+    if (tstate->retrace.thread_started) {
+        tstate->retrace.thread_resume_pending = 1;
     }
 
     PyObject *callback = retrace_get_thread_callback(
@@ -2168,11 +2242,11 @@ static PyMethodDef retrace_methods[] = {
     {"get_thread_resume_callback", retrace_get_thread_resume_callback,
      METH_VARARGS, retrace_get_thread_resume_callback_doc},
     {"exclude", retrace_exclude, METH_O, retrace_exclude_doc},
+    {"disable", retrace_exclude, METH_O, retrace_disable_doc},
     {"include", retrace_include, METH_O, retrace_include_doc},
+    {"enable", retrace_include, METH_O, retrace_enable_doc},
     {"wrap_for_space", _PyCFunction_CAST(retrace_wrap_for_space),
      METH_FASTCALL, retrace_wrap_for_space_doc},
-    {"run_transparent", retrace_run_transparent, METH_O,
-     retrace_run_transparent_doc},
     {"with_new_coordinates", _PyCFunction_CAST(retrace_with_new_coordinates),
      METH_FASTCALL | METH_KEYWORDS, retrace_with_new_coordinates_doc},
     {"run_in_space", _PyCFunction_CAST(retrace_run_in_space),

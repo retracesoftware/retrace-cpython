@@ -18,32 +18,49 @@ typedef struct _PyRetraceThreadSpaceState _PyRetraceThreadSpaceState;
 struct _PyInterpreterFrame;
 
 typedef struct {
-    uint64_t instruction_counter;
-    uint64_t current_call_ordinal;
-    uint64_t *previous_call_ordinal_ptr;
-    _PyRetraceThreadSpaceState *space;
+    /* Last call ordinal emitted by thread_delta(); sentinel means unset. */
     uint64_t last_call_ordinal;
+
+    /* Last instruction counter emitted by thread_delta(); sentinel means unset. */
     uint64_t last_instruction_counter;
+
+    /* Space used for the last thread_delta() cache entry for this frame. */
     _PyRetraceThreadSpaceState *last_delta_space;
+} _PyRetraceFrameDeltaState;
+
+typedef struct {
+    /* Running adjustment that makes bias + f_lasti monotonic across jumps. */
+    int64_t coordinate_bias;
+
+    /* Child-activation counter for this frame's current instruction. */
+    uint64_t current_call_ordinal;
+
+    /* Parent/root ordinal slot to restore and increment when deactivated. */
+    uint64_t *previous_call_ordinal_ptr;
+
+    /* Thread-local coordinate space while active; NULL when inactive. */
+    _PyRetraceThreadSpaceState *space;
+
+    /* Per-frame thread_delta() cache state. */
+    _PyRetraceFrameDeltaState delta;
+
+    /* Lazily computed identity hash contribution for this frame coordinate. */
     uint64_t coordinate_hash;
-    unsigned char instruction_active;
-    unsigned char instruction_may_activate_python;
 } _PyRetraceFrameState;
 
 static inline void
 _PyRetraceFrameState_Init(_PyRetraceFrameState *state)
 {
-    state->instruction_counter = 0;
+    state->coordinate_bias = 0;
     state->current_call_ordinal = 0;
     state->previous_call_ordinal_ptr = NULL;
     state->space = NULL;
-    state->last_call_ordinal = _PyFrame_RETRACE_LAST_CALL_ORDINAL_UNSET;
-    state->last_instruction_counter =
+    state->delta.last_call_ordinal =
+        _PyFrame_RETRACE_LAST_CALL_ORDINAL_UNSET;
+    state->delta.last_instruction_counter =
         _PyFrame_RETRACE_LAST_INSTRUCTION_COUNTER_UNSET;
-    state->last_delta_space = NULL;
+    state->delta.last_delta_space = NULL;
     state->coordinate_hash = _PyFrame_RETRACE_COORDINATE_HASH_UNSET;
-    state->instruction_active = 0;
-    state->instruction_may_activate_python = 0;
 }
 
 struct _PyRetraceThreadSpaceState {
