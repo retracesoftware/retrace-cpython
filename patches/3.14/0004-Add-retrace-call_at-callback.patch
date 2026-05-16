@@ -15,9 +15,9 @@ index caae4f5df34..c883fe5fe7e 100644
 +++ b/Python/ceval.c
 @@ -3,7 +3,7 @@
  #define _PY_INTERPRETER
-
+ 
  #include "Python.h"
--#include "pycore_retrace.h"       // thread scheduling callbacks
+-#include "pycore_retrace.h"       // retrace thread helpers
 +#include "pycore_retrace.h"       // retrace callbacks
  #include "pycore_abstract.h"      // _PyIndex_Check()
  #include "pycore_audit.h"         // _PySys_Audit()
@@ -29,7 +29,7 @@ index 06d5a866c60..8296a6e25b0 100644
 @@ -59,15 +59,33 @@
      #define USE_COMPUTED_GOTOS 0
  #endif
-
+ 
 +#define RETRACE_CALL_AT() \
 +    do { \
 +        PyInterpreterState *retrace_interp = tstate->interp; \
@@ -59,16 +59,13 @@ index 06d5a866c60..8296a6e25b0 100644
 -#define INSTRUCTION_STATS(op) ((void)0)
 +#define INSTRUCTION_STATS(op) RETRACE_CALL_AT()
  #endif
-
+ 
  #ifdef Py_STATS
 diff --git a/Python/pystate.c b/Python/pystate.c
 index c50014d3086..4ea05c080da 100644
 --- a/Python/pystate.c
 +++ b/Python/pystate.c
-@@ -866,5 +866,11 @@ interpreter_clear(PyInterpreterState *interp, PyThreadState *tstate)
-     Py_CLEAR(interp->retrace.thread_start_callback);
-     Py_CLEAR(interp->retrace.thread_yield_callback);
-     Py_CLEAR(interp->retrace.thread_resume_callback);
+@@ -866,2 +866,8 @@ interpreter_clear(PyInterpreterState *interp, PyThreadState *tstate)
 -
 +    _PyRetrace_ClearSpaceCallbacks(interp);
 +    _PyRetrace_ClearIdentityHashTable(interp);

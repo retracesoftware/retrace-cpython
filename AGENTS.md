@@ -21,6 +21,12 @@ probes for Retrace.
   against required patched symbols.
 - Do not add old-version compatibility shims. If a patch stack no longer
   applies to a CPython release, update that release's patch stack deliberately.
+- Thread ordering streams should be modeled with namespace-local
+  `thread_switch(previous_delta, next_thread_id)` callbacks. For each
+  coordinate space, bytecode in other spaces is invisible: only bytecode
+  visible in that space can update that space's last-thread cursor or emit a
+  switch callback. The callback must run before the first bytecode instruction
+  on the new thread in that space.
 
 ## Common Commands
 

@@ -334,12 +334,11 @@ def check_call_at_include(module) -> None:
     assert nested_coordinates
 
 
-def check_thread_callbacks(module) -> None:
+def check_thread_switch_callbacks(module) -> None:
     old_interval = sys.getswitchinterval()
     sys.setswitchinterval(1e-6)
 
-    yield_hits = []
-    resume_hits = []
+    switch_hits = []
     callback_deltas = []
     callback_failures = []
     stop = False
@@ -366,14 +365,10 @@ def check_thread_callbacks(module) -> None:
         except BaseException as exc:
             callback_failures.append((kind, repr(exc)))
 
-    def yield_callback():
-        yield_hits.append(_thread.get_ident())
-        check_callback_frame_pinned("yield")
-        callback_deltas.append(tuple(module.thread_delta()))
-
-    def resume_callback():
-        resume_hits.append(_thread.get_ident())
-        check_callback_frame_pinned("resume")
+    def switch_callback(previous_delta, next_thread_id):
+        switch_hits.append((tuple(previous_delta), next_thread_id))
+        assert is_u64(next_thread_id)
+        check_callback_frame_pinned("switch")
         callback_deltas.append(tuple(module.thread_delta()))
 
     def contender():
@@ -385,27 +380,24 @@ def check_thread_callbacks(module) -> None:
     started = []
 
     try:
-        module.set_thread_yield_callback(yield_callback)
-        module.set_thread_resume_callback(resume_callback)
+        module.set_thread_switch_callback(switch_callback)
         for worker in workers:
             worker.start()
             started.append(worker)
 
         deadline = time.monotonic() + 2.0
-        while (not yield_hits or not resume_hits) and time.monotonic() < deadline:
+        while not switch_hits and time.monotonic() < deadline:
             for index in range(10_000):
-                _ = index ^ len(yield_hits) ^ len(resume_hits)
+                _ = index ^ len(switch_hits)
             time.sleep(0)
     finally:
         stop = True
         for worker in started:
             worker.join()
-        module.set_thread_yield_callback(None)
-        module.set_thread_resume_callback(None)
+        module.set_thread_switch_callback(None)
         sys.setswitchinterval(old_interval)
 
-    assert yield_hits
-    assert resume_hits
+    assert switch_hits
     assert not callback_failures, callback_failures
     assert callback_deltas
     assert all(delta and delta[0] >= 0 for delta in callback_deltas)
@@ -697,32 +689,16 @@ def main() -> int:
         check_thread_ids(module)
         check_ctypes_async_exc_bridge(module)
         check_root_seed_environment(module)
-        assert module.get_thread_start_callback() is None
-        assert module.get_thread_yield_callback() is None
-        assert module.get_thread_resume_callback() is None
+        assert module.get_thread_switch_callback() is None
 
-        def start_callback():
+        def switch_callback(previous_delta, next_thread_id):
             return None
 
-        def yield_callback():
-            return None
-
-        def resume_callback():
-            return None
-
-        module.set_thread_start_callback(start_callback)
-        assert inspect.unwrap(module.get_thread_start_callback()) is start_callback
-        module.set_thread_start_callback(None)
-        assert module.get_thread_start_callback() is None
-        module.set_thread_yield_callback(yield_callback)
-        assert inspect.unwrap(module.get_thread_yield_callback()) is yield_callback
-        module.set_thread_yield_callback(None)
-        assert module.get_thread_yield_callback() is None
-        module.set_thread_resume_callback(resume_callback)
-        assert inspect.unwrap(module.get_thread_resume_callback()) is resume_callback
-        module.set_thread_resume_callback(None)
-        assert module.get_thread_resume_callback() is None
-        check_thread_callbacks(module)
+        module.set_thread_switch_callback(switch_callback)
+        assert inspect.unwrap(module.get_thread_switch_callback()) is switch_callback
+        module.set_thread_switch_callback(None)
+        assert module.get_thread_switch_callback() is None
+        check_thread_switch_callbacks(module)
         check_call_at(module)
         check_call_at_past_rejected(module)
         check_call_at_overshoot(module)
@@ -741,9 +717,7 @@ def main() -> int:
         print("root_seed_environment=available")
         print("disable_api=unavailable")
         print("deterministic_identity_hashes=available")
-        print("thread_start_callback=available")
-        print("thread_yield_callback=available")
-        print("thread_resume_callback=available")
+        print("thread_switch_callback=available")
         print("call_at=available")
         print("call_at_overshoot=available")
         print("callback_coordinate_transparency=available")

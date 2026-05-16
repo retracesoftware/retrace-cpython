@@ -134,48 +134,26 @@ state.
 This helper is intended for tests that need to record and replay a workload
 sequentially in one process without translating thread ids or coordinate roots.
 
-## Scheduling Callbacks
+## Thread Switch Callbacks
 
 ```python
-def on_start():
+def on_thread_switch(previous_delta, next_thread_id):
     ...
 
-def on_yield():
-    ...
-
-def on_resume():
-    ...
-
-retrace.callbacks.thread_start = on_start
-retrace.callbacks.set_thread_start(on_start, space=None)
-retrace.callbacks.thread_yield = on_yield
-retrace.callbacks.set_thread_yield(on_yield, space=None)
-retrace.callbacks.thread_resume = on_resume
-retrace.callbacks.set_thread_resume(on_resume, space=None)
-
-retrace.callbacks.thread_yield = None
+retrace.callbacks.thread_switch = on_thread_switch
+retrace.callbacks.set_thread_switch(on_thread_switch, space=None)
+retrace.callbacks.thread_switch = None
 ```
 
-Callbacks receive no arguments and run on the thread they describe. Use
-`_thread.get_ident()` inside the callback to read the deterministic thread id.
+The callback runs on the new/current thread before its next visible bytecode
+instruction executes. `previous_delta` is the coordinate delta for the previous
+thread that executed visible bytecode in the same coordinate space, with the
+same `(common_prefix_count, *new_suffix)` shape as `thread_delta(space)`.
+`next_thread_id` is the new/current stable Retrace thread id.
 
-`thread_start` runs after a new thread acquires the GIL and before its first
-Python frame runs. Coordinates observed inside it are `()`. The property setter
-registers for root-space thread creation. Use `set_thread_start(callback,
-space)` to register for threads that inherit another coordinate space.
-
-`thread_yield` runs before the current thread drops the GIL, including
-Python-level switch requests and extension/C API releases such as
-`Py_BEGIN_ALLOW_THREADS`, in root space. Use `set_thread_yield(callback, space)`
-to register for another coordinate space.
-
-`thread_resume` runs after a thread reacquires the GIL and before application
-bytecode resumes in root space. Use `set_thread_resume(callback, space)` to
-register for another coordinate space.
-
-Scheduling callbacks are coordinate-transparent. Coordinates, deltas, and
-hashes observed inside them describe the application boundary that caused the
-callback, not callback-local helper frames.
+Thread-switch callbacks are coordinate-transparent. Coordinates, deltas, and
+hashes observed inside them describe the application boundary about to execute,
+not callback-local helper frames.
 
 ## call_at
 
@@ -211,9 +189,9 @@ handoff.to(target_thread_id)
 handoff.close()
 ```
 
-`ThreadHandoff(timeout=None)` creates a replay scheduling gate. `start()` is
-intended for the replay thread-start callback: it registers the current stable
-thread id, then parks that newly started thread with the GIL released.
+`ThreadHandoff(timeout=None)` creates a replay scheduling gate. `start()`
+registers the current stable thread id, then parks that thread with the GIL
+released.
 `to(thread_id)` transfers execution to the target deterministic thread id, then
 parks the current thread until another transfer marks it runnable. Transfer
 tokens are durable: the target thread does not need to be asleep yet.

@@ -21,6 +21,7 @@ extern "C" {
 #include "pycore_retrace_identity_hash.h" // identity hash table
 #include "pycore_retrace_mixers.h" // _PyRetrace_Mix64()
 
+#include <assert.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -418,45 +419,6 @@ _PyRetrace_CurrentThreadFrame(PyThreadState *tstate)
 #endif
 }
 
-static inline _PyInterpreterFrame *
-_PyRetrace_PinThreadCallbackFrame(
-    PyThreadState *tstate,
-    _PyInterpreterFrame *frame)
-{
-    if (tstate == NULL) {
-        return NULL;
-    }
-    _PyInterpreterFrame *previous =
-        tstate->retrace.thread_pending_callback_frame;
-    if (frame != NULL && !tstate->retrace.thread_callback_active) {
-        tstate->retrace.thread_pending_callback_frame = frame;
-    }
-    return previous;
-}
-
-static inline void
-_PyRetrace_RestoreThreadCallbackFrame(
-    PyThreadState *tstate,
-    _PyInterpreterFrame *previous)
-{
-    if (tstate == NULL || tstate->retrace.thread_callback_active) {
-        return;
-    }
-    tstate->retrace.thread_pending_callback_frame = previous;
-}
-
-#if PY_VERSION_HEX >= 0x030E0000
-static inline int
-_PyRetrace_HandlePending(PyThreadState *tstate, _PyInterpreterFrame *frame)
-{
-    _PyInterpreterFrame *previous =
-        _PyRetrace_PinThreadCallbackFrame(tstate, frame);
-    int err = _Py_HandlePending(tstate);
-    _PyRetrace_RestoreThreadCallbackFrame(tstate, previous);
-    return err;
-}
-#endif
-
 static inline uint64_t
 _PyRetrace_RootCoordinateHash(
     PyThreadState *tstate,
@@ -612,10 +574,8 @@ _PyRetrace_InitializeThreadState(
         return;
     }
     tstate->retrace.thread_id = 0;
+    tstate->retrace.thread_id_object = NULL;
     tstate->retrace.cpython_thread_ident = 0;
-    tstate->retrace.thread_started = 0;
-    tstate->retrace.thread_start_pending = 0;
-    tstate->retrace.thread_resume_pending = 0;
     _PyRetrace_InitializeSpaceState(
         &tstate->retrace.root_space,
         _PyFrame_RETRACE_SPACE_ID_ROOT,
@@ -627,7 +587,6 @@ _PyRetrace_InitializeThreadState(
     tstate->retrace.inherited_space_id = _PyFrame_RETRACE_SPACE_ID_ROOT;
     tstate->retrace.thread_callback_active = 0;
     tstate->retrace.thread_callback_frame = NULL;
-    tstate->retrace.thread_pending_callback_frame = NULL;
 }
 
 static inline void
@@ -636,6 +595,23 @@ _PyRetrace_ClearThreadState(PyThreadState *tstate)
     if (tstate == NULL) {
         return;
     }
+    if (tstate->interp != NULL &&
+        tstate->interp->retrace.last_bytecode_thread == tstate)
+    {
+        tstate->interp->retrace.last_bytecode_thread = NULL;
+    }
+    if (tstate->interp != NULL) {
+        for (_PyRetraceSpaceCallbackState *entry =
+                 tstate->interp->retrace.space_callbacks;
+             entry != NULL;
+             entry = entry->next)
+        {
+            if (entry->last_bytecode_thread == tstate) {
+                entry->last_bytecode_thread = NULL;
+            }
+        }
+    }
+    Py_CLEAR(tstate->retrace.thread_id_object);
     _PyRetraceThreadSpaceState *root = &tstate->retrace.root_space;
     _PyRetraceThreadSpaceState *space = root->next;
     while (space != NULL && space != root) {
@@ -658,9 +634,7 @@ _PyRetrace_ClearSpaceCallbacks(PyInterpreterState *interp)
     _PyRetraceSpaceCallbackState *entry = interp->retrace.space_callbacks;
     while (entry != NULL) {
         _PyRetraceSpaceCallbackState *next = entry->next;
-        Py_XDECREF(entry->thread_start_callback);
-        Py_XDECREF(entry->thread_yield_callback);
-        Py_XDECREF(entry->thread_resume_callback);
+        Py_XDECREF(entry->thread_switch_callback);
         Py_XDECREF(entry->call_at_coordinates);
         Py_XDECREF(entry->call_at_callback);
         Py_XDECREF(entry->call_at_overshoot_callback);
@@ -668,6 +642,7 @@ _PyRetrace_ClearSpaceCallbacks(PyInterpreterState *interp)
         entry = next;
     }
     interp->retrace.space_callbacks = NULL;
+    interp->retrace.thread_switch_armed = 0;
     interp->retrace.call_at_extra_armed = 0;
 }
 
@@ -681,19 +656,22 @@ _PyRetrace_SeedThreadState(PyThreadState *parent, PyThreadState *child)
         parent = NULL;
     }
 
-    child->retrace.thread_started = parent == NULL;
-    child->retrace.thread_start_pending = 0;
-    child->retrace.thread_resume_pending = 0;
     uint32_t inherited_space_id =
         parent == NULL || parent->retrace.current_space == NULL ?
         _PyFrame_RETRACE_SPACE_ID_ROOT :
         parent->retrace.current_space->space_id;
+    assert(child->retrace.thread_id_object == NULL);
     child->retrace.thread_id =
         _PyRetrace_UniqueThreadId(
             child->interp,
             child,
             inherited_space_id,
             _PyRetrace_ThreadIdSeed(parent));
+    child->retrace.thread_id_object = PyLong_FromUnsignedLongLong(
+        (unsigned long long)child->retrace.thread_id);
+    if (child->retrace.thread_id_object == NULL) {
+        PyErr_Clear();
+    }
     child->retrace.root_space.root_coordinate_hash = child->retrace.thread_id;
     child->retrace.inherited_space_id = inherited_space_id;
     (void)_PyRetrace_SetCurrentSpaceById(child, inherited_space_id);
@@ -715,8 +693,12 @@ _PyRetrace_ThreadIdentObject(PyThreadState *tstate)
         PyErr_SetString(PyExc_RuntimeError, "no Retrace thread id");
         return NULL;
     }
-    return PyLong_FromUnsignedLongLong(
-        (unsigned long long)tstate->retrace.thread_id);
+    PyObject *ident = tstate->retrace.thread_id_object;
+    if (ident == NULL) {
+        PyErr_SetString(PyExc_RuntimeError, "no Retrace thread id object");
+        return NULL;
+    }
+    return Py_NewRef(ident);
 }
 
 static inline PyThreadState *
@@ -863,7 +845,11 @@ _PyRetrace_DeleteObjectIdentityHash(PyObject *obj)
     (void)_PyRetrace_DeleteIdentityHash(tstate->interp, obj);
 }
 
-PyAPI_FUNC(void) _PyRetrace_DeliverThreadResumeCallback(
+PyAPI_FUNC(void) _PyRetrace_DeliverThreadSwitchCallback(
+    PyThreadState *previous,
+    PyThreadState *current,
+    _PyInterpreterFrame *frame);
+PyAPI_FUNC(int) _PyRetrace_CheckCallAt(
     PyThreadState *tstate,
     _PyInterpreterFrame *frame);
 
@@ -898,26 +884,54 @@ _PyRetrace_ActivateFrame(PyThreadState *tstate, _PyInterpreterFrame *frame)
     if (space->depth != UINT32_MAX) {
         space->depth++;
     }
-    if (tstate != NULL && tstate->retrace.thread_start_pending) {
-        _PyRetrace_DeliverThreadResumeCallback(tstate, frame);
-    }
     return 0;
 }
 
-static inline void
+static inline int
 _PyRetrace_BeginInstruction(
     PyThreadState *tstate,
     _PyInterpreterFrame *frame,
-    int opcode)
+    int opcode,
+    PyObject ***stack_pointer)
 {
-    (void)tstate;
     (void)opcode;
-    if (!_PyRetrace_FrameIsVisible(frame)) {
-        return;
+    int frame_visible = _PyRetrace_FrameIsVisible(frame);
+    if (frame_visible) {
+        frame->retrace.current_call_ordinal = 0;
+        frame->retrace.coordinate_hash =
+            _PyFrame_RETRACE_COORDINATE_HASH_UNSET;
     }
-    frame->retrace.current_call_ordinal = 0;
-    frame->retrace.coordinate_hash =
-        _PyFrame_RETRACE_COORDINATE_HASH_UNSET;
+    if (tstate != NULL && tstate->interp != NULL &&
+        !tstate->retrace.thread_callback_active)
+    {
+        PyInterpreterState *interp = tstate->interp;
+        if ((interp->retrace.call_at_armed ||
+             interp->retrace.call_at_extra_armed) &&
+            frame_visible)
+        {
+            if (stack_pointer != NULL) {
+                _PyFrame_SetStackPointer(frame, *stack_pointer);
+            }
+            if (_PyRetrace_CheckCallAt(tstate, frame) < 0) {
+                if (stack_pointer != NULL) {
+                    *stack_pointer = _PyFrame_GetStackPointer(frame);
+                }
+                return -1;
+            }
+            if (stack_pointer != NULL) {
+                *stack_pointer = _PyFrame_GetStackPointer(frame);
+            }
+        }
+        PyThreadState *previous = interp->retrace.last_bytecode_thread;
+        if (previous != tstate) {
+            if (previous != NULL && interp->retrace.thread_switch_armed) {
+                _PyRetrace_DeliverThreadSwitchCallback(
+                    previous, tstate, frame);
+            }
+            interp->retrace.last_bytecode_thread = tstate;
+        }
+    }
+    return 0;
 }
 
 static inline void
@@ -975,22 +989,6 @@ _PyRetrace_CopyFrameStateForNewFrame(
 {
     (void)src;
     _PyRetraceFrameState_Init(dest);
-}
-
-PyAPI_FUNC(void) _PyRetrace_NoteThreadResume(PyThreadState *tstate);
-PyAPI_FUNC(void) _PyRetrace_DeliverThreadYieldCallback(
-    PyThreadState *tstate,
-    _PyInterpreterFrame *frame);
-PyAPI_FUNC(int) _PyRetrace_CheckCallAt(
-    PyThreadState *tstate,
-    _PyInterpreterFrame *frame);
-
-static inline void
-_PyRetrace_DeliverThreadYieldBeforeGilDrop(PyThreadState *tstate)
-{
-    _PyInterpreterFrame *frame = _PyRetrace_CurrentThreadFrame(tstate);
-    (void)_PyRetrace_PinThreadCallbackFrame(tstate, frame);
-    _PyRetrace_DeliverThreadYieldCallback(tstate, frame);
 }
 
 #ifdef __cplusplus

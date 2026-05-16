@@ -35,12 +35,8 @@ retrace.enable(callable)
 retrace.CoordinateSpace().wrap(callable)
 retrace.run_disabled(callable, *args, **kwargs)
 retrace.with_new_coordinates(callable, *args, **kwargs)
-retrace.callbacks.thread_start = callback_or_none
-retrace.callbacks.set_thread_start(callback_or_none, space=None)
-retrace.callbacks.thread_yield = callback_or_none
-retrace.callbacks.set_thread_yield(callback_or_none, space=None)
-retrace.callbacks.thread_resume = callback_or_none
-retrace.callbacks.set_thread_resume(callback_or_none, space=None)
+retrace.callbacks.thread_switch = callback_or_none
+retrace.callbacks.set_thread_switch(callback_or_none, space=None)
 retrace.call_at(
     thread_id, coordinates, callback, overshoot_callback=None
 )
@@ -95,33 +91,22 @@ materializing the coordinate vector.
 to seed the main thread id. If it is unset, Retrace uses the literal
 seed string `retrace`.
 
-`callbacks.thread_start`, `callbacks.thread_yield`, and
-`callbacks.thread_resume` install Python callbacks for eval-loop thread
-scheduling telemetry. Assign `None` to any property to clear it. All three
-callbacks use the same signature:
+`callbacks.thread_switch` installs a Python callback for bytecode thread
+ordering. Assign `None` to clear it. The callback signature is:
 
 ```python
-callback()
+callback(previous_delta, next_thread_id)
 ```
 
-The start callback runs once on a newly started thread after the threading
-bootstrap has published it and before the target continues; coordinates
-observed inside it are `()`.
-The public property setter registers for root-space thread creation. Use
-`callbacks.set_thread_start(callback, space)` to target threads that inherit a
-different coordinate space.
-The yield callback runs on the current thread just before it drops the GIL,
-including Python-level switch requests and extension/C API releases such as
-`Py_BEGIN_ALLOW_THREADS`, in root space; use
-`callbacks.set_thread_yield(callback, space)` for another coordinate space. The
-resume callback runs on the current thread after it has acquired the GIL and
-restored its current thread state, before application bytecode resumes in root
-space; use `callbacks.set_thread_resume(callback, space)` for another
-coordinate space. The current deterministic
-thread id can be read with `_thread.get_ident()`. Callback return values are
-ignored. Thread scheduling callbacks are coordinate-transparent: coordinates,
-deltas, and hashes observed inside the callback describe the pinned application
-instruction boundary, not callback-local Python frames.
+The callback runs on the new/current thread before its next visible bytecode
+instruction executes. `previous_delta` describes the previous thread's
+coordinate movement in that same coordinate space, and `next_thread_id` is the
+stable Retrace id of the new/current thread. Use
+`callbacks.set_thread_switch(callback, space)` to register for another
+coordinate space. Callback return values are ignored. Thread-switch callbacks
+are coordinate-transparent: coordinates, deltas, and hashes observed inside the
+callback describe the pinned application instruction boundary, not
+callback-local Python frames.
 
 `call_at(thread_id, coordinates, callback, overshoot_callback=None)` arms one
 root-space coordinate callback for the current interpreter. Supplying a
@@ -168,20 +153,15 @@ typedef struct {
     uint32_t feature_flags;
     void *userdata;
 
-    int (*set_thread_yield_callback)(
+    int (*set_thread_switch_callback)(
         void *userdata,
         uint32_t space_id,
         void (*callback)(void *userdata,
                          PyInterpreterState *interp,
-                         PyThreadState *thread,
-                         uint64_t execution_coordinate));
-    int (*set_thread_resume_callback)(
-        void *userdata,
-        uint32_t space_id,
-        void (*callback)(void *userdata,
-                         PyInterpreterState *interp,
-                         PyThreadState *thread,
-                         uint64_t execution_coordinate));
+                         PyThreadState *previous_thread,
+                         PyThreadState *current_thread,
+                         PyObject *previous_delta,
+                         PyObject *next_thread_id));
 } RetraceProbeAPI;
 ```
 
@@ -277,21 +257,16 @@ Avoid per-instruction Python callbacks, atomics, allocation, or lock traffic.
 
 The first record-side callbacks are telemetry. The Python API reports no thread
 arguments; each callback observes the current thread because it runs on that
-thread. Recorder code can write separate trace events such as:
+thread. Recorder code can write trace events such as:
 
 ```text
-THREAD_START  thread-id
-THREAD_YIELD  thread-id, coordinate-delta
-THREAD_RESUME thread-id, coordinate-delta
+THREAD_SWITCH previous-coordinate-delta, next-thread-id
 ```
 
-The start event describes a newly started thread after the threading bootstrap
-has published it and before the target continues; its cursor is empty. The yield
-event describes a thread reaching a GIL drop point, including extension/C API
-releases. The resume event describes a previously started thread that reacquired
-the GIL and is about to continue running Python bytecode. A newly started thread
-emits start, then later yield/resume events; it does not emit an initial resume.
-This avoids asking CPython to predict the next thread during yield.
+The event is emitted only when bytecode execution changes to a different thread
+within the registered coordinate space. It describes the previous visible
+thread's coordinate delta in that space and the stable id of the new/current
+thread. CPython does not report raw GIL handoffs.
 
 Reentrant delivery is suppressed only for the same thread while its callback is
 already active; other threads may run their own callbacks. Callback errors are
@@ -299,24 +274,6 @@ reported through `PyErr_WriteUnraisable()` and treated as accepted telemetry so
 the interpreter does not deadlock on callback failure. The callbacks should
 remain small, should commit through a non-yielding writer path, and must not
 route control-plane I/O through Retrace gates.
-
-A later native capsule API can add richer data:
-
-```text
-from thread, to thread, from execution coordinate, to execution coordinate,
-reason
-```
-
-Possible reasons can start coarse:
-
-```text
-unknown
-gil_acquire
-gil_drop
-thread_start
-thread_exit
-blocking_wait
-```
 
 ## call_at
 
@@ -350,12 +307,10 @@ transfer tokens and releases the GIL while the current thread is parked; Python
 replay policy still decides which `call_at` target to arm and which stable
 thread id should run next.
 
-A replay scheduler that controls thread starts should register a
-`thread_start` callback that records the current stable thread id, consumes the
-matching start event, looks ahead to arm any immediately available yield point,
-then calls `handoff.start()`. The unscheduled controller thread can transfer the
-first permit with `handoff.to(thread_id)` once the recorded start barriers ahead
-of that permit have parked.
+A replay scheduler can use the `thread_switch` callback as the bytecode
+ordering point and `ThreadHandoff` as the parking primitive. The callback is
+already aligned before the next bytecode instruction, so replay policy does not
+need separate GIL acquire/drop telemetry.
 
 Callback exceptions propagate back through the eval loop. Replay should treat
 that as a scheduler/control-plane failure rather than application behavior.

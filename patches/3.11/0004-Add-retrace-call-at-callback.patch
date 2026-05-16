@@ -16,7 +16,7 @@ index 3816a42..d90457d 100644
  #include "pycore_pylifecycle.h"   // _PyErr_Print()
  #include "pycore_pymem.h"         // _PyMem_IsPtrFreed()
  #include "pycore_pystate.h"       // _PyInterpreterState_GET()
--#include "pycore_retrace.h"       // thread scheduling callbacks
+-#include "pycore_retrace.h"       // retrace thread helpers
 +#include "pycore_retrace.h"       // retrace callbacks
  #include "pycore_sysmodule.h"     // _PySys_Audit()
  #include "pycore_tuple.h"         // _PyTuple_ITEMS()
@@ -24,7 +24,7 @@ index 3816a42..d90457d 100644
 @@ -1299,6 +1299,24 @@ eval_frame_handle_pending(PyThreadState *tstate)
      #define USE_COMPUTED_GOTOS 0
  #endif
-
+ 
 +#define RETRACE_CALL_AT() \
 +    do { \
 +        PyInterpreterState *retrace_interp = tstate->interp; \
@@ -60,24 +60,21 @@ index 3816a42..d90457d 100644
 +        RETRACE_CALL_AT(); \
 +    } while (0)
  #endif
-
+ 
  #if USE_COMPUTED_GOTOS
 diff --git a/Python/pystate.c b/Python/pystate.c
 index 1c93702..77f4084 100644
 --- a/Python/pystate.c
 +++ b/Python/pystate.c
-@@ -413,6 +413,12 @@ interpreter_clear(PyInterpreterState *interp, PyThreadState *tstate)
+@@ -413,4 +413,10 @@ interpreter_clear(PyInterpreterState *interp, PyThreadState *tstate)
      Py_CLEAR(interp->audit_hooks);
-     Py_CLEAR(interp->retrace.thread_start_callback);
-     Py_CLEAR(interp->retrace.thread_yield_callback);
-     Py_CLEAR(interp->retrace.thread_resume_callback);
 +    _PyRetrace_ClearSpaceCallbacks(interp);
 +    _PyRetrace_ClearIdentityHashTable(interp);
 +    interp->retrace.call_at_armed = 0;
 +    Py_CLEAR(interp->retrace.call_at_coordinates);
 +    Py_CLEAR(interp->retrace.call_at_callback);
 +    Py_CLEAR(interp->retrace.call_at_overshoot_callback);
-
+ 
      PyConfig_Clear(&interp->config);
      Py_CLEAR(interp->codec_search_path);
 --

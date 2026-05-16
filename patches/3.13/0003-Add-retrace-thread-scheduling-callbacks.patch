@@ -1,18 +1,18 @@
 From bc37f0d537b0f573a77ca7e98e6435c0bdcbf630 Mon Sep 17 00:00:00 2001
 From: Retrace CPython Builder <retrace-cpython@retracesoftware.com>
 Date: Thu, 7 May 2026 09:50:42 +0100
-Subject: [PATCH 3/9] Add retrace thread scheduling callbacks
+Subject: [PATCH 3/9] Add retrace thread helpers
 
 ---
  Include/cpython/pystate.h        |  4 ++++
  Include/internal/pycore_interp.h |  3 +++
- Modules/_threadmodule.c          | 39 ++++++++++++++++++++++-----------------
+ Modules/_threadmodule.c          | 40 +++++++++++++++++++++++-----------------
  Modules/signalmodule.c           |  3 +++
  Python/ceval.c                   |  1 +
  Python/ceval_gil.c               | 13 +++++++++++++
  Python/ceval_macros.h            |  6 ++++-
  Python/pystate.c                 | 14 +++++++++++---
- 8 files changed, 62 insertions(+), 21 deletions(-)
+ 8 files changed, 63 insertions(+), 21 deletions(-)
 
 diff --git a/Include/cpython/pystate.h b/Include/cpython/pystate.h
 index 72a4969a2ad..979ca24a5ea 100644
@@ -21,12 +21,12 @@ index 72a4969a2ad..979ca24a5ea 100644
 @@ -2,6 +2,8 @@
  #  error "this header file must not be included directly"
  #endif
-
+ 
 +#include "cpython/retrace_state.h" // _PyRetraceThreadState
 +
-
+ 
  /* private interpreter helpers */
-
+ 
 @@ -199,4 +201,6 @@ struct _ts {
      /* Used by `threading.local`s to be remove keys/values for dying threads.
         The PyThreadObject must hold the only reference to this value.
@@ -43,12 +43,12 @@ index 3243b1e618d..3fd999295bd 100644
  #include "pycore_unicodeobject.h" // struct _Py_unicode_state
  #include "pycore_warnings.h"      // struct _warnings_runtime_state
 +#include "cpython/retrace_state.h" // _PyRetraceInterpreterState
-
-
+ 
+ 
  struct _Py_long_state {
 @@ -236,6 +237,8 @@ struct _is {
      struct _obmalloc_state *obmalloc;
-
+ 
      PyObject *audit_hooks;
 +
 +    _PyRetraceInterpreterState retrace;
@@ -61,14 +61,14 @@ index bc9433afe41..3c88f3592c4 100644
 +++ b/Modules/_threadmodule.c
 @@ -2,6 +2,7 @@
  /* Interface to Sjoerd's portable C thread library */
-
+ 
  #include "Python.h"
 +#include "pycore_retrace.h"       // retrace thread helpers
  #include "pycore_interp.h"        // _PyInterpreterState.threads.count
  #include "pycore_lock.h"
  #include "pycore_moduleobject.h"  // _PyModule_GetState()
 @@ -384,7 +385,7 @@ force_done(ThreadHandle *handle)
-
+ 
  static int
  ThreadHandle_start(ThreadHandle *self, PyObject *func, PyObject *args,
 -                   PyObject *kwargs)
@@ -84,11 +84,11 @@ index bc9433afe41..3c88f3592c4 100644
 +    if (retrace_thread_id != NULL) {
 +        *retrace_thread_id = boot->tstate->retrace.thread_id;
 +    }
-
+ 
      // Mark the handle running
      PyMutex_Lock(&self->mutex);
 @@ -1833,7 +1838,8 @@ and False otherwise.\n");
-
+ 
  static int
  do_start_new_thread(thread_module_state *state, PyObject *func, PyObject *args,
 -                    PyObject *kwargs, ThreadHandle *handle, int daemon)
@@ -100,7 +100,7 @@ index bc9433afe41..3c88f3592c4 100644
 @@ -1854,7 +1860,7 @@ do_start_new_thread(thread_module_state *state, PyObject *func, PyObject *args,
          add_to_shutdown_handles(state, handle);
      }
-
+ 
 -    if (ThreadHandle_start(handle, func, args, kwargs) < 0) {
 +    if (ThreadHandle_start(handle, func, args, kwargs, retrace_thread_id) < 0) {
          if (!daemon) {
@@ -109,7 +109,7 @@ index bc9433afe41..3c88f3592c4 100644
 @@ -1899,15 +1905,16 @@ thread_PyThread_start_new_thread(PyObject *module, PyObject *fargs)
          return NULL;
      }
-
+ 
 +    uint64_t retrace_thread_id = 0;
      int st =
 -        do_start_new_thread(state, func, args, kwargs, handle, /*daemon=*/1);
@@ -124,7 +124,7 @@ index bc9433afe41..3c88f3592c4 100644
 -    return PyLong_FromUnsignedLongLong(ident);
 +    return PyLong_FromUnsignedLongLong((unsigned long long)retrace_thread_id);
  }
-
+ 
  PyDoc_STRVAR(start_new_thread_doc,
 @@ -1978,7 +1985,8 @@ thread_PyThread_start_joinable_thread(PyObject *module, PyObject *fargs,
          return NULL;
@@ -148,7 +148,7 @@ index bc9433afe41..3c88f3592c4 100644
 -    return PyLong_FromUnsignedLongLong(ident);
 +    return _PyRetrace_ThreadIdentObject(_PyThreadState_GET());
  }
-
+ 
  PyDoc_STRVAR(get_ident_doc,
 @@ -2204,8 +2207,12 @@ thread_excepthook_file(PyObject *file, PyObject *exc_type, PyObject *exc_value,
          Py_DECREF(name);
@@ -185,11 +185,11 @@ index 6f53dcda824..3e7a9e0ff57 100644
 +#include "pycore_retrace.h"       // retrace thread helpers
  #include "pycore_signal.h"        // _Py_RestoreSignals()
  #include "pycore_time.h"          // _PyTime_FromSecondsObject()
-
+ 
 @@ -1288,6 +1289,8 @@ signal_pthread_kill_impl(PyObject *module, unsigned long thread_id,
          return NULL;
      }
-
+ 
 +    thread_id = _PyRetrace_CPythonThreadIdentFromPublicIdent(
 +        _PyInterpreterState_GET(), thread_id);
      err = pthread_kill((pthread_t)thread_id, signalnum);
@@ -201,86 +201,12 @@ index ca23e298792..ad70ea1bc12 100644
 +++ b/Python/ceval.c
 @@ -3,6 +3,7 @@
  #define _PY_INTERPRETER
-
+ 
  #include "Python.h"
-+#include "pycore_retrace.h"       // thread scheduling callbacks
++#include "pycore_retrace.h"       // retrace thread helpers
  #include "pycore_abstract.h"      // _PyIndex_Check()
  #include "pycore_backoff.h"
  #include "pycore_call.h"          // _PyObject_CallNoArgs()
-diff --git a/Python/ceval_gil.c b/Python/ceval_gil.c
-index a1433e5b25f..4902440e01a 100644
---- a/Python/ceval_gil.c
-+++ b/Python/ceval_gil.c
-@@ -7,2 +7,3 @@
- #include "pycore_pylifecycle.h"   // _PyErr_Print()
-+#include "pycore_retrace.h"       // thread scheduling callbacks
- #include "pycore_pymem.h"         // _PyMem_IsPtrFreed()
-@@ -389,6 +390,7 @@ take_gil(PyThreadState *tstate)
-     if (tstate != (PyThreadState*)_Py_atomic_load_ptr_relaxed(&gil->last_holder)) {
-         _Py_atomic_store_ptr_relaxed(&gil->last_holder, tstate);
-         ++gil->switch_number;
-+        _PyRetrace_NoteThreadResume(tstate);
-     }
-
- #ifdef FORCE_SWITCHING
-@@ -573,6 +575,7 @@ PyEval_AcquireLock(void)
-     _Py_EnsureTstateNotNULL(tstate);
-
-     take_gil(tstate);
-+    _PyRetrace_DeliverThreadResumeCallback(tstate, NULL);
- }
-
- // Function removed in the Python 3.13 API but kept in the stable ABI.
-@@ -583,6 +586,7 @@ PyEval_ReleaseLock(void)
-     /* This function must succeed when the current thread state is NULL.
-        We therefore avoid PyThreadState_Get() which dumps a fatal error
-        in debug mode. */
-+    _PyRetrace_DeliverThreadYieldBeforeGilDrop(tstate);
-     drop_gil(tstate->interp, tstate, 0);
- }
-
-@@ -614,6 +622,7 @@ void
- PyEval_ReleaseThread(PyThreadState *tstate)
- {
-     assert(_PyThreadState_CheckConsistency(tstate));
-+    _PyRetrace_DeliverThreadYieldBeforeGilDrop(tstate);
-     _PyThreadState_Detach(tstate);
- }
-
-@@ -644,6 +654,8 @@ PyThreadState *
- PyEval_SaveThread(void)
- {
-     PyThreadState *tstate = _PyThreadState_GET();
-+    _Py_EnsureTstateNotNULL(tstate);
-+    _PyRetrace_DeliverThreadYieldBeforeGilDrop(tstate);
-     _PyThreadState_Detach(tstate);
-     return tstate;
- }
-@@ -1311,6 +1324,7 @@ _Py_HandlePending(PyThreadState *tstate)
-     /* GIL drop request */
-     if ((breaker & _PY_GIL_DROP_REQUEST_BIT) != 0) {
-         /* Give another thread a chance */
-+        _PyRetrace_DeliverThreadYieldCallback(tstate, NULL);
-         _PyThreadState_Detach(tstate);
-
-         /* Other threads may run now */
-diff --git a/Python/ceval_macros.h b/Python/ceval_macros.h
-index ef684e88ccb..83c25695c6a 100644
---- a/Python/ceval_macros.h
-+++ b/Python/ceval_macros.h
-@@ -137,7 +137,11 @@ do { \
-     _Py_CHECK_EMSCRIPTEN_SIGNALS_PERIODICALLY(); \
-     QSBR_QUIESCENT_STATE(tstate); \
-     if (_Py_atomic_load_uintptr_relaxed(&tstate->eval_breaker) & _PY_EVAL_EVENTS_MASK) { \
--        if (_Py_HandlePending(tstate) != 0) { \
-+        _PyInterpreterFrame *retrace_callback_frame = \
-+            _PyRetrace_PinThreadCallbackFrame(tstate, frame); \
-+        int retrace_pending_err = _Py_HandlePending(tstate); \
-+        _PyRetrace_RestoreThreadCallbackFrame(tstate, retrace_callback_frame); \
-+        if (retrace_pending_err != 0) { \
-             GOTO_ERROR(error); \
-         } \
-     }
 diff --git a/Python/pystate.c b/Python/pystate.c
 index 07c69b92d52..330ec7418b7 100644
 --- a/Python/pystate.c
@@ -293,44 +219,23 @@ index 07c69b92d52..330ec7418b7 100644
  #include "pycore_pystate.h"
  #include "pycore_runtime_init.h"  // _PyRuntimeState_INIT
  #include "pycore_sysmodule.h"     // _PySys_Audit()
-@@ -821,6 +822,9 @@ interpreter_clear(PyInterpreterState *interp, PyThreadState *tstate)
-     // XXX Make sure we properly deal with problematic finalizers.
-
-     Py_CLEAR(interp->audit_hooks);
-+    Py_CLEAR(interp->retrace.thread_start_callback);
-+    Py_CLEAR(interp->retrace.thread_yield_callback);
-+    Py_CLEAR(interp->retrace.thread_resume_callback);
-
-     // At this time, all the threads should be cleared so we don't need atomic
-     // operations for instrumentation_version or eval_breaker.
 @@ -1536,6 +1540,8 @@ init_threadstate(_PyThreadStateImpl *_tstate,
          // Start in the suspended state if there is an ongoing stop-the-world.
          tstate->state = _Py_THREAD_SUSPENDED;
      }
 +    _PyRetrace_InitializeThreadState(interp, tstate);
 +    _PyRetrace_SeedThreadState(current_fast_get(), tstate);
-
+ 
      tstate->_status.initialized = 1;
  }
 @@ -1741,6 +1747,7 @@ PyThreadState_Clear(PyThreadState *tstate)
      Py_CLEAR(tstate->async_gen_finalizer);
-
+ 
      Py_CLEAR(tstate->context);
 +    _PyRetrace_ClearThreadState(tstate);
-
+ 
  #ifdef Py_GIL_DISABLED
      // Each thread should clear own freelists in free-threading builds.
-@@ -2138,9 +2145,10 @@ _PyThreadState_Attach(PyThreadState *tstate)
-     // Resume previous critical section. This acquires the lock(s) from the
-     // top-most critical section.
-     if (tstate->critical_section != 0) {
-         _PyCriticalSection_Resume(tstate);
-     }
-+    _PyRetrace_DeliverThreadResumeCallback(tstate, NULL);
-
- #if defined(Py_DEBUG)
-     errno = err;
- #endif
 @@ -2397,7 +2404,7 @@ PyThreadState_SetAsyncExc(unsigned long id, PyObject *exc)
       */
      HEAD_LOCK(runtime);
@@ -339,7 +244,7 @@ index 07c69b92d52..330ec7418b7 100644
 +        if (!_PyRetrace_ThreadMatchesAsyncExcId(interp, tstate, id)) {
              continue;
          }
-
+ 
 @@ -2564,7 +2571,7 @@ _PyThread_CurrentFrames(void)
              if (frame == NULL) {
                  continue;

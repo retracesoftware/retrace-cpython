@@ -1,17 +1,17 @@
 From 51d6aadfd2c85c23ef33cdcb3e1a0e06f17cdb34 Mon Sep 17 00:00:00 2001
 From: Retrace CPython Builder <retrace-cpython@retracesoftware.com>
 Date: Thu, 7 May 2026 09:50:59 +0100
-Subject: [PATCH] Add retrace thread scheduling callbacks
+Subject: [PATCH] Add retrace thread helpers
 
 ---
  Include/cpython/pystate.h        |  4 ++++
  Include/internal/pycore_interp.h |  3 +++
- Modules/_threadmodule.c          | 21 ++++++++++-----------
+ Modules/_threadmodule.c          | 22 +++++++++++-----------
  Modules/signalmodule.c           |  3 +++
  Python/ceval.c                   | 23 ++++++++++++++++++-----
  Python/ceval_gil.h               |  5 ++++-
  Python/pystate.c                 | 14 +++++++++++---
- 7 files changed, 53 insertions(+), 20 deletions(-)
+ 7 files changed, 54 insertions(+), 20 deletions(-)
 
 diff --git a/Include/cpython/pystate.h b/Include/cpython/pystate.h
 index 2bd4606..27f32ad 100644
@@ -100,68 +100,16 @@ index f1d1fed..be20bbf 100644
 +++ b/Python/ceval.c
 @@ -22,2 +22,3 @@
  #include "pycore_pystate.h"       // _PyInterpreterState_GET()
-+#include "pycore_retrace.h"       // thread scheduling callbacks
++#include "pycore_retrace.h"       // retrace thread helpers
  #include "pycore_sysmodule.h"     // _PySys_Audit()
-@@ -413,2 +414,3 @@ PyEval_AcquireLock(void)
-     take_gil(tstate);
-+    _PyRetrace_DeliverThreadResumeCallback(tstate, NULL);
- }
-@@ -425,2 +427,3 @@ PyEval_ReleaseLock(void)
-     struct _ceval_state *ceval2 = &tstate->interp->ceval;
-+    _PyRetrace_DeliverThreadYieldBeforeGilDrop(tstate);
-     drop_gil(ceval, ceval2, tstate);
-@@ -447,2 +453,3 @@ PyEval_AcquireThread(PyThreadState *tstate)
-     }
-+    _PyRetrace_DeliverThreadResumeCallback(tstate, NULL);
- }
-@@ -456,1 +463,2 @@ PyEval_ReleaseThread(PyThreadState *tstate)
-+    _PyRetrace_DeliverThreadYieldBeforeGilDrop(tstate);
-     _PyRuntimeState *runtime = tstate->interp->runtime;
-@@ -505,5 +513,6 @@ PyEval_SaveThread(void)
+@@ -505,5 +513,5 @@ PyEval_SaveThread(void)
      _PyRuntimeState *runtime = &_PyRuntime;
 -    PyThreadState *tstate = _PyThreadState_Swap(&runtime->gilstate, NULL);
 +    PyThreadState *tstate = _PyRuntimeState_GetThreadState(runtime);
      _Py_EnsureTstateNotNULL(tstate);
 -
-+    _PyRetrace_DeliverThreadYieldBeforeGilDrop(tstate);
 +    tstate = _PyThreadState_Swap(&runtime->gilstate, NULL);
      struct _ceval_runtime_state *ceval = &runtime->ceval;
-@@ -524,2 +534,3 @@ PyEval_RestoreThread(PyThreadState *tstate)
-     _PyThreadState_Swap(gilstate, tstate);
-+    _PyRetrace_DeliverThreadResumeCallback(tstate, NULL);
- }
-@@ -1174,3 +1185,3 @@ PyEval_EvalFrameEx(PyFrameObject *f, int throwflag)
- static int
--eval_frame_handle_pending(PyThreadState *tstate)
-+eval_frame_handle_pending(PyThreadState *tstate, _PyInterpreterFrame *frame)
- {
-@@ -1197,2 +1208,3 @@ eval_frame_handle_pending(PyThreadState *tstate)
-         /* Give another thread a chance */
-+        _PyRetrace_DeliverThreadYieldCallback(tstate, frame);
-         if (_PyThreadState_Swap(&runtime->gilstate, NULL) != tstate) {
-@@ -1209,2 +1221,3 @@ eval_frame_handle_pending(PyThreadState *tstate)
-         }
-+        _PyRetrace_DeliverThreadResumeCallback(tstate, frame);
-     }
-@@ -1761,3 +1774,3 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *frame, int
-      */
--    if (eval_frame_handle_pending(tstate) != 0) {
-+    if (eval_frame_handle_pending(tstate, frame) != 0) {
-         goto error;
-diff --git a/Python/ceval_gil.h b/Python/ceval_gil.h
-index 94e2df0..bc5ddb1 100644
---- a/Python/ceval_gil.h
-+++ b/Python/ceval_gil.h
-@@ -268,5 +268,8 @@ take_gil(PyThreadState *tstate)
- 
--    if (tstate != (PyThreadState*)_Py_atomic_load_relaxed(&gil->last_holder)) {
-+    PyThreadState *previous_holder =
-+        (PyThreadState*)_Py_atomic_load_relaxed(&gil->last_holder);
-+    if (tstate != previous_holder) {
-         _Py_atomic_store_relaxed(&gil->last_holder, (uintptr_t)tstate);
-         ++gil->switch_number;
-+        _PyRetrace_NoteThreadResume(tstate);
-     }
 diff --git a/Python/pystate.c b/Python/pystate.c
 index a451166..acd450d 100644
 --- a/Python/pystate.c
@@ -170,12 +118,6 @@ index a451166..acd450d 100644
  #include "pycore_pymem.h"         // _PyMem_SetDefaultAllocator()
 +#include "pycore_retrace.h"       // thread-state helpers
  #include "pycore_pystate.h"       // _PyThreadState_GET()
-@@ -413,2 +414,5 @@ interpreter_clear(PyInterpreterState *interp, PyThreadState *tstate)
-     Py_CLEAR(interp->audit_hooks);
-+    Py_CLEAR(interp->retrace.thread_start_callback);
-+    Py_CLEAR(interp->retrace.thread_yield_callback);
-+    Py_CLEAR(interp->retrace.thread_resume_callback);
- 
 @@ -798,2 +802,3 @@ init_threadstate(PyThreadState *tstate,
      tstate->datastack_chunk = NULL;
 +    _PyRetrace_InitializeThreadState(interp, tstate);

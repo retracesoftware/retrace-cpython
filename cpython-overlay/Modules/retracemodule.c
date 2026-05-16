@@ -106,10 +106,9 @@ retrace_thread_state_frame(PyThreadState *target_tstate,
 {
     if (target_tstate->retrace.thread_callback_active &&
         space != NULL &&
-        space->space_id == _PyFrame_RETRACE_SPACE_ID_ROOT &&
         (target_tstate->retrace.current_space == NULL ||
          target_tstate->retrace.current_space->space_id !=
-            _PyFrame_RETRACE_SPACE_ID_ROOT))
+            space->space_id))
     {
         return target_tstate->retrace.thread_callback_frame;
     }
@@ -199,18 +198,8 @@ retrace_fill_coordinates(uint64_t *coordinates,
 }
 
 static PyObject *
-retrace_thread_delta(PyObject *module, PyObject *args)
+retrace_thread_delta_for_tstate(PyThreadState *tstate, uint32_t space_id)
 {
-    PyObject *space_id_arg = Py_None;
-    if (!PyArg_ParseTuple(args, "|O:thread_delta", &space_id_arg)) {
-        return NULL;
-    }
-    uint32_t space_id;
-    if (retrace_space_id_from_object(space_id_arg, &space_id) < 0) {
-        return NULL;
-    }
-
-    PyThreadState *tstate = _PyThreadState_GET();
     _PyRetraceThreadSpaceState *space = retrace_find_space(tstate, space_id);
     if (space == NULL || !space->seen) {
         Py_RETURN_NONE;
@@ -282,9 +271,26 @@ retrace_thread_delta(PyObject *module, PyObject *args)
     return result;
 }
 
+static PyObject *
+retrace_thread_delta(PyObject *module, PyObject *args)
+{
+    (void)module;
+    PyObject *space_id_arg = Py_None;
+    if (!PyArg_ParseTuple(args, "|O:thread_delta", &space_id_arg)) {
+        return NULL;
+    }
+    uint32_t space_id;
+    if (retrace_space_id_from_object(space_id_arg, &space_id) < 0) {
+        return NULL;
+    }
+    return retrace_thread_delta_for_tstate(_PyThreadState_GET(), space_id);
+}
+
 static _PyRetraceSpaceCallbackState *
 retrace_find_space_callback_state(PyInterpreterState *interp,
                                   uint32_t space_id);
+static void
+retrace_update_thread_switch_armed(PyInterpreterState *interp);
 static void
 retrace_update_call_at_extra_armed(PyInterpreterState *interp);
 static void
@@ -553,42 +559,6 @@ retrace_callback_ref(PyObject *callback, const char *name, int allow_none)
     return Py_NewRef(callback);
 }
 
-typedef enum {
-    RETRACE_THREAD_CALLBACK_START,
-    RETRACE_THREAD_CALLBACK_YIELD,
-    RETRACE_THREAD_CALLBACK_RESUME,
-} RetraceThreadCallbackKind;
-
-static PyObject **
-retrace_root_thread_callback_slot(PyInterpreterState *interp,
-                                  RetraceThreadCallbackKind kind)
-{
-    switch (kind) {
-        case RETRACE_THREAD_CALLBACK_START:
-            return &interp->retrace.thread_start_callback;
-        case RETRACE_THREAD_CALLBACK_YIELD:
-            return &interp->retrace.thread_yield_callback;
-        case RETRACE_THREAD_CALLBACK_RESUME:
-            return &interp->retrace.thread_resume_callback;
-    }
-    return NULL;
-}
-
-static PyObject **
-retrace_space_thread_callback_slot(_PyRetraceSpaceCallbackState *entry,
-                                   RetraceThreadCallbackKind kind)
-{
-    switch (kind) {
-        case RETRACE_THREAD_CALLBACK_START:
-            return &entry->thread_start_callback;
-        case RETRACE_THREAD_CALLBACK_YIELD:
-            return &entry->thread_yield_callback;
-        case RETRACE_THREAD_CALLBACK_RESUME:
-            return &entry->thread_resume_callback;
-    }
-    return NULL;
-}
-
 static _PyRetraceSpaceCallbackState *
 retrace_find_space_callback_state(PyInterpreterState *interp,
                                   uint32_t space_id)
@@ -628,13 +598,27 @@ retrace_ensure_space_callback_state(PyInterpreterState *interp,
 static int
 retrace_space_callback_state_empty(_PyRetraceSpaceCallbackState *entry)
 {
-    return entry->thread_start_callback == NULL &&
-        entry->thread_yield_callback == NULL &&
-        entry->thread_resume_callback == NULL &&
+    return entry->thread_switch_callback == NULL &&
         !entry->call_at_armed &&
         entry->call_at_coordinates == NULL &&
         entry->call_at_callback == NULL &&
         entry->call_at_overshoot_callback == NULL;
+}
+
+static void
+retrace_update_thread_switch_armed(PyInterpreterState *interp)
+{
+    interp->retrace.thread_switch_armed = 0;
+    for (_PyRetraceSpaceCallbackState *entry =
+             interp->retrace.space_callbacks;
+         entry != NULL;
+         entry = entry->next)
+    {
+        if (entry->thread_switch_callback != NULL) {
+            interp->retrace.thread_switch_armed = 1;
+            return;
+        }
+    }
 }
 
 static void
@@ -672,42 +656,31 @@ retrace_prune_space_callback_state(PyInterpreterState *interp,
     PyMem_RawFree(entry);
 }
 
-static PyObject *
-retrace_get_thread_callback(PyInterpreterState *interp,
-                            RetraceThreadCallbackKind kind,
-                            uint32_t space_id)
-{
-    if (space_id == _PyFrame_RETRACE_SPACE_ID_ROOT) {
-        PyObject **slot = retrace_root_thread_callback_slot(interp, kind);
-        return slot == NULL ? NULL : *slot;
-    }
-    _PyRetraceSpaceCallbackState *entry =
-        retrace_find_space_callback_state(interp, space_id);
-    if (entry == NULL) {
-        return NULL;
-    }
-    PyObject **slot = retrace_space_thread_callback_slot(entry, kind);
-    return slot == NULL ? NULL : *slot;
-}
+PyDoc_STRVAR(retrace_set_thread_switch_callback_doc,
+"set_thread_switch_callback($module, callback, space_id=None, /)\n"
+"--\n"
+"\n"
+"Set a Python callback invoked as callback(previous_delta, next_thread_id)\n"
+"before bytecode executes on a different thread. Callback frames are\n"
+"coordinate-transparent.");
 
 static PyObject *
-retrace_set_thread_callback(PyObject *module,
-                            PyObject *args,
-                            RetraceThreadCallbackKind kind,
-                            const char *name)
+retrace_set_thread_switch_callback(PyObject *module, PyObject *args)
 {
+    (void)module;
     PyThreadState *tstate = _PyThreadState_GET();
     PyInterpreterState *interp = tstate->interp;
     PyObject *callback;
     PyObject *space_id_arg = Py_None;
 
-    if (!PyArg_ParseTuple(args, "O|O:set_thread_callback",
+    if (!PyArg_ParseTuple(args, "O|O:set_thread_switch_callback",
                           &callback, &space_id_arg))
     {
         return NULL;
     }
 
-    PyObject *callback_ref = retrace_callback_ref(callback, name, 1);
+    PyObject *callback_ref =
+        retrace_callback_ref(callback, "thread switch", 1);
     if (callback_ref == NULL && PyErr_Occurred()) {
         return NULL;
     }
@@ -718,40 +691,40 @@ retrace_set_thread_callback(PyObject *module,
         return NULL;
     }
 
-    PyObject **slot = NULL;
-    _PyRetraceSpaceCallbackState *entry = NULL;
-    if (space_id == _PyFrame_RETRACE_SPACE_ID_ROOT) {
-        slot = retrace_root_thread_callback_slot(interp, kind);
-    }
-    else {
-        entry = callback_ref == NULL ?
-            retrace_find_space_callback_state(interp, space_id) :
-            retrace_ensure_space_callback_state(interp, space_id);
-        if (entry == NULL) {
-            if (callback_ref != NULL) {
-                Py_DECREF(callback_ref);
-                return NULL;
-            }
-            Py_RETURN_NONE;
+    _PyRetraceSpaceCallbackState *entry = callback_ref == NULL ?
+        retrace_find_space_callback_state(interp, space_id) :
+        retrace_ensure_space_callback_state(interp, space_id);
+    if (entry == NULL) {
+        if (callback_ref != NULL) {
+            Py_DECREF(callback_ref);
+            return NULL;
         }
-        slot = retrace_space_thread_callback_slot(entry, kind);
+        Py_RETURN_NONE;
     }
 
-    PyObject *old_callback = *slot;
-    *slot = callback_ref;
+    PyObject *old_callback = entry->thread_switch_callback;
+    entry->thread_switch_callback = callback_ref;
+    entry->last_bytecode_thread = NULL;
     Py_XDECREF(old_callback);
     retrace_prune_space_callback_state(interp, entry);
-
+    retrace_update_thread_switch_armed(interp);
     Py_RETURN_NONE;
 }
 
+PyDoc_STRVAR(retrace_get_thread_switch_callback_doc,
+"get_thread_switch_callback($module, space_id=None, /)\n"
+"--\n"
+"\n"
+"Return the active thread switch callback, or None.");
+
 static PyObject *
-retrace_get_thread_callback_object(PyObject *module,
-                                   PyObject *args,
-                                   RetraceThreadCallbackKind kind)
+retrace_get_thread_switch_callback(PyObject *module, PyObject *args)
 {
+    (void)module;
     PyObject *space_id_arg = Py_None;
-    if (!PyArg_ParseTuple(args, "|O:get_thread_callback", &space_id_arg)) {
+    if (!PyArg_ParseTuple(args, "|O:get_thread_switch_callback",
+                          &space_id_arg))
+    {
         return NULL;
     }
     uint32_t space_id = _PyFrame_RETRACE_SPACE_ID_ROOT;
@@ -759,97 +732,13 @@ retrace_get_thread_callback_object(PyObject *module,
         return NULL;
     }
     PyThreadState *tstate = _PyThreadState_GET();
-    PyObject *callback =
-        retrace_get_thread_callback(tstate->interp, kind, space_id);
+    _PyRetraceSpaceCallbackState *entry =
+        retrace_find_space_callback_state(tstate->interp, space_id);
+    PyObject *callback = entry == NULL ? NULL : entry->thread_switch_callback;
     if (callback == NULL) {
         Py_RETURN_NONE;
     }
     return Py_NewRef(callback);
-}
-
-PyDoc_STRVAR(retrace_set_thread_yield_callback_doc,
-"set_thread_yield_callback($module, callback, space_id=None, /)\n"
-"--\n"
-"\n"
-"Set a Python callback invoked as callback() before the current thread yields\n"
-"from the eval loop in the selected coordinate space. Callback frames are\n"
-"coordinate-transparent.");
-
-static PyObject *
-retrace_set_thread_yield_callback(PyObject *module, PyObject *args)
-{
-    return retrace_set_thread_callback(
-        module, args, RETRACE_THREAD_CALLBACK_YIELD, "thread yield");
-}
-
-PyDoc_STRVAR(retrace_get_thread_yield_callback_doc,
-"get_thread_yield_callback($module, space_id=None, /)\n"
-"--\n"
-"\n"
-"Return the active thread yield callback, or None.");
-
-static PyObject *
-retrace_get_thread_yield_callback(PyObject *module, PyObject *args)
-{
-    return retrace_get_thread_callback_object(
-        module, args, RETRACE_THREAD_CALLBACK_YIELD);
-}
-
-PyDoc_STRVAR(retrace_set_thread_start_callback_doc,
-"set_thread_start_callback($module, callback, space_id=None, /)\n"
-"--\n"
-"\n"
-"Set a Python callback invoked as callback() on a newly started thread after\n"
-"the threading bootstrap has published it and before the target continues when\n"
-"the thread inherits the selected coordinate space. Callback frames are\n"
-"coordinate-transparent.");
-
-static PyObject *
-retrace_set_thread_start_callback(PyObject *module, PyObject *args)
-{
-    return retrace_set_thread_callback(
-        module, args, RETRACE_THREAD_CALLBACK_START, "thread start");
-}
-
-PyDoc_STRVAR(retrace_get_thread_start_callback_doc,
-"get_thread_start_callback($module, space_id=None, /)\n"
-"--\n"
-"\n"
-"Return the active thread start callback, or None.");
-
-static PyObject *
-retrace_get_thread_start_callback(PyObject *module, PyObject *args)
-{
-    return retrace_get_thread_callback_object(
-        module, args, RETRACE_THREAD_CALLBACK_START);
-}
-
-PyDoc_STRVAR(retrace_set_thread_resume_callback_doc,
-"set_thread_resume_callback($module, callback, space_id=None, /)\n"
-"--\n"
-"\n"
-"Set a Python callback invoked as callback() before application bytecode runs\n"
-"after the current thread resumes from an eval-loop yield in the selected\n"
-"coordinate space. Callback frames are coordinate-transparent.");
-
-static PyObject *
-retrace_set_thread_resume_callback(PyObject *module, PyObject *args)
-{
-    return retrace_set_thread_callback(
-        module, args, RETRACE_THREAD_CALLBACK_RESUME, "thread resume");
-}
-
-PyDoc_STRVAR(retrace_get_thread_resume_callback_doc,
-"get_thread_resume_callback($module, space_id=None, /)\n"
-"--\n"
-"\n"
-"Return the active thread resume callback, or None.");
-
-static PyObject *
-retrace_get_thread_resume_callback(PyObject *module, PyObject *args)
-{
-    return retrace_get_thread_callback_object(
-        module, args, RETRACE_THREAD_CALLBACK_RESUME);
 }
 
 typedef struct {
@@ -1737,6 +1626,8 @@ retrace_thread_handoff_to(PyObject *self_obj, PyObject *target_arg)
         return NULL;
     }
 
+    /* A permit delivered while this thread was already running is stale now. */
+    current->permit = 0;
     retrace_thread_handoff_wake_entry_locked(target);
 
     int status = retrace_thread_handoff_wait_entry_locked(self, current);
@@ -1830,10 +1721,11 @@ retrace_call_transparent_call_at_callback(PyThreadState *tstate,
 }
 
 static void
-retrace_call_thread_callback(PyThreadState *tstate,
-                             PyObject *callback,
-                             _PyInterpreterFrame *frame,
-                             int use_current_frame)
+retrace_call_thread_switch_callback(PyThreadState *tstate,
+                                    PyObject *callback,
+                                    _PyInterpreterFrame *frame,
+                                    PyObject *previous_delta,
+                                    PyObject *next_thread_id)
 {
     if (callback == NULL || tstate->retrace.thread_callback_active) {
         return;
@@ -1852,9 +1744,6 @@ retrace_call_thread_callback(PyThreadState *tstate,
 #endif
 
     if (frame == NULL) {
-        frame = tstate->retrace.thread_pending_callback_frame;
-    }
-    if (frame == NULL && use_current_frame) {
         frame = _PyRetrace_CurrentThreadFrame(tstate);
     }
     tstate->retrace.thread_callback_frame = frame;
@@ -1877,7 +1766,9 @@ retrace_call_thread_callback(PyThreadState *tstate,
 #endif
         return;
     }
-    PyObject *result = PyObject_CallNoArgs(callback);
+
+    PyObject *result = PyObject_CallFunctionObjArgs(
+        callback, previous_delta, next_thread_id, NULL);
     retrace_leave_space(tstate, &scope);
     if (result == NULL) {
         PyErr_WriteUnraisable(callback);
@@ -1899,201 +1790,81 @@ retrace_call_thread_callback(PyThreadState *tstate,
 #endif
 }
 
-static uint32_t
-retrace_thread_callback_space_id(PyThreadState *tstate,
-                                 _PyInterpreterFrame *frame)
-{
-    if (frame != NULL && frame->retrace.space != NULL) {
-        return frame->retrace.space->space_id;
-    }
-    if (tstate != NULL && tstate->retrace.current_space != NULL) {
-        return tstate->retrace.current_space->space_id;
-    }
-    return tstate == NULL ?
-        _PyFrame_RETRACE_SPACE_ID_ROOT : tstate->retrace.inherited_space_id;
-}
-
-static PyCodeObject *
-retrace_frame_code(_PyInterpreterFrame *frame)
-{
-    if (frame == NULL) {
-        return NULL;
-    }
-#if PY_VERSION_HEX >= 0x030D0000
-    return _PyFrame_GetCode(frame);
-#else
-    return frame->f_code;
-#endif
-}
-
 static int
-retrace_code_filename_ends_with(PyCodeObject *code, const char *suffix)
+retrace_frame_is_in_space(PyThreadState *tstate,
+                          _PyInterpreterFrame *frame,
+                          uint32_t space_id)
 {
-    if (code == NULL || suffix == NULL ||
-        !PyUnicode_Check(code->co_filename))
+    if (tstate == NULL || frame == NULL ||
+        !_PyRetrace_FrameIsVisible(frame) ||
+        frame->retrace.space == NULL)
     {
         return 0;
     }
-
-    Py_ssize_t filename_len = 0;
-    const char *filename =
-        PyUnicode_AsUTF8AndSize(code->co_filename, &filename_len);
-    if (filename == NULL) {
-        PyErr_Clear();
-        return 0;
-    }
-
-    Py_ssize_t suffix_len = (Py_ssize_t)strlen(suffix);
-    return filename_len >= suffix_len &&
-        memcmp(filename + filename_len - suffix_len,
-               suffix,
-               (size_t)suffix_len) == 0;
-}
-
-static int
-retrace_code_name_equals(PyCodeObject *code, const char *name)
-{
-    if (code == NULL || name == NULL || !PyUnicode_Check(code->co_name)) {
-        return 0;
-    }
-
-    Py_ssize_t code_name_len = 0;
-    const char *code_name =
-        PyUnicode_AsUTF8AndSize(code->co_name, &code_name_len);
-    if (code_name == NULL) {
-        PyErr_Clear();
-        return 0;
-    }
-
-    Py_ssize_t name_len = (Py_ssize_t)strlen(name);
-    return code_name_len == name_len &&
-        memcmp(code_name, name, (size_t)name_len) == 0;
-}
-
-static int
-retrace_frame_is_threading_bootstrap(_PyInterpreterFrame *frame)
-{
-    PyCodeObject *code = retrace_frame_code(frame);
-    if (!retrace_code_filename_ends_with(code, "threading.py")) {
-        return 0;
-    }
-    return !retrace_code_name_equals(code, "run");
+    return frame->retrace.space->space_id == space_id;
 }
 
 void
-_PyRetrace_NoteThreadResume(PyThreadState *tstate)
-{
-    if (tstate == NULL || tstate->retrace.thread_id == 0) {
-        return;
-    }
-
-    PyInterpreterState *interp = tstate->interp;
-    if (!tstate->retrace.thread_started) {
-        tstate->retrace.thread_started = 1;
-        if (retrace_get_thread_callback(
-                interp,
-                RETRACE_THREAD_CALLBACK_START,
-                tstate->retrace.inherited_space_id) != NULL)
-        {
-            tstate->retrace.thread_start_pending = 1;
-        }
-        return;
-    }
-
-    uint32_t space_id = tstate->retrace.current_space == NULL ?
-        tstate->retrace.inherited_space_id :
-        tstate->retrace.current_space->space_id;
-    if (retrace_get_thread_callback(
-            interp, RETRACE_THREAD_CALLBACK_RESUME, space_id) == NULL)
-    {
-        return;
-    }
-
-    tstate->retrace.thread_resume_pending = 1;
-}
-
-void
-_PyRetrace_DeliverThreadResumeCallback(PyThreadState *tstate,
+_PyRetrace_DeliverThreadSwitchCallback(PyThreadState *previous,
+                                       PyThreadState *current,
                                        _PyInterpreterFrame *frame)
 {
-    if (tstate == NULL || tstate->retrace.thread_id == 0) {
-        return;
-    }
-    if (tstate->retrace.thread_callback_active) {
-        return;
-    }
-
-    PyInterpreterState *interp = tstate->interp;
-    if (tstate->retrace.thread_start_pending) {
-        if (frame == NULL ||
-            retrace_frame_is_threading_bootstrap(frame))
-        {
-            return;
-        }
-        PyObject *callback = retrace_get_thread_callback(
-            interp,
-            RETRACE_THREAD_CALLBACK_START,
-            tstate->retrace.inherited_space_id);
-        if (callback == NULL) {
-            tstate->retrace.thread_start_pending = 0;
-            tstate->retrace.thread_pending_callback_frame = NULL;
-            return;
-        }
-        tstate->retrace.thread_start_pending = 0;
-        retrace_call_thread_callback(tstate, callback, NULL, 0);
-        tstate->retrace.thread_pending_callback_frame = NULL;
-        return;
-    }
-
-    if (!tstate->retrace.thread_resume_pending) {
-        return;
-    }
-
-    if (frame == NULL) {
-        frame = tstate->retrace.thread_pending_callback_frame;
-    }
-    if (frame == NULL) {
-        frame = _PyRetrace_CurrentThreadFrame(tstate);
-    }
-
-    PyObject *callback = retrace_get_thread_callback(
-        interp,
-        RETRACE_THREAD_CALLBACK_RESUME,
-        retrace_thread_callback_space_id(tstate, frame));
-    if (callback == NULL) {
-        tstate->retrace.thread_resume_pending = 0;
-        tstate->retrace.thread_pending_callback_frame = NULL;
-        return;
-    }
-
-    tstate->retrace.thread_resume_pending = 0;
-    retrace_call_thread_callback(tstate, callback, frame, 1);
-    tstate->retrace.thread_pending_callback_frame = NULL;
-}
-
-void
-_PyRetrace_DeliverThreadYieldCallback(PyThreadState *tstate,
-                                      _PyInterpreterFrame *frame)
-{
-    if (tstate == NULL || tstate->retrace.thread_id == 0 ||
-        tstate->retrace.thread_callback_active)
+    if (previous == NULL || current == NULL ||
+        previous == current ||
+        current->interp == NULL ||
+        previous->retrace.thread_id == 0 ||
+        current->retrace.thread_id == 0 ||
+        current->retrace.thread_callback_active)
     {
         return;
     }
 
-    if (tstate->retrace.thread_started) {
-        tstate->retrace.thread_resume_pending = 1;
-    }
+    PyInterpreterState *interp = current->interp;
+    for (_PyRetraceSpaceCallbackState *entry = interp->retrace.space_callbacks;
+         entry != NULL;
+         entry = entry->next)
+    {
+        PyObject *callback = entry->thread_switch_callback;
+        if (callback == NULL ||
+            !retrace_frame_is_in_space(current, frame, entry->space_id))
+        {
+            continue;
+        }
 
-    PyObject *callback = retrace_get_thread_callback(
-        tstate->interp,
-        RETRACE_THREAD_CALLBACK_YIELD,
-        retrace_thread_callback_space_id(tstate, frame));
-    if (callback == NULL) {
+        PyThreadState *space_previous = entry->last_bytecode_thread;
+        if (space_previous == current) {
+            return;
+        }
+
+        PyObject *previous_delta = NULL;
+        if (space_previous != NULL) {
+            previous_delta = retrace_thread_delta_for_tstate(
+                space_previous, entry->space_id);
+            if (previous_delta == NULL) {
+                PyErr_WriteUnraisable(callback);
+                return;
+            }
+        }
+        entry->last_bytecode_thread = current;
+
+        if (previous_delta == NULL || previous_delta == Py_None) {
+            Py_XDECREF(previous_delta);
+            return;
+        }
+
+        PyObject *next_thread_id = _PyRetrace_ThreadIdentObject(current);
+        if (next_thread_id == NULL) {
+            PyErr_WriteUnraisable(callback);
+            Py_DECREF(previous_delta);
+            return;
+        }
+
+        retrace_call_thread_switch_callback(
+            current, callback, frame, previous_delta, next_thread_id);
+        Py_DECREF(previous_delta);
+        Py_DECREF(next_thread_id);
         return;
     }
-
-    retrace_call_thread_callback(tstate, callback, frame, 1);
 }
 
 static int
@@ -2157,9 +1928,9 @@ retrace_check_call_at_slot(PyThreadState *tstate,
     return result;
 }
 
-int
-_PyRetrace_CheckCallAt(PyThreadState *tstate,
-                                 _PyInterpreterFrame *frame)
+static int
+retrace_check_call_at(PyThreadState *tstate,
+                      _PyInterpreterFrame *frame)
 {
     if (tstate == NULL || tstate->retrace.thread_id == 0 ||
         frame == NULL)
@@ -2218,6 +1989,13 @@ _PyRetrace_CheckCallAt(PyThreadState *tstate,
     return 0;
 }
 
+int
+_PyRetrace_CheckCallAt(PyThreadState *tstate,
+                       _PyInterpreterFrame *frame)
+{
+    return retrace_check_call_at(tstate, frame);
+}
+
 
 static PyMethodDef retrace_methods[] = {
     {"coordinates", retrace_coordinates, METH_VARARGS,
@@ -2227,20 +2005,10 @@ static PyMethodDef retrace_methods[] = {
     {"hash", retrace_hash, METH_VARARGS, retrace_hash_doc},
     {"allocate_space_id", retrace_allocate_space_id, METH_NOARGS,
      retrace_allocate_space_id_doc},
-    {"set_thread_start_callback", retrace_set_thread_start_callback,
-     METH_VARARGS, retrace_set_thread_start_callback_doc},
-    {"get_thread_start_callback", retrace_get_thread_start_callback,
-     METH_VARARGS, retrace_get_thread_start_callback_doc},
-    {"set_thread_yield_callback", retrace_set_thread_yield_callback,
-     METH_VARARGS,
-     retrace_set_thread_yield_callback_doc},
-    {"get_thread_yield_callback", retrace_get_thread_yield_callback,
-     METH_VARARGS, retrace_get_thread_yield_callback_doc},
-    {"set_thread_resume_callback", retrace_set_thread_resume_callback,
-     METH_VARARGS,
-     retrace_set_thread_resume_callback_doc},
-    {"get_thread_resume_callback", retrace_get_thread_resume_callback,
-     METH_VARARGS, retrace_get_thread_resume_callback_doc},
+    {"set_thread_switch_callback", retrace_set_thread_switch_callback,
+     METH_VARARGS, retrace_set_thread_switch_callback_doc},
+    {"get_thread_switch_callback", retrace_get_thread_switch_callback,
+     METH_VARARGS, retrace_get_thread_switch_callback_doc},
     {"exclude", retrace_exclude, METH_O, retrace_exclude_doc},
     {"disable", retrace_exclude, METH_O, retrace_disable_doc},
     {"include", retrace_include, METH_O, retrace_include_doc},

@@ -34,163 +34,80 @@ def run_busy_loop(stop, ready=None):
     return value
 
 
-def check_thread_start_callback_cursor_is_empty(module):
+def check_thread_switch_callback_coordinates(module):
     old_interval = sys.getswitchinterval()
     sys.setswitchinterval(1e-6)
 
-    done = _thread.allocate_lock()
-    done.acquire()
-    child_ident = None
-    worker_entered = False
-    start_hits = []
-    resume_hits = []
-    worker_coordinates = []
+    stop = threading.Event()
+    ready = threading.Barrier(3)
+    hits = []
     errors = []
 
-    def start_callback():
+    def switch_callback(previous_delta, next_thread_id):
         try:
-            ident = _thread.get_ident()
+            coordinates = tuple(module.coordinates())
+            coordinate_hash = module.hash()
             helper_coordinates = []
 
-            def root_coordinates():
-                coordinates = module.coordinates()
-                return None if coordinates is None else tuple(coordinates)
-
             def helper(depth):
-                helper_coordinates.append(root_coordinates())
+                helper_coordinates.append(
+                    (tuple(module.coordinates()), module.hash()))
                 if depth:
                     helper(depth - 1)
 
             helper(4)
-            snapshot = {
-                "ident": ident,
-                "worker_entered": worker_entered,
-                "coordinates": root_coordinates(),
-                "delta": module.thread_delta(),
-                "helper_coordinates": helper_coordinates,
-            }
-            start_hits.append(snapshot)
-        except BaseException as exc:
-            errors.append(("start callback", repr(exc)))
-
-    def resume_callback():
-        try:
-            resume_hits.append({
+            hits.append({
                 "ident": _thread.get_ident(),
-                "worker_entered": worker_entered,
-                "coordinates": tuple(module.coordinates()),
+                "next_thread_id": next_thread_id,
+                "previous_delta": tuple(previous_delta),
+                "coordinates": coordinates,
+                "hash": coordinate_hash,
+                "helper_coordinates": helper_coordinates,
             })
         except BaseException as exc:
-            errors.append(("resume callback", repr(exc)))
+            errors.append(("thread_switch callback", repr(exc)))
 
     def worker():
-        nonlocal worker_entered
         try:
-            worker_coordinates.append(tuple(module.coordinates()))
-            worker_entered = True
-            for _ in range(16):
-                time.sleep(0)
+            ready.wait()
+            run_busy_loop(stop)
         except BaseException as exc:
             errors.append(("worker", repr(exc)))
-        finally:
-            done.release()
+
+    threads = [
+        threading.Thread(target=worker, name=f"switch-coordinates-{index}")
+        for index in range(2)
+    ]
 
     try:
-        module.set_thread_start_callback(start_callback)
-        module.set_thread_resume_callback(resume_callback)
-        child_ident = _thread.start_new_thread(worker, ())
-        assert done.acquire(timeout=5.0), "worker did not finish"
+        module.set_thread_switch_callback(switch_callback)
+        for thread in threads:
+            thread.start()
+        ready.wait()
+        deadline = time.monotonic() + 2.0
+        while not hits and time.monotonic() < deadline:
+            time.sleep(0)
     finally:
-        module.set_thread_start_callback(None)
-        module.set_thread_resume_callback(None)
+        stop.set()
+        for thread in threads:
+            join_or_fail(thread)
+        module.set_thread_switch_callback(None)
         sys.setswitchinterval(old_interval)
 
     assert not errors, errors
-    child_hits = [
-        hit for hit in start_hits
-        if hit["ident"] == child_ident
-    ]
-    assert child_hits, (child_ident, start_hits)
-
-    first_child_hit = child_hits[0]
-    assert first_child_hit["coordinates"] == (), first_child_hit
-    assert first_child_hit["delta"] == (0,), first_child_hit
-    assert first_child_hit["helper_coordinates"], first_child_hit
-    assert all(
-        coordinates == ()
-        for coordinates in first_child_hit["helper_coordinates"]
-    ), first_child_hit
-    assert not first_child_hit["worker_entered"], first_child_hit
-    assert worker_coordinates and worker_coordinates[0] != (), worker_coordinates
-    early_resumes = [
-        hit for hit in resume_hits
-        if hit["ident"] == child_ident and not hit["worker_entered"]
-    ]
-    assert not early_resumes, early_resumes
+    assert hits, "no thread_switch callbacks observed"
+    for hit in hits:
+        assert hit["previous_delta"]
+        assert hit["previous_delta"][0] >= 0
+        assert hit["next_thread_id"] == hit["ident"], hit
+        assert all(
+            coordinates == hit["coordinates"] and
+            coordinate_hash == hit["hash"]
+            for coordinates, coordinate_hash in hit["helper_coordinates"]
+        ), hit
 
 
-def check_thread_start_callback_space_filter(module):
-    old_interval = sys.getswitchinterval()
-    sys.setswitchinterval(1e-6)
-
-    space_id = module.allocate_space_id()
-    hits = []
-    errors = []
-
-    def start_callback():
-        try:
-            hits.append(_thread.get_ident())
-        except BaseException as exc:
-            errors.append(("start callback", repr(exc)))
-
-    def start_worker(launcher):
-        done = _thread.allocate_lock()
-        done.acquire()
-
-        def worker():
-            try:
-                time.sleep(0)
-            except BaseException as exc:
-                errors.append(("worker", repr(exc)))
-            finally:
-                done.release()
-
-        ident = launcher(worker)
-        assert done.acquire(timeout=5.0), "worker did not finish"
-        return ident
-
-    def start_root(worker):
-        return _thread.start_new_thread(worker, ())
-
-    def start_in_space(worker):
-        def launch():
-            return _thread.start_new_thread(worker, ())
-
-        return module.run_in_space(space_id, launch)
-
-    try:
-        module.set_thread_start_callback(start_callback, None)
-        root_ident = start_worker(start_root)
-        space_ident = start_worker(start_in_space)
-        assert root_ident in hits, (root_ident, hits)
-        assert space_ident not in hits, (space_ident, hits)
-
-        hits.clear()
-        module.set_thread_start_callback(None)
-        module.set_thread_start_callback(start_callback, space_id)
-        root_ident = start_worker(start_root)
-        space_ident = start_worker(start_in_space)
-        assert root_ident not in hits, (root_ident, hits)
-        assert space_ident in hits, (space_ident, hits)
-    finally:
-        module.set_thread_start_callback(None)
-        module.set_thread_start_callback(None, space_id)
-        sys.setswitchinterval(old_interval)
-
-    assert not errors, errors
-
-
-def check_schedule_callback_space_filter(module):
+def check_thread_switch_callback_space_filter(module):
     old_interval = sys.getswitchinterval()
     sys.setswitchinterval(1e-6)
 
@@ -203,17 +120,11 @@ def check_schedule_callback_space_filter(module):
         ready = threading.Barrier(3)
         stop = threading.Event()
 
-        def yield_callback():
+        def switch_callback(previous_delta, next_thread_id):
             try:
-                hits.append(("yield", _thread.get_ident()))
+                hits.append((_thread.get_ident(), next_thread_id))
             except BaseException as exc:
-                errors.append(("yield callback", repr(exc)))
-
-        def resume_callback():
-            try:
-                hits.append(("resume", _thread.get_ident()))
-            except BaseException as exc:
-                errors.append(("resume callback", repr(exc)))
+                errors.append(("thread_switch callback", repr(exc)))
 
         def worker(label):
             try:
@@ -232,12 +143,12 @@ def check_schedule_callback_space_filter(module):
             root_thread.start()
             module.run_in_space(space_id, space_thread.start)
             ready.wait()
-            module.set_thread_yield_callback(yield_callback, callback_space_id)
-            module.set_thread_resume_callback(resume_callback, callback_space_id)
+            module.set_thread_switch_callback(
+                switch_callback, callback_space_id)
 
             deadline = time.monotonic() + 2.0
             while time.monotonic() < deadline:
-                hit_idents = {ident for _kind, ident in hits}
+                hit_idents = {ident for ident, _next_ident in hits}
                 if worker_idents[expected_label] & hit_idents:
                     break
                 time.sleep(0)
@@ -245,79 +156,26 @@ def check_schedule_callback_space_filter(module):
             stop.set()
             join_or_fail(root_thread)
             join_or_fail(space_thread)
-            module.set_thread_yield_callback(None, callback_space_id)
-            module.set_thread_resume_callback(None, callback_space_id)
+            module.set_thread_switch_callback(None, callback_space_id)
 
         return worker_idents, hits
 
     try:
         worker_idents, hits = run_phase(None, "root")
-        hit_idents = {ident for _kind, ident in hits}
+        hit_idents = {ident for ident, _next_ident in hits}
         assert worker_idents["root"] & hit_idents, (worker_idents, hits)
         assert not (worker_idents["space"] & hit_idents), (worker_idents, hits)
 
         worker_idents, hits = run_phase(space_id, "space")
-        hit_idents = {ident for _kind, ident in hits}
+        hit_idents = {ident for ident, _next_ident in hits}
         assert not (worker_idents["root"] & hit_idents), (worker_idents, hits)
         assert worker_idents["space"] & hit_idents, (worker_idents, hits)
     finally:
-        module.set_thread_yield_callback(None)
-        module.set_thread_resume_callback(None)
-        module.set_thread_yield_callback(None, space_id)
-        module.set_thread_resume_callback(None, space_id)
+        module.set_thread_switch_callback(None)
+        module.set_thread_switch_callback(None, space_id)
         sys.setswitchinterval(old_interval)
 
     assert not errors, errors
-
-
-def check_extension_gil_drop_callbacks(module):
-    events = []
-    errors = []
-    lock = threading.Lock()
-    done = threading.Event()
-    worker_idents = []
-
-    def note(kind):
-        try:
-            with lock:
-                events.append((kind, _thread.get_ident()))
-        except BaseException as exc:
-            errors.append((kind, repr(exc)))
-
-    def worker():
-        try:
-            worker_idents.append(_thread.get_ident())
-            note("before")
-            time.sleep(0)
-            note("after")
-        except BaseException as exc:
-            errors.append(("worker", repr(exc)))
-        finally:
-            done.set()
-
-    try:
-        module.set_thread_yield_callback(lambda: note("yield"))
-        module.set_thread_resume_callback(lambda: note("resume"))
-        _thread.start_new_thread(worker, ())
-        assert done.wait(5.0), "worker did not finish"
-    finally:
-        module.set_thread_yield_callback(None)
-        module.set_thread_resume_callback(None)
-
-    assert not errors, errors
-    assert worker_idents, events
-    child = worker_idents[0]
-    child_events = [kind for kind, ident in events if ident == child]
-    before_index = child_events.index("before")
-    after_index = child_events.index("after")
-    between = child_events[before_index + 1:after_index]
-    assert "yield" in between, (child, events, child_events)
-    yield_index = between.index("yield")
-    assert "resume" in between[yield_index + 1:], (
-        child,
-        events,
-        child_events,
-    )
 
 
 def check_call_at_hits_intended_thread(module):
@@ -525,7 +383,7 @@ def check_thread_delta_is_per_thread(module):
     assert set(roots) == {0, 1}, roots
 
 
-def check_schedule_callback_identities(module):
+def check_thread_switch_callback_identities(module):
     old_interval = sys.getswitchinterval()
     sys.setswitchinterval(1e-6)
     stop = threading.Event()
@@ -547,11 +405,8 @@ def check_schedule_callback_identities(module):
         except BaseException as exc:
             errors.append((kind, repr(exc)))
 
-    def yield_callback():
-        snapshot("yield")
-
-    def resume_callback():
-        snapshot("resume")
+    def switch_callback(previous_delta, next_thread_id):
+        snapshot("switch")
 
     def worker():
         worker_idents.add(_thread.get_ident())
@@ -566,8 +421,7 @@ def check_schedule_callback_identities(module):
         for thread in threads:
             thread.start()
         ready.wait()
-        module.set_thread_yield_callback(yield_callback)
-        module.set_thread_resume_callback(resume_callback)
+        module.set_thread_switch_callback(switch_callback)
 
         deadline = time.monotonic() + 2.0
         while time.monotonic() < deadline and len(hits) < 10:
@@ -576,8 +430,7 @@ def check_schedule_callback_identities(module):
         stop.set()
         for thread in threads:
             join_or_fail(thread)
-        module.set_thread_yield_callback(None)
-        module.set_thread_resume_callback(None)
+        module.set_thread_switch_callback(None)
         sys.setswitchinterval(old_interval)
 
     assert not errors, errors
@@ -603,9 +456,8 @@ def main() -> int:
     required = (
         "coordinates",
         "call_at",
-        "set_thread_start_callback",
-        "set_thread_resume_callback",
-        "set_thread_yield_callback",
+        "set_thread_switch_callback",
+        "get_thread_switch_callback",
         "allocate_space_id",
         "run_in_space",
         "thread_delta",
@@ -617,23 +469,19 @@ def main() -> int:
     check_call_at_hits_intended_thread(module)
     check_call_at_overshoot(module)
     check_call_at_past_overshoot(module)
-    check_thread_start_callback_cursor_is_empty(module)
-    check_thread_start_callback_space_filter(module)
-    check_schedule_callback_space_filter(module)
-    check_extension_gil_drop_callbacks(module)
+    check_thread_switch_callback_coordinates(module)
+    check_thread_switch_callback_space_filter(module)
     check_thread_delta_is_per_thread(module)
-    check_schedule_callback_identities(module)
+    check_thread_switch_callback_identities(module)
 
     print("_retrace_module=builtin")
     print("call_at_intended_thread=available")
     print("call_at_overshoot=available")
     print("call_at_past_overshoot=available")
-    print("thread_start_callback_empty_bootstrap_cursor=available")
-    print("thread_start_callback_space_filter=available")
-    print("schedule_callback_space_filter=available")
-    print("extension_gil_drop_callbacks=available")
+    print("thread_switch_callback_coordinates=available")
+    print("thread_switch_callback_space_filter=available")
     print("thread_delta_per_thread=available")
-    print("schedule_callback_identity=available")
+    print("thread_switch_callback_identity=available")
     return 0
 
 

@@ -70,12 +70,8 @@ retrace.enable(callable)
 retrace.CoordinateSpace().wrap(callable)
 retrace.run_disabled(callable, *args, **kwargs)
 retrace.with_new_coordinates(callable, *args, **kwargs)
-retrace.callbacks.thread_start = callback_or_none
-retrace.callbacks.set_thread_start(callback_or_none, space=None)
-retrace.callbacks.thread_yield = callback_or_none
-retrace.callbacks.set_thread_yield(callback_or_none, space=None)
-retrace.callbacks.thread_resume = callback_or_none
-retrace.callbacks.set_thread_resume(callback_or_none, space=None)
+retrace.callbacks.thread_switch = callback_or_none
+retrace.callbacks.set_thread_switch(callback_or_none, space=None)
 retrace.call_at(
     thread_id, coordinates, callback, overshoot_callback=None
 )
@@ -126,25 +122,36 @@ Use `retrace` for Python code; it exposes the native helpers and wraps
 registered callbacks with `retrace.exclude`. `_retrace` remains the lower-level
 builtin substrate for capability probes and native-oriented tests.
 
-`callbacks.thread_start` stores a no-argument Python callback called once on a
-newly started thread after the threading bootstrap has published it and before
-the target continues. Coordinates observed inside this callback are `()`. By
-default, the callback applies only to threads created while their creator is in
-root space.
-Use `callbacks.set_thread_start(callback, space)` to target another coordinate
-space, or assign `None` to clear it.
-
-`callbacks.thread_yield` stores a no-argument Python callback called just before
-the current thread drops the GIL, including Python-level switch requests and
-extension/C API releases such as `Py_BEGIN_ALLOW_THREADS`, in root space. Use
-`callbacks.set_thread_yield(callback, space)` to target another coordinate
+`callbacks.thread_switch` stores a Python callback called as
+`callback(previous_delta, next_thread_id)` for root space. Use
+`callbacks.set_thread_switch(callback, space)` to target another coordinate
 space, or assign `None` to clear the root callback.
 
-`callbacks.thread_resume` stores a no-argument Python callback called after a
-thread has acquired the GIL and restored its thread state, before application
-bytecode resumes in root space. Use `callbacks.set_thread_resume(callback,
-space)` to target another coordinate space, or assign `None` to clear the root
-callback.
+Thread switch callbacks are namespace-local. For each registered coordinate
+space, Retrace tracks the last thread that executed visible bytecode in that
+space. Other spaces are invisible to that callback. If thread A runs in space
+S, thread B runs outside S, then thread A runs in S again, no S callback fires.
+If thread A runs in S, thread B runs outside S, then thread C runs in S, the S
+callback fires once with A's delta in S and C's thread id.
+
+The switch check runs before each bytecode instruction. The hot path is an
+interpreter-wide pointer comparison; if the bytecode thread has not changed,
+no namespace work is performed. When the bytecode thread has changed, Retrace
+examines only registered spaces with switch callbacks. A callback is considered
+only when the instruction about to execute is visible in that callback's space.
+If the current thread is already that space's last visible bytecode thread,
+the callback is dropped.
+
+For a real namespace switch, Retrace computes `previous_delta` for the previous
+visible thread in that same space before advancing the space's last-thread
+cursor. The callback is then delivered on the new/current thread before the
+current bytecode instruction executes. `previous_delta` has the same shape as
+`thread_delta(space)`: `(common_prefix_count, *new_suffix)`. `next_thread_id`
+is the new/current thread's stable Retrace thread id as a Python `int`. The
+first visible thread in a space initializes that space's cursor and does not
+fire a callback, because there is no previous visible thread or delta. If the
+previous thread has no meaningful delta for the space, Retrace advances the
+space cursor and drops the callback.
 
 `call_at(thread_id, coordinates, callback, overshoot_callback=None)` arms one
 coordinate callback per interpreter.
@@ -155,7 +162,7 @@ calls `callback()` on that thread. If the thread passes the target coordinate
 without hitting it exactly, CPython clears the callback and calls
 `overshoot_callback()` when one was supplied.
 
-Thread yield callbacks, thread resume callbacks, and call_at
+Thread switch callbacks, thread yield callbacks, thread resume callbacks, and call_at
 callbacks are stored as coordinate-transparent wrappers. If a call_at
 callback needs to run application-visible work under the target frame, it
 can call a no-argument callable wrapped with `retrace.include`. While one of
@@ -394,30 +401,27 @@ where `_PyRetraceThreadState` is:
 
 ```c
 typedef struct {
-    int thread_started;
-    int thread_start_pending;
-    int thread_resume_pending;
     uint64_t thread_id;
+    PyObject *thread_id_object;
     unsigned long cpython_thread_ident;
-    uint64_t root_coordinate;
-    uint64_t last_root_coordinate;
-    uint64_t root_coordinate_hash;
+    _PyRetraceThreadSpaceState root_space;
+    _PyRetraceThreadSpaceState *current_space;
+    _PyRetraceThreadSpaceState *last_space;
+    uint64_t *call_ordinal_ptr;
+    uint32_t inherited_space_id;
     int thread_callback_active;
     struct _PyInterpreterFrame *thread_callback_frame;
-    struct _PyInterpreterFrame *thread_pending_callback_frame;
-    struct _PyInterpreterFrame *thread_visible_callback_parent_frame;
-    uint32_t coordinate_exclude_depth;
-    struct _PyInterpreterFrame *coordinate_exclude_parent_frame;
 } _PyRetraceThreadState;
 ```
 
 `thread_id` is the deterministic 64-bit Retrace identity exposed through
-Python's thread-ident APIs, and `cpython_thread_ident` records CPython's native
+Python's thread-ident APIs, and `thread_id_object` is its cached Python `int`
+object. `cpython_thread_ident` records CPython's native
 `_thread.start_new_thread()` ident for bridge lookups. The top 16 bits of
 `thread_id` hold `(space_id & 0xffff)` for the space inherited at thread
-creation; the lower 48 bits hold the deterministic hashed id. The root fields
-track C-originated frame activations and delta initialization. The callback
-fields track pending/resident callback
+creation; the lower 48 bits hold the deterministic hashed id. The space fields
+track the thread-local coordinate spaces, current root ordinal slot, and
+inherited space id. The callback fields track pending/resident callback
 delivery, pin the application frame observed by callback code, and prevent
 recursive callback delivery.
 
@@ -432,9 +436,8 @@ where `_PyRetraceInterpreterState` is:
 ```c
 typedef struct {
     _PyRetraceIdentityHashTable *identity_hashes;
-    PyObject *thread_start_callback;
-    PyObject *thread_yield_callback;
-    PyObject *thread_resume_callback;
+    PyThreadState *last_bytecode_thread;
+    int thread_switch_armed;
     _PyRetraceSpaceCallbackState *space_callbacks;
     int call_at_armed;
     int call_at_extra_armed;
@@ -447,12 +450,37 @@ typedef struct {
 ```
 
 The identity hash table stores coordinate-derived synthetic object hashes. The
-thread callback pointers are the root-space registered Python callbacks.
-Non-root callback registrations and non-root `call_at` targets live in
-`space_callbacks`, a linked list keyed by coordinate-space id. The root
-`call_at` fields hold one armed root-space coordinate target, plus the exact-hit
-and overshoot callbacks; `call_at_extra_armed` lets the eval loop notice the
-rare non-root target path without replacing the root fast path.
+interpreter `last_bytecode_thread` is the cheap global bytecode-thread switch
+predicate; it does not define namespace semantics. `thread_switch_armed` lets
+the eval loop skip the namespace callback list when no thread-switch callback
+is registered. Per-space callback registrations, including root-space
+thread-switch callbacks, live in `space_callbacks`, a linked list keyed by
+coordinate-space id. The root `call_at` fields hold one armed root-space
+coordinate target, plus the exact-hit and overshoot callbacks;
+`call_at_extra_armed` lets the eval loop notice the rare non-root target path
+without replacing the root fast path.
+
+Each `_PyRetraceSpaceCallbackState` stores callback state for one coordinate
+space:
+
+```c
+typedef struct _PyRetraceSpaceCallbackState {
+    uint32_t space_id;
+    PyThreadState *last_bytecode_thread;
+    PyObject *thread_switch_callback;
+    int call_at_armed;
+    uint64_t call_at_thread_id;
+    PyObject *call_at_coordinates;
+    PyObject *call_at_callback;
+    PyObject *call_at_overshoot_callback;
+    struct _PyRetraceSpaceCallbackState *next;
+} _PyRetraceSpaceCallbackState;
+```
+
+For thread-switch callbacks, `last_bytecode_thread` is the last thread that
+executed bytecode visible in `space_id`. It is separate from the interpreter
+global fast-path pointer so each namespace can ignore bytecode in other
+namespaces.
 
 No existing public object layout such as `PyObject`, `PyTypeObject`, or
 `PyFrameObject` is extended directly.
@@ -542,37 +570,65 @@ changed suffix, so callers replace everything after that prefix.
 
 ### Thread Scheduling
 
-Thread switch telemetry is modeled as three current-thread events:
+Thread execution-order telemetry is modeled as bytecode-thread switches. The
+switch callback is registered per coordinate space and is called as:
 
-```text
-THREAD_START
-THREAD_YIELD
-THREAD_RESUME
+```python
+callback(previous_delta, next_thread_id)
 ```
 
-Callbacks receive no thread ids. The callback is running on the thread it is
-describing, so callers can use `_thread.get_ident()`.
-`THREAD_START` describes a newly started thread after the threading bootstrap
-has published it and before the target continues; its cursor is empty.
-`THREAD_YIELD` describes a thread reaching a GIL drop point, including
-extension/C API releases.
-`THREAD_RESUME` describes a previously started thread that reacquired the GIL
-and is about to continue running Python bytecode. A newly started thread emits
-start, then later yield/resume events; it does not emit an initial resume. This
-avoids bookkeeping in the GIL handoff path and avoids asking CPython to predict
-which thread will run next.
+The eval loop checks `call_at` and then checks for a thread switch before
+executing each bytecode instruction. Keeping `call_at` at the same bytecode
+boundary, immediately before the switch check, lets replay yield points line up
+with the exact instruction that is about to run. The switch hot path is one
+interpreter-level pointer comparison: if the bytecode thread has not changed
+since the previous instruction, Retrace does no namespace work. If the thread
+has changed and at least one namespace has a switch callback armed, Retrace
+walks the registered namespace callback states.
 
-The current implementation is telemetry-oriented. Callback return values are
-ignored, callback exceptions are reported through `PyErr_WriteUnraisable()`,
-and reentrant delivery is suppressed only for the same thread while that thread
-is already inside a callback.
+Each namespace callback state has its own `last_bytecode_thread`. A namespace
+sees only bytecode whose current frame is visible in that namespace. Bytecode in
+other namespaces does not update that namespace cursor and cannot by itself
+cause that namespace's callback to run.
 
-Scheduling callbacks are coordinate-transparent. On a yield or resume callback,
-the current coordinate is the pinned application boundary that caused the
-callback. For eval-breaker thread switches, that boundary is the instruction
-that is about to execute when application bytecode resumes. Python helper calls
-made by the callback, and any generator/coroutine frame created by the callback,
-are skipped by coordinates, deltas, and coordinate hashes.
+The exact per-namespace algorithm is:
+
+```text
+if current instruction is not visible in space S:
+    ignore S
+elif S.last_bytecode_thread is current thread:
+    ignore S
+elif S.last_bytecode_thread is NULL:
+    S.last_bytecode_thread = current thread
+    do not call back
+else:
+    previous = S.last_bytecode_thread
+    previous_delta = thread_delta(previous, S)
+    S.last_bytecode_thread = current thread
+    if previous_delta is meaningful:
+        callback(previous_delta, current.thread_id)
+```
+
+`previous_delta` is computed before the namespace cursor is advanced. It is the
+coordinate delta for the previous visible thread in that same namespace, with
+the same `(common_prefix_count, *new_suffix)` shape returned by
+`thread_delta(space)`. `current.thread_id` is passed as the cached Python `int`
+for the new thread's stable Retrace id. The callback runs on the new/current
+thread before the bytecode instruction that caused the switch is executed.
+
+This makes other namespaces invisible. If A executes in S, B executes outside
+S, then A executes in S again, S observes no switch. If A executes in S, B
+executes outside S, then C executes in S, S observes one switch from A to C and
+receives A's delta in S.
+
+Callback return values are ignored, callback exceptions are reported through
+`PyErr_WriteUnraisable()`, and reentrant delivery is suppressed while the
+current thread is already inside a Retrace callback. Switch callbacks are
+coordinate-transparent: the current coordinate inside the callback is the
+pinned application boundary for the instruction about to execute on the new
+thread. Python helper calls made by the callback, and any generator/coroutine
+frame created by the callback, are skipped by coordinates, deltas, and
+coordinate hashes.
 
 ### call_at
 

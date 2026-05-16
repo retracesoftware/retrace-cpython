@@ -58,26 +58,27 @@ across interpreter runs with the same Retrace root seed.
 `thread_probe_concurrency.py` checks native probe behavior without trace files:
 call_at callbacks fire only on the requested thread, overshoot callbacks are
 delivered for both post-arm and already-past coordinates, `thread_delta()`
-state is isolated per thread, start callbacks delivered before the first thread
-frame see an empty cursor, thread callback space filters match the active or
-inherited space, and scheduler callback thread ids are visible through
-`threading._active` or `threading._limbo`.
+state is isolated per thread, thread-switch callbacks preserve coordinate
+transparency, thread-switch space filters match the active space, and callback
+thread ids are visible through `threading._active` or `threading._limbo`.
 
 `thread_start_handoff_contract.py` is a focused public-`retrace` contract check
-for replay startup: a `thread_start` callback that parks in
-`ThreadHandoff.start()` must not keep the parent blocked inside
-`threading.Thread.start()`.
+that the first observed `thread_switch` for a newly scheduled worker identifies
+the same stable thread id that the worker sees in its body.
 
 `thread_schedule.py` contains reusable capture/replay support for the schedule
 tests. The scenario files own thread creation and workload shape, while the
-helper records yield/resume callbacks and replays them with call_at callbacks
-plus `_retrace.ThreadHandoff`. Replay thread-start callbacks register the
-started thread, look ahead to arm any available yield point, then park in
-`ThreadHandoff.start()` until the controller transfers execution with
-`ThreadHandoff.to()`. The helper verifies that replay consumes the recorded
-schedule and that each thread completes its expected work; exact event-order
-comparison is available for workloads whose side effects align with call_at
-boundaries.
+helper records bytecode-level `thread_switch` callbacks. The helper verifies
+that each thread completes its expected work; exact event-order comparison is
+available for workloads whose side effects align with callback boundaries.
+
+The thread-switch ordering contract is namespace-local. A registered space sees
+only bytecode executed in that space; bytecode in other spaces does not update
+that space's last-thread cursor and cannot emit that space's callback. When a
+space observes a switch from its previous visible thread to a different current
+thread, the callback receives the previous thread's delta in that same space
+and the current thread's Retrace thread id. The callback must run before the
+current thread's first visible bytecode instruction in that space.
 
 `thread_schedule_primitives.py` runs a shared multi-thread workload through the
 schedule controller while exercising an intentionally unlocked counter, a locked

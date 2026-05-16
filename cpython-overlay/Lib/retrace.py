@@ -97,53 +97,21 @@ def _excluded_callback(callback, name: str, allow_none: bool):
 class _Callbacks:
     __slots__ = ()
 
-    def set_thread_start(self, callback, space=None, /):
-        """Set the thread-start callback for threads inheriting space."""
-        _retrace.set_thread_start_callback(
-            _excluded_callback(callback, "thread start", True),
-            _space_id(space),
-        )
-
-    def set_thread_yield(self, callback, space=None, /):
-        """Set the thread-yield callback for the selected space."""
-        _retrace.set_thread_yield_callback(
-            _excluded_callback(callback, "thread yield", True),
-            _space_id(space),
-        )
-
-    def set_thread_resume(self, callback, space=None, /):
-        """Set the thread-resume callback for the selected space."""
-        _retrace.set_thread_resume_callback(
-            _excluded_callback(callback, "thread resume", True),
+    def set_thread_switch(self, callback, space=None, /):
+        """Set the bytecode thread-switch callback."""
+        _retrace.set_thread_switch_callback(
+            _excluded_callback(callback, "thread switch", True),
             _space_id(space),
         )
 
     @property
-    def thread_start(self):
-        """Callback invoked once on a newly started Python thread."""
-        return _retrace.get_thread_start_callback()
+    def thread_switch(self):
+        """Callback invoked before bytecode runs on a different thread."""
+        return _retrace.get_thread_switch_callback()
 
-    @thread_start.setter
-    def thread_start(self, callback):
-        self.set_thread_start(callback)
-
-    @property
-    def thread_yield(self):
-        """Callback invoked before a Python thread yields the GIL."""
-        return _retrace.get_thread_yield_callback()
-
-    @thread_yield.setter
-    def thread_yield(self, callback):
-        self.set_thread_yield(callback)
-
-    @property
-    def thread_resume(self):
-        """Callback invoked after a Python thread resumes from a yield."""
-        return _retrace.get_thread_resume_callback()
-
-    @thread_resume.setter
-    def thread_resume(self, callback):
-        self.set_thread_resume(callback)
+    @thread_switch.setter
+    def thread_switch(self, callback):
+        self.set_thread_switch(callback)
 
 
 callbacks = _Callbacks()

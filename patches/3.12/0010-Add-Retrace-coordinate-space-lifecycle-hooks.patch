@@ -26,18 +26,22 @@ diff --git a/Python/ceval_macros.h b/Python/ceval_macros.h
 index e46c0a4..f0c0b20 100644
 --- a/Python/ceval_macros.h
 +++ b/Python/ceval_macros.h
-@@ -83,12 +83,14 @@
+@@ -83,12 +83,16 @@
          if (_py_stats) _py_stats->opcode_stats[lastopcode].pair_count[op]++; \
          lastopcode = op; \
-+        _PyRetrace_BeginInstruction(tstate, frame, op); \
-         RETRACE_CALL_AT(); \
++        if (_PyRetrace_BeginInstruction(tstate, frame, op, &stack_pointer) < 0) { \
++            goto error; \
++        } \
+-        RETRACE_CALL_AT(); \
      } while (0)
  #else
  #define INSTRUCTION_START(op) \
      do { \
          frame->prev_instr = next_instr++; \
-+        _PyRetrace_BeginInstruction(tstate, frame, op); \
-         RETRACE_CALL_AT(); \
++        if (_PyRetrace_BeginInstruction(tstate, frame, op, &stack_pointer) < 0) { \
++            goto error; \
++        } \
+-        RETRACE_CALL_AT(); \
      } while (0)
  #endif
  

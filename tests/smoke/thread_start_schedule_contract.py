@@ -1,7 +1,6 @@
 import importlib.util
 import _thread
 import threading
-import time
 
 
 PROBE_MODULE = "retrace"
@@ -12,55 +11,50 @@ def join_or_fail(thread, timeout=5.0):
     assert not thread.is_alive(), f"thread did not finish: {thread.name}"
 
 
-def check_thread_start_enters_target_without_initial_resume(module):
-    old_start = module.callbacks.thread_start
-    old_yield = module.callbacks.thread_yield
-    old_resume = module.callbacks.thread_resume
+def check_thread_switch_enters_target_before_body(module):
+    old_switch = module.callbacks.thread_switch
 
     events = []
     errors = []
     lock = threading.Lock()
     worker_ident = []
 
-    def note(kind):
+    def note(kind, ident=None):
         with lock:
-            events.append((kind, _thread.get_ident()))
+            events.append((kind, _thread.get_ident() if ident is None else ident))
+
+    def on_switch(previous_delta, next_thread_id):
+        try:
+            note("switch", next_thread_id)
+            assert type(previous_delta) is tuple
+            assert previous_delta
+        except BaseException as exc:
+            errors.append(("switch", repr(exc)))
 
     def worker():
         try:
             worker_ident.append(_thread.get_ident())
             note("body")
-            time.sleep(0)
         except BaseException as exc:
             errors.append(("worker", repr(exc)))
 
     try:
-        module.callbacks.thread_start = lambda: note("start")
-        module.callbacks.thread_yield = lambda: note("yield")
-        module.callbacks.thread_resume = lambda: note("resume")
-
+        module.callbacks.thread_switch = on_switch
         thread = threading.Thread(
             target=worker,
-            name="thread-start-schedule-contract",
+            name="thread-switch-start-contract",
         )
         thread.start()
         join_or_fail(thread)
     finally:
-        module.callbacks.thread_start = old_start
-        module.callbacks.thread_yield = old_yield
-        module.callbacks.thread_resume = old_resume
+        module.callbacks.thread_switch = old_switch
 
     assert not errors, errors
     assert worker_ident, events
 
     child = worker_ident[0]
     child_events = [kind for kind, ident in events if ident == child]
-    assert "body" in child_events, (child, events, child_events)
-
-    assert child_events[0] == "start", (child, events, child_events)
-
-    body_index = child_events.index("body")
-    assert child_events[:body_index] == ["start"], (
+    assert child_events[:2] == ["switch", "body"], (
         child,
         events,
         child_events,
@@ -83,7 +77,7 @@ def main() -> int:
         print("thread_start_schedule_contract=unavailable")
         return 0
 
-    check_thread_start_enters_target_without_initial_resume(module)
+    check_thread_switch_enters_target_before_body(module)
 
     print("thread_start_schedule_contract=available")
     return 0

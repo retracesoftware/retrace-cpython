@@ -108,11 +108,14 @@ multiple child activations within one parent instruction, while starting each
 later instruction from ordinal zero.
 
 Before each instruction, the bytecode loop updates the active frame's ordinal
-state for the current biased instruction coordinate, then checks callbacks:
+state for the current biased instruction coordinate, checks `call_at`, and then
+checks namespace-local thread switches:
 
 ```c
-_PyRetrace_BeginInstruction(tstate, frame, opcode);
-_PyRetrace_MaybeFireCallbacks(tstate, frame);
+if (_PyRetrace_BeginInstruction(
+        tstate, frame, opcode, &stack_pointer) < 0) {
+    goto error;
+}
 ```
 
 Jump sites update the bias when they redirect `next_instr`:
@@ -249,9 +252,7 @@ The `_retrace` API accepts `space_id=None` as the root-space default:
 _retrace.coordinates(thread_id=None, drop=0, space_id=None)
 _retrace.hash(space_id=None)
 _retrace.thread_delta(space_id=None)
-_retrace.set_thread_start_callback(callback, space_id=None)
-_retrace.set_thread_yield_callback(callback, space_id=None)
-_retrace.set_thread_resume_callback(callback, space_id=None)
+_retrace.set_thread_switch_callback(callback, space_id=None)
 _retrace.call_at(thread_id, coordinates, callback, overshoot=None,
                  space_id=None)
 _retrace.call_at(None, space_id=None)

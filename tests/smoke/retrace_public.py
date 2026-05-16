@@ -23,59 +23,27 @@ def require_modules():
 
 
 def check_callback_registration(public, native):
-    def start_callback():
-        return None
-
-    def yield_callback():
-        return None
-
-    def resume_callback():
+    def switch_callback(previous_delta, next_thread_id):
+        assert type(previous_delta) is tuple
+        assert type(next_thread_id) is int
         return None
 
     try:
-        public.callbacks.thread_start = start_callback
-        stored_start = native.get_thread_start_callback()
-        assert inspect.unwrap(stored_start) is start_callback
-        assert public.callbacks.thread_start is stored_start
-        public.callbacks.thread_start = None
-        assert public.callbacks.thread_start is None
+        public.callbacks.thread_switch = switch_callback
+        stored_switch = native.get_thread_switch_callback()
+        assert inspect.unwrap(stored_switch) is switch_callback
+        assert public.callbacks.thread_switch is stored_switch
+        public.callbacks.thread_switch = None
+        assert public.callbacks.thread_switch is None
 
         space = public.CoordinateSpace()
-        public.callbacks.set_thread_start(start_callback, space)
-        stored_start = native.get_thread_start_callback(space.id)
-        assert inspect.unwrap(stored_start) is start_callback
-        public.callbacks.set_thread_start(None, space)
-        assert native.get_thread_start_callback(space.id) is None
-
-        public.callbacks.thread_yield = yield_callback
-        stored_yield = native.get_thread_yield_callback()
-        assert inspect.unwrap(stored_yield) is yield_callback
-        assert public.callbacks.thread_yield is stored_yield
-        public.callbacks.thread_yield = None
-        assert public.callbacks.thread_yield is None
-
-        public.callbacks.set_thread_yield(yield_callback, space)
-        stored_yield = native.get_thread_yield_callback(space.id)
-        assert inspect.unwrap(stored_yield) is yield_callback
-        public.callbacks.set_thread_yield(None, space)
-        assert native.get_thread_yield_callback(space.id) is None
-
-        public.callbacks.thread_resume = resume_callback
-        stored_resume = native.get_thread_resume_callback()
-        assert inspect.unwrap(stored_resume) is resume_callback
-        assert public.callbacks.thread_resume is stored_resume
-        public.callbacks.thread_resume = None
-        assert public.callbacks.thread_resume is None
-
-        public.callbacks.set_thread_resume(resume_callback, space)
-        stored_resume = native.get_thread_resume_callback(space.id)
-        assert inspect.unwrap(stored_resume) is resume_callback
-        public.callbacks.set_thread_resume(None, space)
-        assert native.get_thread_resume_callback(space.id) is None
+        public.callbacks.set_thread_switch(switch_callback, space)
+        stored_switch = native.get_thread_switch_callback(space.id)
+        assert inspect.unwrap(stored_switch) is switch_callback
+        public.callbacks.set_thread_switch(None, space)
+        assert native.get_thread_switch_callback(space.id) is None
     finally:
-        public.callbacks.thread_start = None
-        public.callbacks.thread_yield = None
-        public.callbacks.thread_resume = None
+        public.callbacks.thread_switch = None
 
 
 def check_call_at_include(public):
@@ -357,6 +325,12 @@ def main() -> int:
     assert not hasattr(public, "get_thread_yield_callback")
     assert not hasattr(public, "set_thread_resume_callback")
     assert not hasattr(public, "get_thread_resume_callback")
+    assert not hasattr(public.callbacks, "set_thread_start")
+    assert not hasattr(public.callbacks, "set_thread_yield")
+    assert not hasattr(public.callbacks, "set_thread_resume")
+    assert not hasattr(public.callbacks, "thread_start")
+    assert not hasattr(public.callbacks, "thread_yield")
+    assert not hasattr(public.callbacks, "thread_resume")
 
     check_callback_registration(public, native)
     check_coordinate_spaces(public)
