@@ -76,8 +76,10 @@ class _ThreadSwitchCapture:
         self.schedule = []
         self.previous_root_callback = None
         self.lock = threading.RLock()
+        self.started = False
 
     def start(self):
+        self.started = True
         if self.space is None or self.space is self.module:
             self.previous_root_callback = self.module.callbacks.thread_switch
             self.module.callbacks.thread_switch = self.on_thread_switch
@@ -85,6 +87,9 @@ class _ThreadSwitchCapture:
         self.module.callbacks.set_thread_switch(self.on_thread_switch, self.space)
 
     def close(self):
+        if not self.started:
+            return
+        self.started = False
         if self.space is None or self.space is self.module:
             self.module.callbacks.thread_switch = self.previous_root_callback
             return

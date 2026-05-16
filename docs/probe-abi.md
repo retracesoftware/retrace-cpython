@@ -253,11 +253,10 @@ instruction coordinate. `_retrace.hash()` exposes that current-location hash.
 
 Avoid per-instruction Python callbacks, atomics, allocation, or lock traffic.
 
-## Thread Scheduling Callbacks
+## Thread Switch Callbacks
 
-The first record-side callbacks are telemetry. The Python API reports no thread
-arguments; each callback observes the current thread because it runs on that
-thread. Recorder code can write trace events such as:
+Thread-switch callbacks are the bytecode ordering stream. Recorder code can
+write trace events such as:
 
 ```text
 THREAD_SWITCH previous-coordinate-delta, next-thread-id

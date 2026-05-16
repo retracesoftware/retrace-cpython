@@ -13,7 +13,7 @@ patched executable for the `retracesoftware-cpython` PyPI project.
 - Patched CPython executables for supported upstream CPython releases.
 - A built-in `_retrace` module plus a public `retrace` Python module.
 - Fast execution coordinate snapshots, deltas, and coordinate hashes.
-- Thread start, yield, and resume callbacks for scheduling telemetry.
+- Bytecode-level thread-switch callbacks for scheduling telemetry.
 - `call_at` callbacks for exact execution coordinate hooks.
 - Deterministic thread identities and identity hashes for replay stability.
 - Release tooling for runtime archives and PyPI wheels.

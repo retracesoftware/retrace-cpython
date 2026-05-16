@@ -203,12 +203,10 @@ active root-space frame on the current thread. The callback body itself can run
 in a separate control space, while the captured root space still exposes the
 suspended application coordinate.
 
-Thread callback registration is interpreter-wide, but start, yield, and resume
-callbacks are keyed by space. `space_id=None` means the root space, so the
-property-style callbacks are the root hot path. Registering with another space
-id stores the callback in a linked list keyed by space id; start callbacks match
-threads that inherit that space, while yield and resume callbacks match the
-space being executed.
+Thread-switch callback registration is interpreter-wide, but delivery is keyed
+by space. `space_id=None` means the root space. Registering with another space
+id stores the callback in a linked list keyed by space id; a callback observes
+only bytecode whose current frame is visible in that space.
 
 `call_at` is scoped to a coordinate space. A root-space `call_at` target is not
 advanced by frames executing in the disabled space. A disabled-space target is

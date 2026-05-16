@@ -5,8 +5,9 @@ execution probes for deterministic record and replay.
 
 It produces patched CPython executables that behave like normal Python
 interpreters, but expose a small built-in `_retrace` module. Retrace uses that
-module to observe exact execution coordinates, thread yield/resume points, and
-call_at callbacks with much lower overhead than Python-level monitoring hooks.
+module to observe exact execution coordinates, bytecode thread-switch points,
+and call_at callbacks with much lower overhead than Python-level monitoring
+hooks.
 
 This repository is the build and release recipe for those interpreters. It does
 not vendor CPython.
@@ -20,7 +21,7 @@ AI-readable package context.
 - patched CPython executables for supported upstream CPython releases
 - a built-in `_retrace` module for native probe access
 - fast execution coordinate snapshots and deltas
-- eval-loop thread yield/resume callbacks for scheduling telemetry
+- bytecode-level thread-switch callbacks for scheduling telemetry
 - call_at callbacks at exact Python execution coordinates
 - build, test, package, and PyPI release infrastructure
 
@@ -162,10 +163,10 @@ calls `callback()` on that thread. If the thread passes the target coordinate
 without hitting it exactly, CPython clears the callback and calls
 `overshoot_callback()` when one was supplied.
 
-Thread switch callbacks, thread yield callbacks, thread resume callbacks, and call_at
-callbacks are stored as coordinate-transparent wrappers. If a call_at
-callback needs to run application-visible work under the target frame, it
-can call a no-argument callable wrapped with `retrace.include`. While one of
+Thread switch callbacks and call_at callbacks are stored as
+coordinate-transparent wrappers. If a call_at callback needs to run
+application-visible work under the target frame, it can call a no-argument
+callable wrapped with `retrace.include`. While one of
 those transparent callbacks is running,
 `coordinates()`, `thread_delta()`, and `hash()` describe the pinned application
 instruction boundary that caused the callback, not the Python frames entered by
@@ -421,9 +422,9 @@ object. `cpython_thread_ident` records CPython's native
 `thread_id` hold `(space_id & 0xffff)` for the space inherited at thread
 creation; the lower 48 bits hold the deterministic hashed id. The space fields
 track the thread-local coordinate spaces, current root ordinal slot, and
-inherited space id. The callback fields track pending/resident callback
-delivery, pin the application frame observed by callback code, and prevent
-recursive callback delivery.
+inherited space id. The callback fields track active callback delivery, pin the
+application frame observed by callback code, and prevent recursive callback
+delivery.
 
 `PyInterpreterState` gets:
 
