@@ -141,7 +141,8 @@ no namespace work is performed. When the bytecode thread has changed, Retrace
 examines only registered spaces with switch callbacks. A callback is considered
 only when the instruction about to execute is visible in that callback's space.
 If the current thread is already that space's last visible bytecode thread,
-the callback is dropped.
+the callback is a same-thread no-op and is dropped without producing a
+callback delta.
 
 For a real namespace switch, Retrace computes `previous_delta` for the previous
 visible thread in that same space before advancing the space's last-thread
@@ -598,6 +599,7 @@ The exact per-namespace algorithm is:
 if current instruction is not visible in space S:
     ignore S
 elif S.last_bytecode_thread is current thread:
+    assert no callback delta has been produced
     ignore S
 elif S.last_bytecode_thread is NULL:
     S.last_bytecode_thread = current thread
@@ -616,6 +618,9 @@ the same `(common_prefix_count, *new_suffix)` shape returned by
 `thread_delta(space)`. `current.thread_id` is passed as the cached Python `int`
 for the new thread's stable Retrace id. The callback runs on the new/current
 thread before the bytecode instruction that caused the switch is executed.
+A same-thread observation is never emitted and does not consume the thread's
+delta state; debug builds assert that no callback delta object exists on that
+path.
 
 This makes other namespaces invisible. If A executes in S, B executes outside
 S, then A executes in S again, S observes no switch. If A executes in S, B

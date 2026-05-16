@@ -656,6 +656,18 @@ retrace_prune_space_callback_state(PyInterpreterState *interp,
     PyMem_RawFree(entry);
 }
 
+static PyThreadState *
+retrace_visible_thread_for_space(PyThreadState *tstate, uint32_t space_id)
+{
+    _PyRetraceThreadSpaceState *space = retrace_find_space(tstate, space_id);
+    if (space == NULL) {
+        return NULL;
+    }
+    _PyInterpreterFrame *frame = _PyRetrace_NearestVisibleFrameInSpace(
+        _PyRetrace_CurrentThreadFrame(tstate), space);
+    return frame == NULL ? NULL : tstate;
+}
+
 PyDoc_STRVAR(retrace_set_thread_switch_callback_doc,
 "set_thread_switch_callback($module, callback, space_id=None, /)\n"
 "--\n"
@@ -704,7 +716,8 @@ retrace_set_thread_switch_callback(PyObject *module, PyObject *args)
 
     PyObject *old_callback = entry->thread_switch_callback;
     entry->thread_switch_callback = callback_ref;
-    entry->last_bytecode_thread = NULL;
+    entry->last_bytecode_thread = callback_ref == NULL ?
+        NULL : retrace_visible_thread_for_space(tstate, space_id);
     Py_XDECREF(old_callback);
     retrace_prune_space_callback_state(interp, entry);
     retrace_update_thread_switch_armed(interp);
@@ -1552,39 +1565,6 @@ retrace_thread_handoff_close(PyObject *self_obj, PyObject *Py_UNUSED(ignored))
 }
 
 static PyObject *
-retrace_thread_handoff_start(PyObject *self_obj, PyObject *Py_UNUSED(ignored))
-{
-    PyThreadState *tstate = _PyThreadState_GET();
-    uint64_t current_id = tstate == NULL ? 0 : tstate->retrace.thread_id;
-    if (current_id == 0) {
-        PyErr_SetString(PyExc_RuntimeError, "no Retrace thread id");
-        return NULL;
-    }
-
-    RetraceThreadHandoff *self = (RetraceThreadHandoff *)self_obj;
-    PyThread_acquire_lock(self->lock, WAIT_LOCK);
-    if (self->closed) {
-        PyThread_release_lock(self->lock);
-        PyErr_SetString(PyExc_RuntimeError, "thread handoff is closed");
-        return NULL;
-    }
-
-    RetraceThreadHandoffEntry *current =
-        retrace_thread_handoff_get_entry(self, current_id);
-    if (current == NULL) {
-        PyThread_release_lock(self->lock);
-        return NULL;
-    }
-
-    int status = retrace_thread_handoff_wait_entry_locked(self, current);
-    PyThread_release_lock(self->lock);
-    if (status < 0) {
-        return NULL;
-    }
-    Py_RETURN_NONE;
-}
-
-static PyObject *
 retrace_thread_handoff_to(PyObject *self_obj, PyObject *target_arg)
 {
     uint64_t target_id = 0;
@@ -1654,9 +1634,7 @@ retrace_thread_handoff_dealloc(PyObject *self_obj)
 
 static PyMethodDef retrace_thread_handoff_methods[] = {
     {"close", retrace_thread_handoff_close, METH_NOARGS,
-     PyDoc_STR("Wake sleeping threads and reject future starts or transfers.")},
-    {"start", retrace_thread_handoff_start, METH_NOARGS,
-     PyDoc_STR("Register and park the current replay thread.")},
+     PyDoc_STR("Wake sleeping threads and reject future transfers.")},
     {"to", retrace_thread_handoff_to, METH_O,
      PyDoc_STR("Transfer execution to thread_id and park the current thread.")},
     {NULL, NULL, 0, NULL},
@@ -1668,8 +1646,6 @@ PyDoc_STRVAR(retrace_thread_handoff_doc,
 "\n"
 "Create a replay handoff gate.\n"
 "\n"
-"start() registers the current stable thread id, then parks the thread with\n"
-"the GIL released until another thread transfers execution to it.\n"
 "to(thread_id) marks thread_id runnable, then parks the current thread until\n"
 "another transfer marks it runnable.\n"
 "If timeout is not None, parked waits raise TimeoutError after timeout\n"
@@ -1832,11 +1808,11 @@ _PyRetrace_DeliverThreadSwitchCallback(PyThreadState *previous,
         }
 
         PyThreadState *space_previous = entry->last_bytecode_thread;
+        PyObject *previous_delta = NULL;
         if (space_previous == current) {
+            assert(previous_delta == NULL);
             return;
         }
-
-        PyObject *previous_delta = NULL;
         if (space_previous != NULL) {
             previous_delta = retrace_thread_delta_for_tstate(
                 space_previous, entry->space_id);

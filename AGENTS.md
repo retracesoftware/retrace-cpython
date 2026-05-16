@@ -25,8 +25,9 @@ probes for Retrace.
   `thread_switch(previous_delta, next_thread_id)` callbacks. For each
   coordinate space, bytecode in other spaces is invisible: only bytecode
   visible in that space can update that space's last-thread cursor or emit a
-  switch callback. The callback must run before the first bytecode instruction
-  on the new thread in that space.
+  switch callback. Same-thread observations are no-ops: they must not produce
+  a callback delta, consume delta state, or emit a callback. The callback must
+  run before the first bytecode instruction on the new thread in that space.
 
 ## Common Commands
 

@@ -21,7 +21,7 @@ PROBE_MODULE = "retrace"
 
 CONFIG = ThreadScheduleConfig(
     name="thread-schedule-fresh",
-    thread_count=1,
+    thread_count=2,
     iterations=1,
     timeout=10,
 )
@@ -37,28 +37,48 @@ def run_loop(events, tid, iterations):
 
 
 def target(thread_count, iterations, timeout):
+    module = __import__(PROBE_MODULE)
+    main_ident = _thread.get_ident()
     events = []
-    done = queue.Queue()
 
-    def worker(tid):
+    def run_worker(tid):
+        handoff = module.ThreadHandoff(timeout=timeout)
+        ready = queue.Queue()
+        done = queue.Queue()
+
+        def worker():
+            try:
+                ready.put(_thread.get_ident())
+                handoff.to(main_ident)
+                run_loop(events, tid, iterations)
+                handoff.to(main_ident)
+            except BaseException as exc:
+                done.put(exc)
+            else:
+                done.put(None)
+
+        _thread.start_new_thread(worker, ())
         try:
-            run_loop(events, tid, iterations)
-        except BaseException as exc:
-            done.put(exc)
-        else:
-            done.put(None)
+            try:
+                ident = ready.get(timeout=timeout)
+            except queue.Empty as exc:
+                raise AssertionError("worker did not start") from exc
 
-    for tid in range(thread_count):
-        _thread.start_new_thread(worker, (tid,))
+            while events.count(tid) < iterations:
+                handoff.to(ident)
+        finally:
+            handoff.close()
 
-    for _ in range(thread_count):
         try:
             result = done.get(timeout=timeout)
         except queue.Empty as exc:
             raise AssertionError("worker did not finish") from exc
         if result is not None:
             raise result
-    return events
+
+    for tid in range(thread_count):
+        run_worker(tid)
+    return sorted(events)
 
 
 def assert_event_counts(name, events):

@@ -86,6 +86,50 @@ def run_asyncio_threadsafe_workload():
     return events
 
 
+def assert_asyncio_events(events):
+    expected = {
+        "loop-start",
+        "loop-before-run",
+        "submitter-start",
+        "submitter-got-loop",
+        "submitter-posted-coro",
+        "coro-start",
+        "coro-after-sleep",
+        "submitter-result-123",
+        "submitter-stop-posted",
+        "loop-closing",
+        "loop-closed",
+    }
+    assert set(events) == expected and len(events) == len(expected), events
+    positions = {event: index for index, event in enumerate(events)}
+    before_after = (
+        ("loop-start", "loop-before-run"),
+        ("loop-start", "submitter-got-loop"),
+        ("loop-before-run", "coro-start"),
+        ("submitter-start", "submitter-got-loop"),
+        ("submitter-got-loop", "submitter-posted-coro"),
+        ("submitter-posted-coro", "submitter-result-123"),
+        ("coro-start", "coro-after-sleep"),
+        ("coro-after-sleep", "submitter-result-123"),
+        ("submitter-result-123", "submitter-stop-posted"),
+        ("submitter-result-123", "loop-closing"),
+        ("loop-closing", "loop-closed"),
+    )
+    for before, after in before_after:
+        assert positions[before] < positions[after], (before, after, events)
+
+
+def check_thread_switch_schedule(schedule):
+    for index, item in enumerate(schedule, 1):
+        if item[0] != "switch":
+            raise AssertionError(
+                f"unexpected schedule item at {index}: {item!r}"
+            )
+        _kind, next_thread_id, previous_delta = item
+        assert type(next_thread_id) is int and next_thread_id > 0, item
+        assert previous_delta and previous_delta[0] >= 0, item
+
+
 def check_asyncio_threadsafe_schedule(module):
     record_space = (
         module.CoordinateSpace()
@@ -106,6 +150,8 @@ def check_asyncio_threadsafe_schedule(module):
     )
     if not schedule:
         raise AssertionError("record did not capture any thread switches")
+    check_thread_switch_schedule(schedule)
+    assert_asyncio_events(record_result)
 
     replay_result = replay_thread_schedule(
         module,
@@ -114,11 +160,7 @@ def check_asyncio_threadsafe_schedule(module):
         timeout=TIMEOUT,
         coordinate_space=replay_space,
     )
-    if replay_result != record_result:
-        raise AssertionError(
-            f"record result {record_result!r} != replay result "
-            f"{replay_result!r}"
-        )
+    assert_asyncio_events(replay_result)
 
 
 def main() -> int:

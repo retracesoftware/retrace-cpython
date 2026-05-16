@@ -117,7 +117,7 @@ def check_thread_switch_callback_space_filter(module):
     def run_phase(callback_space_id, expected_label):
         hits = []
         worker_idents = {"root": set(), "space": set()}
-        ready = threading.Barrier(3)
+        ready = threading.Barrier(5)
         stop = threading.Event()
 
         def switch_callback(previous_delta, next_thread_id):
@@ -134,14 +134,28 @@ def check_thread_switch_callback_space_filter(module):
             except BaseException as exc:
                 errors.append(("worker", label, repr(exc)))
 
-        root_thread = threading.Thread(
-            target=worker, args=("root",), name="root-space-callback-filter")
-        space_thread = threading.Thread(
-            target=worker, args=("space",), name="extra-space-callback-filter")
+        root_threads = [
+            threading.Thread(
+                target=worker,
+                args=("root",),
+                name=f"root-space-callback-filter-{index}",
+            )
+            for index in range(2)
+        ]
+        space_threads = [
+            threading.Thread(
+                target=worker,
+                args=("space",),
+                name=f"extra-space-callback-filter-{index}",
+            )
+            for index in range(2)
+        ]
 
         try:
-            root_thread.start()
-            module.run_in_space(space_id, space_thread.start)
+            for thread in root_threads:
+                thread.start()
+            for thread in space_threads:
+                module.run_in_space(space_id, thread.start)
             ready.wait()
             module.set_thread_switch_callback(
                 switch_callback, callback_space_id)
@@ -154,8 +168,10 @@ def check_thread_switch_callback_space_filter(module):
                 time.sleep(0)
         finally:
             stop.set()
-            join_or_fail(root_thread)
-            join_or_fail(space_thread)
+            for thread in root_threads:
+                join_or_fail(thread)
+            for thread in space_threads:
+                join_or_fail(thread)
             module.set_thread_switch_callback(None, callback_space_id)
 
         return worker_idents, hits
@@ -176,6 +192,58 @@ def check_thread_switch_callback_space_filter(module):
         sys.setswitchinterval(old_interval)
 
     assert not errors, errors
+
+
+def check_thread_switch_same_thread_noop(module):
+    old_interval = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+
+    space_id = module.allocate_space_id()
+    stop = threading.Event()
+    ready = threading.Barrier(3)
+    hits = []
+    errors = []
+
+    def switch_callback(previous_delta, next_thread_id):
+        try:
+            hits.append((tuple(previous_delta), next_thread_id))
+        except BaseException as exc:
+            errors.append(("thread_switch callback", repr(exc)))
+
+    def worker():
+        try:
+            ready.wait()
+            run_busy_loop(stop)
+        except BaseException as exc:
+            errors.append(("worker", repr(exc)))
+
+    root_thread = threading.Thread(
+        target=worker,
+        name="same-thread-noop-root",
+    )
+    space_thread = threading.Thread(
+        target=worker,
+        name="same-thread-noop-space",
+    )
+
+    try:
+        root_thread.start()
+        module.run_in_space(space_id, space_thread.start)
+        ready.wait()
+        module.set_thread_switch_callback(switch_callback, space_id)
+
+        deadline = time.monotonic() + 0.5
+        while time.monotonic() < deadline and not hits:
+            time.sleep(0)
+    finally:
+        stop.set()
+        join_or_fail(root_thread)
+        join_or_fail(space_thread)
+        module.set_thread_switch_callback(None, space_id)
+        sys.setswitchinterval(old_interval)
+
+    assert not errors, errors
+    assert not hits, hits[:10]
 
 
 def check_call_at_hits_intended_thread(module):
@@ -471,6 +539,7 @@ def main() -> int:
     check_call_at_past_overshoot(module)
     check_thread_switch_callback_coordinates(module)
     check_thread_switch_callback_space_filter(module)
+    check_thread_switch_same_thread_noop(module)
     check_thread_delta_is_per_thread(module)
     check_thread_switch_callback_identities(module)
 
@@ -480,6 +549,7 @@ def main() -> int:
     print("call_at_past_overshoot=available")
     print("thread_switch_callback_coordinates=available")
     print("thread_switch_callback_space_filter=available")
+    print("thread_switch_same_thread_noop=available")
     print("thread_delta_per_thread=available")
     print("thread_switch_callback_identity=available")
     return 0

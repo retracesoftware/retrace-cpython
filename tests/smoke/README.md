@@ -47,9 +47,10 @@ callback registration through `retrace.callbacks` wraps callbacks with
 `retrace.include`, and overshoot callbacks use the same wrapping path.
 
 `thread_handoff.py` checks the `_retrace.ThreadHandoff` replay gate: stable
-thread-id arguments, durable transfer tokens for targets that are not asleep
-yet, timeout failures, GIL release while parked, repeated ping-pong handoffs,
-and close waking sleepers.
+thread-id arguments, `to(thread_id)` transfer-and-park behavior, timeout
+failures, GIL release while parked, repeated ping-pong handoffs, and close
+waking sleepers. Thread start is not a separate handoff operation; under the
+bytecode switch model a new thread is observed as a normal `thread_switch`.
 
 `thread_id_determinism.py` starts a small `_thread.start_new_thread` loop in
 fresh subprocesses and asserts the returned public thread-id sequence is stable
@@ -78,7 +79,10 @@ that space's last-thread cursor and cannot emit that space's callback. When a
 space observes a switch from its previous visible thread to a different current
 thread, the callback receives the previous thread's delta in that same space
 and the current thread's Retrace thread id. The callback must run before the
-current thread's first visible bytecode instruction in that space.
+current thread's first visible bytecode instruction in that space. If the
+current thread is already the space's last visible thread, the observation is a
+same-thread no-op: no callback delta is produced, no delta state is consumed,
+and no callback is emitted.
 
 `thread_schedule_primitives.py` runs a shared multi-thread workload through the
 schedule controller while exercising an intentionally unlocked counter, a locked

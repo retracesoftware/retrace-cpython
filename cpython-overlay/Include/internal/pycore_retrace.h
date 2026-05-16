@@ -667,11 +667,6 @@ _PyRetrace_SeedThreadState(PyThreadState *parent, PyThreadState *child)
             child,
             inherited_space_id,
             _PyRetrace_ThreadIdSeed(parent));
-    child->retrace.thread_id_object = PyLong_FromUnsignedLongLong(
-        (unsigned long long)child->retrace.thread_id);
-    if (child->retrace.thread_id_object == NULL) {
-        PyErr_Clear();
-    }
     child->retrace.root_space.root_coordinate_hash = child->retrace.thread_id;
     child->retrace.inherited_space_id = inherited_space_id;
     (void)_PyRetrace_SetCurrentSpaceById(child, inherited_space_id);
@@ -695,8 +690,12 @@ _PyRetrace_ThreadIdentObject(PyThreadState *tstate)
     }
     PyObject *ident = tstate->retrace.thread_id_object;
     if (ident == NULL) {
-        PyErr_SetString(PyExc_RuntimeError, "no Retrace thread id object");
-        return NULL;
+        ident = PyLong_FromUnsignedLongLong(
+            (unsigned long long)tstate->retrace.thread_id);
+        if (ident == NULL) {
+            return NULL;
+        }
+        tstate->retrace.thread_id_object = ident;
     }
     return Py_NewRef(ident);
 }

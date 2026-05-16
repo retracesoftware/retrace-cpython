@@ -29,12 +29,12 @@ def assert_raises(exc_type, func, message=None):
 def check_api(module):
     handoff = module.ThreadHandoff()
     assert not callable(handoff)
+    assert not hasattr(handoff, "start")
     assert not hasattr(handoff, "wake")
     assert handoff.to(_thread.get_ident()) is None
     assert module.ThreadHandoff(timeout=None).to(_thread.get_ident()) is None
     assert module.ThreadHandoff(0).to(_thread.get_ident()) is None
 
-    assert_raises(TypeError, lambda: handoff.start(1))
     assert_raises(TypeError, lambda: handoff.to())
     assert_raises(TypeError, lambda: handoff.to(1, 2))
     assert_raises(ValueError, lambda: handoff.to(0))
@@ -46,7 +46,6 @@ def check_api(module):
     target = _thread.get_ident() ^ 1
     if target == 0:
         target = 1
-    assert_raises(RuntimeError, handoff.start, "thread handoff is closed")
     assert_raises(RuntimeError, lambda: handoff.to(target),
                   "thread handoff is closed")
 
@@ -57,13 +56,12 @@ def check_timeout(module):
     if target == 0:
         target = 1
 
-    assert_raises(TimeoutError, handoff.start, "thread handoff timed out")
     assert_raises(TimeoutError, lambda: handoff.to(target),
                   "thread handoff timed out")
     handoff.close()
 
 
-def check_close_wakes_start_waiter(module):
+def check_close_wakes_to_waiter(module):
     handoff = module.ThreadHandoff()
     parked = threading.Event()
     returned = threading.Event()
@@ -71,13 +69,16 @@ def check_close_wakes_start_waiter(module):
 
     def worker():
         try:
+            target = _thread.get_ident() ^ 0x555555555555
+            if target == 0:
+                target = 1
             parked.set()
-            handoff.start()
+            handoff.to(target)
             returned.set()
         except BaseException as exc:
             errors.append(repr(exc))
 
-    thread = threading.Thread(target=worker, name="handoff-close-start")
+    thread = threading.Thread(target=worker, name="handoff-close-to")
     thread.start()
     try:
         assert parked.wait(5.0)
@@ -92,7 +93,7 @@ def check_close_wakes_start_waiter(module):
         thread.join(1.0)
 
 
-def check_start_parks_until_to(module):
+def check_to_round_trip(module):
     handoff = module.ThreadHandoff()
     main_ident = _thread.get_ident()
     ids = {}
@@ -103,95 +104,82 @@ def check_start_parks_until_to(module):
     def worker():
         try:
             ids["worker"] = _thread.get_ident()
-            events.append("worker-before-start")
             ready.set()
-            handoff.start()
-            events.append("worker-after-start")
+            for index in range(2):
+                handoff.to(main_ident)
+                events.append(("worker", index))
             handoff.to(main_ident)
-            events.append("worker-after-to")
+            events.append(("worker", "after-close"))
         except BaseException as exc:
             errors.append(repr(exc))
 
-    thread = threading.Thread(target=worker, name="handoff-start-park")
+    thread = threading.Thread(target=worker, name="handoff-to-round-trip")
     thread.start()
     try:
         assert ready.wait(5.0)
         time.sleep(0.05)
-        assert events == ["worker-before-start"], events
-        handoff.to(ids["worker"])
-        events.append("main-after-to")
+        assert events == [], events
+        for index in range(2):
+            handoff.to(ids["worker"])
+            events.append(("main", index))
+            expected = []
+            for current in range(index + 1):
+                expected.append(("worker", current))
+                expected.append(("main", current))
+            assert events == expected, events
         handoff.close()
         join_or_fail(thread)
         require_no_errors(errors)
         assert events == [
-            "worker-before-start",
-            "worker-after-start",
-            "main-after-to",
-            "worker-after-to",
+            ("worker", 0),
+            ("main", 0),
+            ("worker", 1),
+            ("main", 1),
+            ("worker", "after-close"),
         ], events
     finally:
         handoff.close()
         thread.join(1.0)
 
 
-def check_to_before_start_is_durable(module):
+def check_to_running_thread_parks_on_next_yield(module):
     handoff = module.ThreadHandoff()
+    main_ident = _thread.get_ident()
     ids = {}
     events = []
-    target_ready = threading.Event()
-    controller_ready = threading.Event()
-    controller_entered = threading.Event()
-    allow_target_start = threading.Event()
+    ready = threading.Event()
+    after_yield = threading.Event()
     errors = []
 
-    def target():
+    def worker():
         try:
-            ids["target"] = _thread.get_ident()
-            target_ready.set()
-            assert allow_target_start.wait(5.0)
-            handoff.start()
-            events.append("target-start-returned")
-            handoff.to(ids["controller"])
-            events.append("target-after-to")
+            ids["worker"] = _thread.get_ident()
+            ready.set()
+            time.sleep(0.05)
+            events.append("worker-before-yield")
+            handoff.to(main_ident)
+            events.append("worker-after-yield")
+            after_yield.set()
         except BaseException as exc:
-            errors.append(("target", repr(exc)))
+            errors.append(repr(exc))
 
-    def controller():
-        try:
-            ids["controller"] = _thread.get_ident()
-            controller_ready.set()
-            controller_entered.set()
-            handoff.to(ids["target"])
-            events.append("controller-returned")
-        except BaseException as exc:
-            errors.append(("controller", repr(exc)))
-
-    target_thread = threading.Thread(target=target,
-                                     name="handoff-durable-target")
-    controller_thread = threading.Thread(target=controller,
-                                         name="handoff-durable-controller")
-    target_thread.start()
+    thread = threading.Thread(target=worker, name="handoff-running-target")
+    thread.start()
     try:
-        assert target_ready.wait(5.0)
-        controller_thread.start()
-        assert controller_ready.wait(5.0)
-        assert controller_entered.wait(5.0)
-        time.sleep(0.05)
-        assert events == [], events
-        allow_target_start.set()
-        join_or_fail(controller_thread)
+        assert ready.wait(5.0)
+        handoff.to(ids["worker"])
+        events.append("main-after-worker-yield")
+        assert not after_yield.wait(0.1), events
         assert events == [
-            "target-start-returned",
-            "controller-returned",
+            "worker-before-yield",
+            "main-after-worker-yield",
         ], events
         handoff.close()
-        join_or_fail(target_thread)
+        join_or_fail(thread)
         require_no_errors(errors)
-        assert events[-1] == "target-after-to", events
     finally:
         handoff.close()
-        controller_thread.join(1.0)
-        target_thread.join(1.0)
+        thread.join(1.0)
 
 
 def check_to_releases_waiter_once(module):
@@ -206,7 +194,7 @@ def check_to_releases_waiter_once(module):
         try:
             ids["worker"] = _thread.get_ident()
             ready.set()
-            handoff.start()
+            handoff.to(main_ident)
             events.append("first-turn")
             handoff.to(main_ident)
             events.append("second-turn")
@@ -241,19 +229,18 @@ def check_to_releases_waiter_once(module):
 
 def check_waiter_releases_gil(module):
     handoff = module.ThreadHandoff()
-    main_ident = _thread.get_ident()
-    ids = {}
     parked = threading.Event()
     returned = threading.Event()
     errors = []
 
     def worker():
         try:
-            ids["worker"] = _thread.get_ident()
+            target = _thread.get_ident() ^ 0xAAAAAAAAAAAA
+            if target == 0:
+                target = 1
             parked.set()
-            handoff.start()
+            handoff.to(target)
             returned.set()
-            handoff.to(main_ident)
         except BaseException as exc:
             errors.append(repr(exc))
 
@@ -267,10 +254,9 @@ def check_waiter_releases_gil(module):
             spins += 1
         assert spins > 0
         assert not returned.is_set()
-        handoff.to(ids["worker"])
-        assert returned.is_set()
         handoff.close()
         join_or_fail(thread)
+        assert returned.is_set()
         require_no_errors(errors)
     finally:
         handoff.close()
@@ -290,10 +276,10 @@ def check_ping_pong(module):
         try:
             ids[label] = _thread.get_ident()
             ready.wait()
-            handoff.start()
             for index in range(rounds):
-                events.append((label, index))
                 handoff.to(main_ident)
+                events.append((label, index))
+            handoff.to(main_ident)
         except BaseException as exc:
             errors.append((label, repr(exc)))
 
@@ -305,6 +291,7 @@ def check_ping_pong(module):
     thread_b.start()
     try:
         ready.wait()
+        time.sleep(0.05)
         expected = []
         for index in range(rounds):
             for label in ("a", "b"):
@@ -335,9 +322,9 @@ def main() -> int:
 
     check_api(module)
     check_timeout(module)
-    check_close_wakes_start_waiter(module)
-    check_start_parks_until_to(module)
-    check_to_before_start_is_durable(module)
+    check_close_wakes_to_waiter(module)
+    check_to_round_trip(module)
+    check_to_running_thread_parks_on_next_yield(module)
     check_to_releases_waiter_once(module)
     check_waiter_releases_gil(module)
     check_ping_pong(module)
@@ -346,9 +333,8 @@ def main() -> int:
     print("thread_handoff=available")
     print("thread_handoff_close=available")
     print("thread_handoff_timeout=available")
-    print("thread_handoff_start=available")
     print("thread_handoff_to=available")
-    print("thread_handoff_durable_to=available")
+    print("thread_handoff_running_to=available")
     print("thread_handoff_to_once=available")
     print("thread_handoff_releases_gil=available")
     print("thread_handoff_ping_pong=available")
